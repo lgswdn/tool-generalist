@@ -61,7 +61,7 @@ def object_goal_distance_tanh(
     object_ee_distance_left = torch.norm(obj_pos_w - ee_left, dim=1)
     object_ee_distance_right = torch.norm(obj_pos_w - ee_right, dim=1)
     object_ee_distance = torch.minimum(object_ee_distance_left, object_ee_distance_right)
-    obj_ee_dist_cond = object_ee_distance > obj_ee_distance_threshold
+    obj_ee_dist_cond = object_ee_distance < obj_ee_distance_threshold
     
     # Get target position and orientation in environment coordinates
     des_pos_env = command[:, :3]
