@@ -23,13 +23,7 @@ This project is a Non-Prehensile Manipulation example/template built on Isaac La
 
 ## Prerequisites
 
-- Install Isaac Lab (Conda install recommended). Official guide: `https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html`
-- Ensure this project and Isaac Lab are available in the same Python interpreter
-- For distributed training (`--distributed`), minimum `rsl-rl-lib>=2.3.1` (checked by scripts)
-
-> Tip: If Isaac Lab is not directly available in your current environment, use the Isaac Lab launcher to run Python:
-> - Linux: `./isaaclab.sh -p python scripts/train.py ...`
-> - Windows: `isaaclab.bat -p python scripts/train.py ...`
+- Install Isaac-sim 4.5 and Isaac Lab 2.2.0 (Install from source code recommended). Official guide: `https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/source_installation.html`
 
 
 ## Install This Project (editable)
@@ -56,7 +50,21 @@ gym.register(
 
 ## Data/Assets Paths (Important)
 
-The environment loads object assets (USD/OBJ) from local directories defined in code. Update paths to match your machine:
+The environment loads object assets (USD/OBJ) from local directories defined in code. 
+
+First, Download DGN datasets from [here](https://github.com/iMSquared/corn?tab=readme-ov-file)
+
+```
+  mkdir -p /path/to/data/DGN
+  tar -xzf DGN.tar.gz -C /path/to/data/DGN
+```
+
+Then use scripts/transform_obj_usd.sh to transform obj to usd and obtain normalized obj(modified obj dataset path in the scripts)
+```
+  bash scripts/transform_obj_usd.sh
+```
+
+Finally, update paths to match your machine:
 
 ```234:248:source/IsaacLab_nonPrehensile/IsaacLab_nonPrehensile/tasks/manager_based/isaaclab_nonprehensile/env.py
 object = RigidObjectCfg(
@@ -76,9 +84,6 @@ object = RigidObjectCfg(
 )
 ```
 
-- `yes.json` must be a list of strings in the form `"<name>-<scale>"`.
-- `usd_dir/obj_dir` must contain `<name>/<name>.usd` and `<name>.obj` respectively.
-- Missing files are skipped with warnings.
 
 
 ## Quickstart
@@ -89,8 +94,8 @@ object = RigidObjectCfg(
 python scripts/train.py \
   --task=Isaac-nonPrehensile-Franka-v0 \
   --experiment_name=franka_nonprehensile \
-  --num_envs=64 \
-  --max_iterations=2000
+  --num_envs=4096 \
+  --video --headless
 ```
 
 Common options:
@@ -126,7 +131,8 @@ python scripts/eval.py \
 python scripts/play.py \
   --task=Isaac-nonPrehensile-Franka-v0 \
   --experiment_name=franka_nonprehensile \
-  --video --video_length=300
+  --num_envs 64 \
+  --video --headless
 ```
 
 - Exports to `logs/.../exported/`: `policy.pt` (JIT) and `policy.onnx`
