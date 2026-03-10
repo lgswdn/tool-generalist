@@ -2,6 +2,8 @@
 
 This project is a Non-Prehensile Manipulation example/template built on Isaac Lab for Reinforcement Learning (RSL-RL) training and evaluation. It uses the Franka Panda arm, supports multi-asset spawning and domain randomization, tracks success rates, and provides end-to-end train/evaluate/play flows with JIT/ONNX export.
 
+This repository is an Isaac Lab implementation and adaptation of [CORN](https://sites.google.com/view/contact-non-prehensile) (Contact-based Object Representation for Nonprehensile manipulation).
+
 - **Env framework**: Manager-Based RL Env (Isaac Lab)
 - **Algorithm**: RSL-RL (PPO)
 - **Assets**: Batch loading from a JSON list and local USD/OBJ directories
@@ -50,19 +52,9 @@ gym.register(
 
 ## Data/Assets Paths (Important)
 
-The environment loads object assets (USD/OBJ) from local directories defined in code. 
+The environment loads object assets (USD/OBJ) from local directories defined in code.
 
-First, Download DGN datasets from [here](https://github.com/iMSquared/corn?tab=readme-ov-file)
-
-```
-  mkdir -p /path/to/data/DGN
-  tar -xzf DGN.tar.gz -C /path/to/data/DGN
-```
-
-Then use scripts/transform_obj_usd.sh to transform obj to usd and obtain normalized obj(modified obj dataset path in the scripts)
-```
-  bash scripts/transform_obj_usd.sh
-```
+Download the pre-converted dataset from [Hugging Face (Steve3zz/DGN_usd)](https://huggingface.co/datasets/Steve3zz/DGN_usd), unzip it on your machine, and then update the asset paths in the environment config to point to the extracted folder.
 
 Finally, update paths to match your machine:
 
@@ -70,7 +62,7 @@ Finally, update paths to match your machine:
 object = RigidObjectCfg(
     prim_path="{ENV_REGEX_NS}/Object",
     spawn=sim_utils.MultiAssetSpawnerCfg(
-        assets_cfg=load_object_candidates("/home/steve/Downloads/DGN_clean/yes.json", usd_dir="/home/steve/Downloads/DGN_clean/coacd_usd", obj_dir="/home/steve/Downloads/DGN_clean/coacd_normalized"),
+        assets_cfg=load_object_candidates("/home/steve/Downloads/DGN/yes.json", usd_dir="/home/steve/Downloads/DGN/coacd_usd_convexhull", obj_dir="/home/steve/Downloads/DGN/coacd_normalized"),
         random_choice=False,
         rigid_props=RigidBodyPropertiesCfg(
             solver_position_iteration_count=16,
@@ -94,7 +86,7 @@ After installing Isaac Lab, run the following commands to install specialized de
 
 ```bash
 # Install Flash Attention (avoiding build isolation for CUDA compatibility)
-pip install flash_attn==1.0.7 --no-build-isolation
+pip install flash_attn==2.8.3 --no-build-isolation
 
 # Install debugging tools
 pip install icecream
@@ -174,6 +166,19 @@ python scripts/random_agent.py --task=Isaac-nonPrehensile-Franka-v0
 > Note: A zero-action agent is not provided. You can adapt from `random_agent.py` if needed.
 
 
+## Training Results
+
+**Training video** — Demonstrates the learned policy performing non-prehensile manipulation:
+
+<video src="asset/video.mp4" controls width="1080"></video>
+
+**Training curve** — Reward and success rate vs. environment steps:
+
+![Training curve](asset/curve.png)
+
+These results were obtained on a **single RTX 4090D** with **4096 parallel environments**, trained for approximately **48 hours**.
+
+
 ## Environment Highlights (excerpt)
 
 - Franka Panda joint workspace and initial pose are customizable
@@ -187,29 +192,6 @@ python scripts/random_agent.py --task=Isaac-nonPrehensile-Franka-v0
 - Training/Eval logs: `logs/rsl_rl/<experiment_name>/<time>...`
 - Videos: `logs/.../videos/{train|eval|play}`
 - Exported models: `logs/.../exported/{policy.pt, policy.onnx}`
-
-
-## IDE Indexing Tips (optional)
-
-If VSCode/Pylance cannot index modules correctly, add to `.vscode/settings.json`:
-
-```json
-{
-  "python.analysis.extraPaths": [
-    "<path-to-repo>/source/IsaacLab_nonPrehensile"
-  ]
-}
-```
-
-To reduce memory usage, exclude unused Omniverse extension paths as needed.
-
-
-## Troubleshooting
-
-- **Cannot import Isaac Lab modules**: Ensure installation into the same interpreter; or run via the Isaac Lab launcher (`./isaaclab.sh -p python ...`).
-- **No/too few assets loaded**: Verify JSON and USD/OBJ directories in `env.py`; the console shows skipped assets.
-- **Distributed training reports RSL-RL version**: Install `rsl-rl-lib==2.3.1` as indicated.
-
 
 ## License
 
