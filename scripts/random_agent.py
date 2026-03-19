@@ -51,18 +51,31 @@ def main():
     print(f"[INFO]: Gym observation space: {env.observation_space}")
     print(f"[INFO]: Gym action space: {env.action_space}")
     # reset environment
+    print("Resetting environment...")
     env.reset()
+    print("Environment reset complete. Starting simulation...")
     # simulate environment
-    while simulation_app.is_running():
+    for i in range(200):
+        print(f"Step {i}/200", flush=True)
         # run everything in inference mode
         with torch.inference_mode():
+            if i == 0:
+                print("Entered inference mode", flush=True)
             # sample actions from -1 to 1
             actions = 2 * torch.rand(env.action_space.shape, device=env.unwrapped.device) - 1
+            if i == 0:
+                print(f"Sampled actions with shape {actions.shape}", flush=True)
             # apply actions
+            if i == 0:
+                print("About to call env.step()...", flush=True)
             env.step(actions)
+            if i == 0:
+                print("First env.step() completed!", flush=True)
 
     # close the simulator
+    print("Closing environment and saving video...")
     env.close()
+    print("Done!")
 
 
 if __name__ == "__main__":

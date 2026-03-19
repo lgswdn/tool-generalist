@@ -172,6 +172,11 @@ class Cloud:
         else:
             stable_poses, probs = self._stable_poses_cache
 
+        # Handle case where stable poses are disabled (None)
+        if stable_poses is None:
+            stable_poses = []
+            probs = []
+
         if sample_num > len(stable_poses):
             sample_num = len(stable_poses)
         stable_poses = stable_poses[:sample_num]

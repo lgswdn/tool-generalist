@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import torch
 from typing import TYPE_CHECKING
-
 from isaaclab.assets import RigidObject
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils.math import sample_uniform
+import isaacsim.core.utils.prims as prim_utils
 import isaaclab.sim as sim_utils
+import omni.usd
+from pxr import Usd, UsdPhysics, Gf, UsdGeom
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -253,3 +255,195 @@ def randomize_terrain_material(
     import isaaclab.sim as sim_utils
     sim_utils.bind_physics_material(collision_prim.GetPrimPath(), physics_material_path)
 
+def compute_head_area_offsets_from_usd(env) -> "torch.Tensor":
+    """Compute per-env head area offsets in the tool's LOCAL frame using USD bounding boxes.
+
+    Uses ComputeLocalBound (mesh-local, unaffected by world rotation) + prim scale to
+    correctly map head_area_norm (normalized to the OBJ mesh bbox) to a scaled local offset.
+    """
+    from pxr import UsdGeom, Usd
+
+    eef_asset = env.scene["eef"]
+    assets_cfg = eef_asset.cfg.spawn.assets_cfg
+
+    head_area_offsets = torch.zeros(env.num_envs, 3, device=env.device)
+
+    bbox_cache = UsdGeom.BBoxCache(
+        Usd.TimeCode.Default(), includedPurposes=[UsdGeom.Tokens.default_]
+    )
+
+    for env_id in range(env.num_envs):
+        asset_idx = env_id % len(assets_cfg)
+        tool_cfg = assets_cfg[asset_idx]
+
+        head_area_norm = getattr(tool_cfg, "head_area_norm", None)
+        if head_area_norm is None:
+            if env_id < 3:
+                print(f"[DEBUG head_area env_{env_id}] No head_area_norm on cfg, offset=[0,0,0]")
+            continue
+
+        mid_norm = [(head_area_norm[0][i] + head_area_norm[1][i]) / 2.0 for i in range(3)]
+
+        prim_path = f"/World/envs/env_{env_id}/eef"
+        prim = prim_utils.get_prim_at_path(prim_path)
+        if not prim or not prim.IsValid():
+            print(f"[WARNING head_area] Prim not found: {prim_path}")
+            continue
+
+        # Local bbox: in the prim's own un-scaled coordinate space (= OBJ mesh space).
+        # This is rotation-independent, so head_area_norm interpolation is always correct.
+        bbox_local = bbox_cache.ComputeLocalBound(prim)
+        bbox_range = bbox_local.GetRange()
+        bbox_min_l = [bbox_range.GetMin()[i] for i in range(3)]
+        bbox_max_l = [bbox_range.GetMax()[i] for i in range(3)]
+
+        # Head area position in un-scaled local (OBJ) space
+        head_area_unscaled = [
+            bbox_min_l[i] + mid_norm[i] * (bbox_max_l[i] - bbox_min_l[i])
+            for i in range(3)
+        ]
+
+        # Extract scale from the prim's own xformOps (set by UsdFileCfg.scale at spawn)
+        scale = [1.0, 1.0, 1.0]
+        xform_ops = UsdGeom.Xformable(prim).GetOrderedXformOps()
+        for op in xform_ops:
+            if op.GetOpType() == UsdGeom.XformOp.TypeScale:
+                s = op.Get()
+                scale = [s[0], s[1], s[2]]
+                break
+
+        # Scale the local offset: this is the fixed vector in link8's local frame
+        head_area_local = [head_area_unscaled[i] * scale[i] for i in range(3)]
+        head_area_offsets[env_id] = torch.tensor(
+            head_area_local, dtype=torch.float32, device=env.device
+        )
+
+        if env_id < 3:
+            print(f"[DEBUG head_area env_{env_id}] mid_norm={[round(v,3) for v in mid_norm]}")
+            print(f"[DEBUG head_area env_{env_id}] bbox_local_min={[round(v,4) for v in bbox_min_l]} max={[round(v,4) for v in bbox_max_l]}")
+            print(f"[DEBUG head_area env_{env_id}] scale={[round(v,4) for v in scale]}")
+            print(f"[DEBUG head_area env_{env_id}] head_area_local={[round(v,4) for v in head_area_local]}")
+
+    print(f"[DEBUG head_area] Done. offsets[0]={head_area_offsets[0].tolist()}")
+    return head_area_offsets
+
+
+def adjust_eef_origin_to_base_center(env, env_ids):
+    """Shift tool mesh so base_center becomes the geometric center."""
+    if env_ids is None:
+        env_ids = range(env.num_envs)
+
+    eef_asset = env.scene["eef"]
+    assets_cfg = eef_asset.cfg.spawn.assets_cfg
+    print(f"[DEBUG adjust_eef_origin] Processing {len(list(env_ids))} environments")
+
+    for i in env_ids:
+        ee_root_path = f"/World/envs/env_{i}/eef"
+        print(f"\n[DEBUG adjust_eef_origin] === Env {i} ===")
+        print(f"[DEBUG adjust_eef_origin] Tool path: {ee_root_path}")
+
+        ee_prim = prim_utils.get_prim_at_path(ee_root_path)
+        if not ee_prim:
+            print(f"[DEBUG adjust_eef_origin] ERROR: Tool prim not found at {ee_root_path}")
+            continue
+
+        # Get tool config and base_center
+        asset_idx = i % len(assets_cfg)
+        tool_cfg = assets_cfg[asset_idx]
+        base_center_norm = torch.tensor(tool_cfg.base_center, device=env.device)
+        print(f"[DEBUG adjust_eef_origin] Tool config index: {asset_idx}")
+        print(f"[DEBUG adjust_eef_origin] base_center_norm: {base_center_norm.tolist()}")
+
+        # Compute bbox
+        bbox_cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), includedPurposes=[UsdGeom.Tokens.default_])
+        bbox = bbox_cache.ComputeLocalBound(ee_prim)
+        bbox_range = bbox.GetRange()
+        bbox_min = torch.tensor([bbox_range.GetMin()[0], bbox_range.GetMin()[1], bbox_range.GetMin()[2]], device=env.device)
+        bbox_max = torch.tensor([bbox_range.GetMax()[0], bbox_range.GetMax()[1], bbox_range.GetMax()[2]], device=env.device)
+        bbox_size = bbox_max - bbox_min
+        print(f"[DEBUG adjust_eef_origin] BBox min: {bbox_min.tolist()}")
+        print(f"[DEBUG adjust_eef_origin] BBox max: {bbox_max.tolist()}")
+        print(f"[DEBUG adjust_eef_origin] BBox size: {bbox_size.tolist()}")
+
+        # Compute offset to shift mesh: (0.5 - base_center_norm) * bbox_size
+        offset = (0.5 - base_center_norm) * bbox_size
+        print(f"[DEBUG adjust_eef_origin] Computed offset: {offset.tolist()}")
+
+        # Apply transform to mesh child prim
+        child_found = False
+        for child in ee_prim.GetChildren():
+            child_type = child.GetTypeName()
+            print(f"[DEBUG adjust_eef_origin] Checking child: {child.GetPath()} (type: {child_type})")
+            if child.IsA(UsdGeom.Mesh) or child.IsA(UsdGeom.Xform):
+                xform = UsdGeom.Xformable(child)
+                existing_ops = xform.GetOrderedXformOps()
+                print(f"[DEBUG adjust_eef_origin] Found transformable child, existing ops: {len(existing_ops)}")
+
+                # Get existing translate op or create if doesn't exist
+                translate_op = existing_ops[0] if existing_ops else xform.AddTranslateOp()
+                translate_op.Set(Gf.Vec3d(offset[0].item(), offset[1].item(), offset[2].item()))
+                print(f"[DEBUG adjust_eef_origin] Applied transform to {child.GetPath()}")
+                child_found = True
+                break
+
+        if not child_found:
+            print(f"[DEBUG adjust_eef_origin] WARNING: No Mesh or Xform child found for env {i}")
+
+def update_eef_pose(env, env_ids=None):
+    """Teleport eef tool to follow robot end effector each step."""
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+
+    robot = env.scene["robot"]
+    eef = env.scene["eef"]
+
+    # Get panda_link7 body pose (flange/wrist)
+    robot_cfg = SceneEntityCfg("robot", body_names=["panda_link8"])
+    robot_cfg.resolve(env.scene)
+    link7_idx = robot_cfg.body_ids[0]
+
+    # Copy link7 pose to tool
+    eef.data.root_state_w[env_ids, :3] = robot.data.body_state_w[env_ids, link7_idx, :3]
+    eef.data.root_state_w[env_ids, 3:7] = robot.data.body_state_w[env_ids, link7_idx, 3:7]
+    eef.write_root_state_to_sim(eef.data.root_state_w, env_ids=env_ids)
+
+    # Debug: print eef base vs head area once every 200 calls
+    if not hasattr(env, '_update_eef_debug_counter'):
+        env._update_eef_debug_counter = 0
+    env._update_eef_debug_counter += 1
+    if env._update_eef_debug_counter % 2 == 1:
+        from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.mdp.observations import get_head_area_pos_w
+        eef_base_w = eef.data.root_state_w[0, :3].tolist()
+        head_area_w = get_head_area_pos_w(env)[0].tolist()
+        offsets = getattr(env, '_head_area_offsets', None)
+        offset0 = offsets[0].tolist() if offsets is not None else None
+        print(f"[DEBUG update_eef step={env._update_eef_debug_counter}]")
+        print(f"  eef_base_w  (env0): {[round(v,4) for v in eef_base_w]}")
+        print(f"  head_area_w (env0): {[round(v,4) for v in head_area_w]}")
+        print(f"  _head_area_offsets[0]: {[round(v,4) for v in offset0] if offset0 else None}")
+
+    # Visualize eef tool position
+    if getattr(env.cfg, 'visualize_eef_position', False):
+        from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.mdp.observations import get_head_area_pos_w
+        head_area_pos_w = get_head_area_pos_w(env)  # (N, 3) – actual head area world pos
+        # Build 7D pose for visualizer: [x, y, z, qw, qx, qy, qz]
+        head_area_pose_7d = torch.cat([head_area_pos_w, eef.data.root_state_w[:, 3:7]], dim=-1)
+        visualize_eef_position(env, head_area_pose_7d)
+
+def visualize_eef_position(env, eef_pose_7d: torch.Tensor):
+    """Visualize the eef tool position."""
+    try:
+        from isaaclab.markers import VisualizationMarkers
+        from isaaclab.markers.config import FRAME_MARKER_CFG
+
+        marker_cfg = FRAME_MARKER_CFG.copy()
+        marker_cfg.prim_path = "/Visuals/EefPosition"
+        marker_cfg.markers["frame"].scale = (0.1, 0.1, 0.1)
+        env._eef_position_visualizer = VisualizationMarkers(marker_cfg)
+        print(f"[DEBUG visualize_eef] Visualizer created at /Visuals/EefPosition")
+
+        world_positions = eef_pose_7d[:, :3]
+        quaternions = eef_pose_7d[:, 3:7]
+        env._eef_position_visualizer.visualize(translations=world_positions, orientations=quaternions)
+    except Exception as e:
+        print(f"[ERROR visualize_eef_position] {type(e).__name__}: {e}")

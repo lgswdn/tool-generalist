@@ -1,0 +1,46 @@
+[DEBUG adjust_eef_origin] Processing 1 environments
+
+[DEBUG adjust_eef_origin] === Env 0 ===
+[DEBUG adjust_eef_origin] Tool path: /World/envs/env_0/eef
+[DEBUG adjust_eef_origin] Tool config index: 0
+[DEBUG adjust_eef_origin] base_center_norm: [0.5138314366340637, 0.5496219396591187, 0.14269112050533295]
+[DEBUG adjust_eef_origin] BBox min: [0.04103179648518562, -0.07794340699911118, 0.8488249778747559]
+[DEBUG adjust_eef_origin] BBox max: [0.1183243989944458, 0.07702919840812683, 1.2119479179382324]
+[DEBUG adjust_eef_origin] BBox size: [0.07729260623455048, 0.1549726128578186, 0.36312294006347656]
+[DEBUG adjust_eef_origin] base_center_actual: [0.08074717223644257, 0.007232941687107086, 0.9006394147872925]
+[DEBUG adjust_eef_origin] Computed offset: [-0.08074717223644257, -0.007232941687107086, -0.9006394147872925]
+[DEBUG adjust_eef_origin] Checking child: /World/envs/env_0/eef/link_coacd_convex_piece_0 (type: Xform)
+[DEBUG adjust_eef_origin] Found transformable child, existing ops: 3
+[DEBUG adjust_eef_origin]   Op 0: xformOp:translate = (0, 0, 0)
+[DEBUG adjust_eef_origin]   Op 1: xformOp:orient = (1, 0, 0, 0)
+[DEBUG adjust_eef_origin]   Op 2: xformOp:scale = (1, 1, 1)
+[DEBUG adjust_eef_origin] Modified existing translate op: (-0.08074717223644257, -0.007232941687107086, -0.9006394147872925)
+[DEBUG adjust_eef_origin] Total ops after: 3
+[DEBUG adjust_eef_origin]   Op 0: xformOp:translate = (-0.08074717223644257, -0.007232941687107086, -0.9006394147872925)
+[DEBUG adjust_eef_origin]   Op 1: xformOp:orient = (1, 0, 0, 0)
+[DEBUG adjust_eef_origin]   Op 2: xformOp:scale = (1, 1, 1)
+
+[DEBUG] Reset complete
+[DEBUG] Starting step 0
+[DEBUG] About to call env.step() for step 0
+
+[DEBUG update_eef_pose] === First call debug ===
+[DEBUG update_eef_pose] link7 pos: [0.5454933643341064, 1.825392246246338e-07, 0.48508113622665405]
+[DEBUG update_eef_pose] link7 quat [w,x,y,z]: [2.3820250305561785e-07, 0.9981218576431274, 1.8493228992610966e-07, -0.061261847615242004]
+[DEBUG update_eef_pose] bbox_min: [0.0248823631554842, -0.07938998937606812, 0.6686970591545105]
+[DEBUG update_eef_pose] bbox_size: [0.07729260623455048, 0.1549725979566574, 0.36312299966812134]
+[DEBUG update_eef_pose] base_center_norm: [0.5138314366340637, 0.5496219396591187, 0.14269112050533295]
+[DEBUG update_eef_pose] base_center_local: [0.0645977333188057, 0.0057863518595695496, 0.7205114960670471]
+[DEBUG update_eef_pose] Rotation matrix:
+  [0.9925, 0.0000, -0.1223]
+  [0.0000, -1.0000, -0.0000]
+  [-0.1223, 0.0000, -0.9925]
+[DEBUG update_eef_pose] base_center_world (offset): [-0.02400106005370617, -0.005786691792309284, -0.7230035662651062]
+[DEBUG update_eef_pose] tool pos (link7 - offset): [0.5694944262504578, 0.005786874331533909, 1.2080847024917603]
+[DEBUG update_eef_pose] Expected base_center in world: [0.5454933643341064, 1.825392246246338e-07, 0.48508113622665405]
+[DEBUG update_eef_pose] Actual base_center in world: [0.5454933643341064, 1.825392246246338e-07, 0.48508113622665405]
+[DEBUG update_eef_pose] Difference: [0.0, 0.0, 0.0]
+[DEBUG] env.step() completed for step 0
+[INFO] Step 0/30
+[DEBUG] Starting step 1
+[DEBUG] About to call env.step() for step 1

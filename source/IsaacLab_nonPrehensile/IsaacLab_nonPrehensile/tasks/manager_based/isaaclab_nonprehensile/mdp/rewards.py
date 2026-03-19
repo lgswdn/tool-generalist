@@ -16,6 +16,8 @@ from isaaclab.utils.math import combine_frame_transforms
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
+from .observations import get_head_area_pos_w
+
 
 def object_ee_distance_tanh(
     env: ManagerBasedRLEnv,
@@ -26,16 +28,12 @@ def object_ee_distance_tanh(
     """Reward the agent for reaching the object using tanh-kernel."""
     # extract the used quantities (to enable type-hinting)
     object: RigidObject = env.scene[object_cfg.name]
-    ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
     # Target object position: (num_envs, 3)
     obj_pos_w = object.data.root_pos_w
-    # End-effector position: (num_envs, 3)
-    ee_left = ee_frame.data.target_pos_w[..., 1, :]
-    ee_right = ee_frame.data.target_pos_w[..., 2, :]
+    # Head area world position (panda_link8 + rotated per-env local offset): (num_envs, 3)
+    ee_pos = get_head_area_pos_w(env)
     # Distance of the end-effector to the object: (num_envs,)
-    object_ee_distance_left = torch.norm(obj_pos_w - ee_left, dim=1)
-    object_ee_distance_right = torch.norm(obj_pos_w - ee_right, dim=1)
-    object_ee_distance = torch.minimum(object_ee_distance_left, object_ee_distance_right)
+    object_ee_distance = torch.norm(obj_pos_w - ee_pos, dim=1)
 
     return 1 - torch.tanh(object_ee_distance / std)
 
@@ -51,16 +49,12 @@ def object_goal_distance_tanh(
     """Reward the agent for reaching the object using tanh-kernel."""
     object: RigidObject = env.scene[object_cfg.name]
     command = env.command_manager.get_command(command_name)
-    ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
+    # Head area world position: (num_envs, 3)
+    ee_pos = get_head_area_pos_w(env)
     # Target object position: (num_envs, 3)
     obj_pos_w = object.data.root_pos_w
-    # End-effector position: (num_envs, 3)
-    ee_left = ee_frame.data.target_pos_w[..., 1, :]
-    ee_right = ee_frame.data.target_pos_w[..., 2, :]
     # Distance of the end-effector to the object: (num_envs,)
-    object_ee_distance_left = torch.norm(obj_pos_w - ee_left, dim=1)
-    object_ee_distance_right = torch.norm(obj_pos_w - ee_right, dim=1)
-    object_ee_distance = torch.minimum(object_ee_distance_left, object_ee_distance_right)
+    object_ee_distance = torch.norm(obj_pos_w - ee_pos, dim=1)
     obj_ee_dist_cond = object_ee_distance < obj_ee_distance_threshold
     
     # Get target position and orientation in environment coordinates

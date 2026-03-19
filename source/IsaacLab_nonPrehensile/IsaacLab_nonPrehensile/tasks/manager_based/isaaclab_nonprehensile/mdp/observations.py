@@ -91,6 +91,28 @@ def _dbg_cloud(env: "ManagerBasedRLEnv", name: str, cloud_env: torch.Tensor) -> 
     env._dbg_cloud_cnt = cnt + 1
 
 
+def get_head_area_pos_w(env: "ManagerBasedRLEnv") -> torch.Tensor:
+    """Return the head area center in world space for every environment.
+
+    Uses the robot's panda_link8 pose from the ee_frame sensor plus the
+    per-env local offset stored in env._head_area_offsets (computed once in
+    post_reset via USD bounding-box queries).
+
+    Returns:
+        torch.Tensor: Shape (num_envs, 3) – world-space positions.
+    """
+    ee_frame = env.scene["ee_frame"]
+    link8_pos_w = ee_frame.data.target_pos_w[..., 0, :]   # (N, 3)
+
+    if not (hasattr(env, "_head_area_offsets") and env._head_area_offsets is not None):
+        return link8_pos_w
+
+    link8_quat_w = ee_frame.data.target_quat_w[..., 0, :]  # (N, 4)
+    R = matrix_from_quat(link8_quat_w)                      # (N, 3, 3)
+    offset = env._head_area_offsets                         # (N, 3)
+    return link8_pos_w + torch.bmm(R, offset.unsqueeze(-1)).squeeze(-1)
+
+
 @profile_obs
 def hand_state(
     env: ManagerBasedRLEnv,
@@ -102,11 +124,9 @@ def hand_state(
         torch.Tensor: Shape (num_envs, 9) containing [x,y,z, r11,r12,r13, r21,r22,r23]
     """
     ee_frame = env.scene[ee_frame_cfg.name]
-    
-    # Get EE position and orientation in world coordinates
-    ee_pos_l_w = ee_frame.data.target_pos_w[..., 1, :]  # (num_envs, 3)
-    ee_pos_r_w = ee_frame.data.target_pos_w[..., 2, :]  # (num_envs, 3)
-    ee_pos_w = (ee_pos_l_w + ee_pos_r_w) / 2
+
+    # Head area world position (panda_link8 + rotated per-env local offset)
+    ee_pos_w = get_head_area_pos_w(env)          # (num_envs, 3)
     ee_quat_w = ee_frame.data.target_quat_w[..., 0, :]  # (num_envs, 4)
 
     # Convert to environment coordinates
@@ -585,7 +605,10 @@ def get_object_pointcloud(
     num_assets = len(assets_cfg)
     for asset_idx in range(num_assets):
         # Build env indices for this asset by stepping
-        env_indices_tensor = torch.arange(asset_idx, num_envs, num_assets, device=device, dtype=torch.long)
+        if asset_idx >= num_envs:
+            env_indices_tensor = torch.tensor([], device=device, dtype=torch.long)
+        else:
+            env_indices_tensor = torch.arange(asset_idx, num_envs, num_assets, device=device, dtype=torch.long)
         if env_indices_tensor.numel() == 0:
             continue
         obj_path = assets_cfg[asset_idx].obj_path

@@ -103,7 +103,8 @@ def load_object_candidates(
 
         usd_cfg = sim_utils.UsdFileCfg(
             usd_path=usd_path,
-            scale=(1.0, 1.0, 1.0),
+            scale=(0.01, 0.01, 0.01),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.3, 0.3)),
             rigid_props=RigidBodyPropertiesCfg(
                 solver_position_iteration_count=16,
                 solver_velocity_iteration_count=1,
@@ -117,6 +118,47 @@ def load_object_candidates(
         assets.append(usd_cfg)
     return assets
 
+def load_tools_from_json(tools_json_path, usd_dir, obj_dir, color=(0.8, 0.3, 0.3)):
+    """Load tools from tools.json with head_area metadata and randomized scale."""
+    import random
+    with open(tools_json_path, "r") as f:
+        tools_data = json.load(f)
+
+    assets = []
+    for tool in tools_data:
+        name = tool["name"]
+        usd_path = os.path.join(usd_dir, name, f"{name}.usd")
+        obj_path = os.path.join(obj_dir, f"{name}.obj")
+
+        if not os.path.exists(usd_path):
+            print(f"[WARNING] Tool USD not found: {usd_path}, skipping...")
+            continue
+
+        # Randomize scale (0.1 to 0.2 range as absolute scale, matching original behavior)
+        scale_factor = random.uniform(0.1, 0.2)
+        final_scale = scale_factor  # Use directly, not multiplied by TOOL_SCALE
+
+        # Store raw head_area normalized [0,1] data for later USD-bbox-based computation
+        head_area_norm = tool.get("head_area", None)  # [[min_xyz], [max_xyz]] in [0,1]
+
+        usd_cfg = sim_utils.UsdFileCfg(
+            usd_path=usd_path,
+            scale=(final_scale, final_scale, final_scale),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=color),
+            rigid_props=RigidBodyPropertiesCfg(
+                solver_position_iteration_count=16,
+                solver_velocity_iteration_count=1,
+                max_angular_velocity=1000.0,
+                max_linear_velocity=1000.0,
+                max_depenetration_velocity=5.0,
+                disable_gravity=True,
+            ),
+        )
+        usd_cfg.obj_path = obj_path
+        usd_cfg.head_area_norm = head_area_norm  # [[min_xyz],[max_xyz]] normalized [0,1], or None
+        assets.append(usd_cfg)
+    return assets
+
 
 # Helper for point cloud caching, compatible with IsaacLab multi-env
 def get_cached_cloud(obj_path):
@@ -125,6 +167,9 @@ def get_cached_cloud(obj_path):
         _CLOUD_CACHE[key] = Cloud(obj_path)  # No scale parameter needed
     return _CLOUD_CACHE[key]
 
+
+# Tool scale factor (applied to USD and calculations)
+TOOL_SCALE = 0.01
 
 default_joint_pos = FRANKA_PANDA_HIGH_PD_CFG.init_state.joint_pos.copy()
 # User-defined joint workspace for Franka arm (7 DOF)
@@ -143,9 +188,13 @@ custom_joint_init = {
     "panda_joint5": _joint_init_mid[4],
     "panda_joint6": _joint_init_mid[5],
     "panda_joint7": _joint_init_mid[6],
-    "panda_finger_joint.*": 0.0,
 }
-
+bare_franka_path = os.path.abspath("/mnt/afs/zhuwenxuan/project/inp/IsaacLab-nonPrehensile/bare_panda_instanceable.usd")
+arm_only_actuators = {
+    actuator_name: actuator_config 
+    for actuator_name, actuator_config in FRANKA_PANDA_HIGH_PD_CFG.actuators.items() 
+    if "hand" not in actuator_name and "finger" not in actuator_name
+}
 
 @configclass
 class NonPrehensileSceneCfg(InteractiveSceneCfg):
@@ -192,49 +241,11 @@ class NonPrehensileSceneCfg(InteractiveSceneCfg):
     #         scale=(2.0, 3.0, 1.0),
     #     ),
     # )
-    robot = FRANKA_PANDA_HIGH_PD_CFG.replace(
-        prim_path="{ENV_REGEX_NS}/Robot",
-        init_state=ArticulationCfg.InitialStateCfg(
-            joint_pos=custom_joint_init
-        ),
-        spawn=FRANKA_PANDA_HIGH_PD_CFG.spawn.replace(
-            activate_contact_sensors=True
-        )
-    )
-    # end-effector sensor: will be populated by agent env cfg
-    ee_frame = FrameTransformerCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/panda_link0",
-        debug_vis=False,
-        visualizer_cfg=FRAME_MARKER_SMALL_CFG.replace(prim_path="/Visuals/EndEffectorFrameTransformer"),
-        target_frames=[
-            FrameTransformerCfg.FrameCfg(
-                prim_path="{ENV_REGEX_NS}/Robot/panda_hand",
-                name="ee_tcp",
-                offset=OffsetCfg(
-                    pos=(0.0, 0.0, 0.1034),
-                ),
-            ),
-            FrameTransformerCfg.FrameCfg(
-                prim_path="{ENV_REGEX_NS}/Robot/panda_leftfinger",
-                name="tool_leftfinger",
-                offset=OffsetCfg(
-                    pos=(0.0, 0.0, 0.046),
-                ),
-            ),
-            FrameTransformerCfg.FrameCfg(
-                prim_path="{ENV_REGEX_NS}/Robot/panda_rightfinger",
-                name="tool_rightfinger",
-                offset=OffsetCfg(
-                    pos=(0.0, 0.0, 0.046),
-                ),
-            ),
-        ],
-    )
 
     object = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Object",
         spawn=sim_utils.MultiAssetSpawnerCfg(
-            assets_cfg=load_object_candidates("/mnt/afs/zhuwenxuan/DGN/no.json", usd_dir="/mnt/afs/zhuwenxuan/DGN/coacd_usd", obj_dir="/mnt/afs/zhuwenxuan/DGN/coacd_normalized"),
+            assets_cfg=load_object_candidates("/mnt/afs/zhuwenxuan/DGN/dev_minimal.json", usd_dir="/mnt/afs/zhuwenxuan/DGN/coacd_usd", obj_dir="/mnt/afs/zhuwenxuan/DGN/coacd_normalized"),
             random_choice=False,
             rigid_props=RigidBodyPropertiesCfg(
                 solver_position_iteration_count=16,
@@ -247,6 +258,59 @@ class NonPrehensileSceneCfg(InteractiveSceneCfg):
         ),
     )
 
+    eef = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/eef",
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=(0.08, 0.0, 1.03)
+        ),
+        spawn=sim_utils.MultiAssetSpawnerCfg(
+            assets_cfg=load_tools_from_json(
+                "/mnt/afs/zhuwenxuan/project/RobotSmith/eef/tools_adjusted.json",
+                usd_dir="/mnt/afs/zhuwenxuan/project/RobotSmith/eef/objects_usd",
+                obj_dir="/mnt/afs/zhuwenxuan/project/RobotSmith/eef/objects_normalized",
+                color=(0.3, 0.8, 0.3)  # Green for eef
+            ),
+            random_choice=False,
+            rigid_props=RigidBodyPropertiesCfg(
+                solver_position_iteration_count=16,
+                solver_velocity_iteration_count=1,
+                max_angular_velocity=1000.0,
+                max_linear_velocity=1000.0,
+                max_depenetration_velocity=5.0,
+                disable_gravity=True,
+            ),
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
+        ),
+    )
+
+    robot = FRANKA_PANDA_HIGH_PD_CFG.replace(
+        prim_path="{ENV_REGEX_NS}/Robot",
+        actuators=arm_only_actuators,
+        init_state=ArticulationCfg.InitialStateCfg(
+            joint_pos=custom_joint_init
+        ),
+        spawn=FRANKA_PANDA_HIGH_PD_CFG.spawn.replace(
+            usd_path=bare_franka_path,
+            activate_contact_sensors=False
+        )
+    )
+
+    # Dummy Configuration: Anchoring all frames to the robot's mounting flange
+    ee_frame = FrameTransformerCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/panda_link0",
+        debug_vis=False,
+        visualizer_cfg=FRAME_MARKER_SMALL_CFG.replace(prim_path="/Visuals/EndEffectorFrameTransformer"),
+        target_frames=[
+            FrameTransformerCfg.FrameCfg(
+                prim_path="{ENV_REGEX_NS}/Robot/panda_link8",
+                name="ee_tool",
+                offset=OffsetCfg(
+                    pos=(0.0, 0.0, 0.0), # Placeholder, updated from tool's head_area_middle in __init__
+                ),
+            ),
+        ],
+    )
+
 
 @configclass
 class CurriculumCfg:
@@ -257,7 +321,7 @@ class CommandsCfg:
     """Command terms for the MDP."""
     target_object_pose = mdp.StablePoseCommandCfg(
         resampling_time_range=(1e9, 1e9),
-        debug_vis=True,  # Visualize target pose
+        debug_vis=False,  # Visualize target pose
         xy_offset_range=0.15,
         initial_position_range=0.15,
     )
@@ -339,7 +403,7 @@ class EventCfg:
         func=mdp.randomize_rigid_body_scale,
         mode="prestartup",
         params={
-            "scale_range": (0.1, 0.2),
+            "scale_range": (0.15, 0.3),
             "asset_cfg": SceneEntityCfg("object"),
         },
     )
@@ -370,21 +434,27 @@ class EventCfg:
             "make_consistent": True,  # Ensure dynamic <= static friction
         },
     )
-    
-    # Robot gripper friction randomization
-    randomize_finger_material = EventTerm(
-        func=mdp.randomize_rigid_body_material,
+
+    # randomize_eef_scale removed - scale variation now applied during tool loading
+
+    randomize_eef_mass = EventTerm(
+        func=mdp.randomize_rigid_body_mass,
         mode="reset",
         params={
-            "asset_cfg": SceneEntityCfg("robot", body_names="panda_leftfinger|panda_rightfinger"),
-            "static_friction_range": (1.0, 1.5),
-            "dynamic_friction_range": (1.0, 1.5),
-            "restitution_range": (0.0, 0.0),
-            "num_buckets": 64,
-            "make_consistent": True,
+            "asset_cfg": SceneEntityCfg("object"),
+            "mass_distribution_params": (0.1, 0.5),  # Mass range: 0.1 to 0.5 kg
+            "operation": "abs",  # Absolute value operation
+            "distribution": "uniform",
+            "recompute_inertia": True,
         },
     )
-    
+
+    update_eef = EventTerm(
+        func=mdp.update_eef_pose,
+        mode="interval",
+        interval_range_s=(0.0, 0.0),  # Every step
+    )
+
     # Terrain friction randomization - using custom function to randomize terrain material
     randomize_terrain_material = EventTerm(
         func=mdp.randomize_terrain_material,
@@ -469,7 +539,7 @@ class TerminationsCfg:
 @configclass
 class NonPrehensileEnvCfg(ManagerBasedRLEnvCfg):
     # Scene settings
-    scene: NonPrehensileSceneCfg = NonPrehensileSceneCfg(num_envs=64, env_spacing=4.0)
+    scene: NonPrehensileSceneCfg = NonPrehensileSceneCfg(num_envs=64, env_spacing=2.0)
     # Basic settings
     observations: ObservationsCfg = ObservationsCfg()
     actions: RelativeJointPositionActionsCfg = RelativeJointPositionActionsCfg()
@@ -485,6 +555,7 @@ class NonPrehensileEnvCfg(ManagerBasedRLEnvCfg):
     # Visualization settings
     visualize_current_object_pose: bool = True  # Enable current object pose visualization
     visualize_object_pointcloud: bool = False  # Enable object point cloud visualization for debug in first env
+    visualize_eef_position: bool = True  # Enable eef tool position visualization
 
     # Performance settings
     use_torch_compile: bool = True  # Enable torch.compile on hot paths
@@ -521,7 +592,8 @@ class NonPrehensileEnvCfg(ManagerBasedRLEnvCfg):
         self.episode_length_s = 30
         
         # Viewer settings
-        self.viewer.eye = (1.8, 0.5, 0.5)
+        self.viewer.eye = (2.5, 0.5, 0.8)
+        # self.viewer.eye = (4, 0, 4)
         
         # Simulation settings - match reference config dt
         self.sim.dt = 1 / 80
@@ -556,6 +628,9 @@ class NonPrehensileEnv(ManagerBasedRLEnv):
             limits[:, joint_ids, 1] = maxs
             robot.data.soft_joint_pos_limits[:] = limits
 
+        # _head_area_offsets and _object_scales are computed in post_reset() below.
+        self._head_area_offsets = torch.zeros(self.num_envs, 3, device=self.device)
+
         # Initialize success tracking buffers
         self.episode_success_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         self.total_episodes = 0
@@ -567,6 +642,9 @@ class NonPrehensileEnv(ManagerBasedRLEnv):
 
         # Global step counter for periodic debug prints
         self._global_step = 0
+
+        # Run post-init setup: physics settings, scale caching, head area offsets
+        self.post_reset()
     
     def step(self, action):
         """Override step to track success rates."""
@@ -625,8 +703,6 @@ class NonPrehensileEnv(ManagerBasedRLEnv):
     
 
     def post_reset(self):
-        self.sim.physx.bounce_threshold_velocity = 0.05
-        # self.sim.physx.friction_correlation_distance = 0.00625
         # Cache object scales for all envs to avoid per-step USD queries
         import IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.mdp as mdp
         from isaaclab.managers import SceneEntityCfg
@@ -638,3 +714,7 @@ class NonPrehensileEnv(ManagerBasedRLEnv):
         else:
             scales = scales.to(device=self.device)
         self._object_scales = scales
+
+        # Compute per-env head area offsets now that USD prims are fully spawned.
+        # Each offset is in the tool's local frame (i.e. relative to panda_link8 origin).
+        self._head_area_offsets = mdp.compute_head_area_offsets_from_usd(self)
