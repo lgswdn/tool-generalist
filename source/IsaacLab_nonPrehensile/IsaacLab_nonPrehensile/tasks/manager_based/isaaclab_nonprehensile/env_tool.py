@@ -6,6 +6,7 @@
 import math
 import os
 import json
+import yaml
 import torch
 from collections import deque
 import time
@@ -41,6 +42,12 @@ from collections.abc import Sequence
 from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.cloud import Cloud
 
 _CLOUD_CACHE = {}
+
+# Load path configuration from paths.yaml at the project root
+_PATHS_CFG_FILE = os.path.join(os.path.dirname(__file__), "../" * 6, "paths.yaml")
+_PATHS_CFG_FILE = os.path.normpath(_PATHS_CFG_FILE)
+with open(_PATHS_CFG_FILE, "r") as _f:
+    _PATHS = yaml.safe_load(_f)
 from scipy.spatial.transform import Rotation as R
 import numpy as np
 
@@ -189,7 +196,7 @@ custom_joint_init = {
     "panda_joint6": _joint_init_mid[5],
     "panda_joint7": _joint_init_mid[6],
 }
-bare_franka_path = os.path.abspath("/mnt/afs/zhuwenxuan/project/inp/IsaacLab-nonPrehensile/bare_panda_instanceable.usd")
+bare_franka_path = os.path.abspath(_PATHS["robot"]["franka_usd"])
 arm_only_actuators = {
     actuator_name: actuator_config 
     for actuator_name, actuator_config in FRANKA_PANDA_HIGH_PD_CFG.actuators.items() 
@@ -245,7 +252,7 @@ class NonPrehensileSceneCfg(InteractiveSceneCfg):
     object = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Object",
         spawn=sim_utils.MultiAssetSpawnerCfg(
-            assets_cfg=load_object_candidates("/mnt/afs/zhuwenxuan/DGN/dev_minimal.json", usd_dir="/mnt/afs/zhuwenxuan/DGN/coacd_usd", obj_dir="/mnt/afs/zhuwenxuan/DGN/coacd_normalized"),
+            assets_cfg=load_object_candidates(_PATHS["dgn"]["candidates_json"], usd_dir=_PATHS["dgn"]["usd_dir"], obj_dir=_PATHS["dgn"]["obj_dir"]),
             random_choice=False,
             rigid_props=RigidBodyPropertiesCfg(
                 solver_position_iteration_count=16,
@@ -265,9 +272,9 @@ class NonPrehensileSceneCfg(InteractiveSceneCfg):
         ),
         spawn=sim_utils.MultiAssetSpawnerCfg(
             assets_cfg=load_tools_from_json(
-                "/mnt/afs/zhuwenxuan/project/RobotSmith/eef/tools_adjusted.json",
-                usd_dir="/mnt/afs/zhuwenxuan/project/RobotSmith/eef/objects_usd",
-                obj_dir="/mnt/afs/zhuwenxuan/project/RobotSmith/eef/normalized_models",
+                _PATHS["tool"]["tools_json"],
+                usd_dir=_PATHS["tool"]["usd_dir"],
+                obj_dir=_PATHS["tool"]["obj_dir"],
                 color=(0.3, 0.8, 0.3)  # Green for eef
             ),
             random_choice=False,

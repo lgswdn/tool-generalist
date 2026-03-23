@@ -1,4 +1,4 @@
-环境测试：
+Copy `paths.yaml.example` to `paths.yaml` and update the paths for your machine before running (paths.yaml is gitignored).
 
 python scripts/record_video.py --task tool-v0 --num_envs 30 --video_length 30 --headless
 
