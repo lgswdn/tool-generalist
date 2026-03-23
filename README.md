@@ -1,3 +1,9 @@
+环境测试：
+
+python scripts/record_video.py --task tool-v0 --num_envs 30 --video_length 30 --headless
+
+生成 3s 的会存到 ./videos 的视频，
+
 ## Project Overview
 
 This project is a Non-Prehensile Manipulation example/template built on Isaac Lab for Reinforcement Learning (RSL-RL) training and evaluation. It uses the Franka Panda arm, supports multi-asset spawning and domain randomization, tracks success rates, and provides end-to-end train/evaluate/play flows with JIT/ONNX export.
