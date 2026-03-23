@@ -267,7 +267,7 @@ class NonPrehensileSceneCfg(InteractiveSceneCfg):
             assets_cfg=load_tools_from_json(
                 "/mnt/afs/zhuwenxuan/project/RobotSmith/eef/tools_adjusted.json",
                 usd_dir="/mnt/afs/zhuwenxuan/project/RobotSmith/eef/objects_usd",
-                obj_dir="/mnt/afs/zhuwenxuan/project/RobotSmith/eef/objects_normalized",
+                obj_dir="/mnt/afs/zhuwenxuan/project/RobotSmith/eef/normalized_models",
                 color=(0.3, 0.8, 0.3)  # Green for eef
             ),
             random_choice=False,
@@ -278,6 +278,7 @@ class NonPrehensileSceneCfg(InteractiveSceneCfg):
                 max_linear_velocity=1000.0,
                 max_depenetration_velocity=5.0,
                 disable_gravity=True,
+                #kinematic_enabled=True,
             ),
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
         ),
@@ -345,12 +346,18 @@ class ObservationsCfg:
     class PolicyCfg(ObsGroup):
         """Observations for policy group."""
         
-        # Object Cloud (3D: point cloud of the object in enviroment frame, it should be the first part of the observation)
+        # Object Cloud (512*3=1536D: point cloud of the object in environment frame)
         object_cloud = ObsTerm(
             func=mdp.get_object_pointcloud_in_env_frame,
             noise=GaussianNoiseCfg(mean=0.0, std=0.005, operation="add"),
         )
-        
+
+        # Tool Cloud (512*3=1536D: tool point cloud in EE local frame)
+        tool_cloud = ObsTerm(
+            func=mdp.get_tool_pointcloud_in_ee_frame,
+            noise=GaussianNoiseCfg(mean=0.0, std=0.002, operation="add"),
+        )
+
         # Hand State (9D: hand position[3] + rotation_matrix[6])
         hand_state = ObsTerm(
             func=mdp.hand_state, params={"ee_frame_cfg": SceneEntityCfg("ee_frame")},
@@ -407,7 +414,12 @@ class EventCfg:
             "asset_cfg": SceneEntityCfg("object"),
         },
     )
-    
+
+    setup_collision_filter = EventTerm(
+        func=mdp.setup_tool_robot_collision_filter,
+        mode="prestartup",
+    )
+
     # Physical parameter randomization events
     randomize_object_mass = EventTerm(
         func=mdp.randomize_rigid_body_mass,
@@ -553,7 +565,7 @@ class NonPrehensileEnvCfg(ManagerBasedRLEnvCfg):
     # Observation normalization
     normalize_observations: bool = True  # Whether to normalize observations to [-1,1] range, except hand_state and pointcloud 
     # Visualization settings
-    visualize_current_object_pose: bool = True  # Enable current object pose visualization
+    visualize_current_object_pose: bool = False  # Enable current object pose visualization
     visualize_object_pointcloud: bool = False  # Enable object point cloud visualization for debug in first env
     visualize_eef_position: bool = True  # Enable eef tool position visualization
 
@@ -592,8 +604,8 @@ class NonPrehensileEnvCfg(ManagerBasedRLEnvCfg):
         self.episode_length_s = 30
         
         # Viewer settings
-        self.viewer.eye = (2.5, 0.5, 0.8)
-        # self.viewer.eye = (4, 0, 4)
+        # self.viewer.eye = (2.5, 0.5, 0.8)
+        self.viewer.eye = (6, 0, 6)
         
         # Simulation settings - match reference config dt
         self.sim.dt = 1 / 80
@@ -714,6 +726,14 @@ class NonPrehensileEnv(ManagerBasedRLEnv):
         else:
             scales = scales.to(device=self.device)
         self._object_scales = scales
+
+        # Cache tool (eef) scales for all envs
+        tool_scales = mdp.get_rigid_body_scale(self, SceneEntityCfg("eef"), all_env_ids)
+        if not isinstance(tool_scales, torch.Tensor):
+            tool_scales = torch.as_tensor(tool_scales, device=self.device, dtype=torch.float16)
+        else:
+            tool_scales = tool_scales.to(device=self.device)
+        self._tool_scales = tool_scales
 
         # Compute per-env head area offsets now that USD prims are fully spawned.
         # Each offset is in the tool's local frame (i.e. relative to panda_link8 origin).

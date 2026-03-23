@@ -84,7 +84,8 @@ class ICPActorCriticCfg:
     freeze_icp: bool = True     # Whether to freeze ICP parameters
     
     icp_point_dim: int = 3  # Only xyz coordinates
-    icp_num_points: int = 512  # Number of points in point cloud
+    icp_num_points: int = 512  # Number of points in object point cloud
+    tool_num_points: int = 512  # Number of points in tool point cloud
     
     # Network architecture
     fuser_hidden_dims: list[int] = [512, 256, 128]  # Feature fusion MLP

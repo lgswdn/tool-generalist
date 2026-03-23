@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal script to record video without policy - uses zero actions."""
+"""Minimal script to record video without policy - uses random actions."""
 
 import argparse
 import sys
@@ -45,7 +45,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg):
     print("[DEBUG] Reset complete")
     for step in range(args_cli.video_length):
         print(f"[DEBUG] Starting step {step}")
-        actions = torch.zeros(env.action_space.shape, device=env.unwrapped.device)
+        actions = torch.tensor(env.action_space.sample(), device=env.unwrapped.device)
         print(f"[DEBUG] About to call env.step() for step {step}")
         obs, _, terminated, truncated, _ = env.step(actions)
         print(f"[DEBUG] env.step() completed for step {step}")

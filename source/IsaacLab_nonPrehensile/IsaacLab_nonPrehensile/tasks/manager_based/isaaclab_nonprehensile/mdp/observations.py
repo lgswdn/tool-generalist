@@ -682,3 +682,70 @@ def get_object_pointcloud_in_env_frame(
 
     pointcloud_env_flat = pointcloud_env.reshape(num_envs, num_points * 3)
     return pointcloud_env_flat
+
+
+@profile_obs
+def get_tool_pointcloud_in_ee_frame(
+    env: ManagerBasedRLEnv,
+) -> torch.Tensor:
+    """Get tool (eef) point cloud in the EE (link8) local frame.
+
+    The tool mesh is sampled at unit scale and cached.  At runtime the points
+    are scaled by the per-env tool scale and expressed in the EE local frame
+    (i.e. NOT rotated to world – the network sees a canonical tool shape).
+
+    Returns:
+        torch.Tensor: shape (num_envs, num_points*3), float32
+    """
+    from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import get_cached_cloud
+
+    eef_asset = env.scene["eef"]
+    assets_cfg = eef_asset.cfg.spawn.assets_cfg
+    num_envs = env.num_envs
+    device = eef_asset.data.root_pos_w.device
+
+    num_assets = len(assets_cfg)
+    out_tensor = None
+
+    for asset_idx in range(num_assets):
+        if asset_idx >= num_envs:
+            continue
+        env_indices = torch.arange(asset_idx, num_envs, num_assets, device=device, dtype=torch.long)
+        if env_indices.numel() == 0:
+            continue
+
+        obj_path = assets_cfg[asset_idx].obj_path
+        tool_cloud = get_cached_cloud(obj_path)
+
+        # Per-env scale (N,3) – cached in post_reset
+        if hasattr(env, "_tool_scales"):
+            scales = env._tool_scales[env_indices]  # (batch,3) or (batch,)
+        else:
+            scales = None
+
+        # Sample canonical points (unit scale, no translation/rotation)
+        base_pts = tool_cloud._get_points_torch(device).float()  # (M,3)
+        batch = env_indices.numel()
+
+        if scales is not None:
+            s = scales.float()
+            if s.dim() == 1:
+                s = s.unsqueeze(-1)  # (batch,1)
+            # broadcast: (batch,1,3) or (batch,1,1)
+            if s.shape[-1] == 3:
+                pts = base_pts.unsqueeze(0) * s.unsqueeze(1)  # (batch,M,3)
+            else:
+                pts = base_pts.unsqueeze(0) * s.unsqueeze(1)
+        else:
+            pts = base_pts.unsqueeze(0).expand(batch, -1, -1)
+
+        if out_tensor is None:
+            num_points = pts.shape[1]
+            out_tensor = torch.empty((num_envs, num_points, 3), device=device, dtype=torch.float32)
+
+        out_tensor[env_indices] = pts
+
+    if out_tensor is None:
+        return torch.zeros((num_envs, 512 * 3), device=device, dtype=torch.float32)
+
+    return out_tensor.reshape(num_envs, -1)

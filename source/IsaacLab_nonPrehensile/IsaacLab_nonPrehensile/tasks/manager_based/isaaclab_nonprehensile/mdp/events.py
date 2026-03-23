@@ -21,6 +21,43 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 
+def setup_tool_robot_collision_filter(env: "ManagerBasedRLEnv", env_ids=None):
+    """Create PhysicsCollisionGroups to filter out tool<->robot collisions.
+
+    Called once at prestartup. Puts all tool prims in one group and all robot
+    prims in another, then adds a filtered pair so PhysX ignores contacts
+    between them.
+    """
+    stage = omni.usd.get_context().get_stage()
+
+    # Create collision groups at world scope
+    tool_group_path = "/World/CollisionGroups/ToolGroup"
+    robot_group_path = "/World/CollisionGroups/RobotGroup"
+
+    for path in (tool_group_path, robot_group_path):
+        if not stage.GetPrimAtPath(path).IsValid():
+            stage.DefinePrim(path, "PhysicsCollisionGroup")
+
+    tool_group = UsdPhysics.CollisionGroup.Get(stage, tool_group_path)
+    robot_group = UsdPhysics.CollisionGroup.Get(stage, robot_group_path)
+
+    # Add filtered pair: tool group ignores robot group
+    tool_group.GetFilteredGroupsRel().AddTarget(robot_group_path)
+    robot_group.GetFilteredGroupsRel().AddTarget(tool_group_path)
+
+    # Include all tool prims
+    tool_includes = tool_group.GetCollidersCollectionAPI().GetIncludesRel()
+    for env_id in range(env.num_envs):
+        tool_includes.AddTarget(f"/World/envs/env_{env_id}/eef")
+
+    # Include all robot prims
+    robot_includes = robot_group.GetCollidersCollectionAPI().GetIncludesRel()
+    for env_id in range(env.num_envs):
+        robot_includes.AddTarget(f"/World/envs/env_{env_id}/Robot")
+
+    print(f"[INFO] Tool<->Robot collision filter set up for {env.num_envs} envs.")
+
+
 def reset_initial_object_position(
     env: ManagerBasedRLEnv,
     env_ids: torch.Tensor,
@@ -57,41 +94,80 @@ def reset_initial_object_position(
     from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env import get_cached_cloud
     assets_cfg = asset.cfg.spawn.assets_cfg
     scales = get_rigid_body_scale(env, SceneEntityCfg("object"), env_ids)
-    
+
+    # Pre-compute tool AABB in world frame for each env (from eef asset current pose + mesh)
+    eef_asset = env.scene["eef"]
+    eef_assets_cfg = eef_asset.cfg.spawn.assets_cfg
+    eef_pos_w = eef_asset.data.root_pos_w   # (num_envs, 3)
+    eef_quat_w = eef_asset.data.root_quat_w  # (num_envs, 4)
+    from isaaclab.utils.math import matrix_from_quat
+    eef_rot = matrix_from_quat(eef_quat_w)  # (num_envs, 3, 3)
+
+    def _get_aabb(center_w, rot, pts_local):
+        """pts_local: (M,3) canonical points. Returns (min_w, max_w) each (3,)."""
+        pts_w = (rot @ pts_local.T).T + center_w  # (M,3)
+        return pts_w.min(dim=0).values, pts_w.max(dim=0).values
+
+    # Cache tool aabbs per env
+    tool_aabbs = []
+    for env_id_int in range(env.num_envs):
+        tool_idx = env_id_int % len(eef_assets_cfg)
+        tool_cloud_obj = get_cached_cloud(eef_assets_cfg[tool_idx].obj_path)
+        pts = torch.tensor(tool_cloud_obj.points, dtype=torch.float32, device=env.device)
+        if hasattr(env, "_tool_scales"):
+            pts = pts * env._tool_scales[env_id_int].float()
+        t_min, t_max = _get_aabb(eef_pos_w[env_id_int], eef_rot[env_id_int], pts)
+        tool_aabbs.append((t_min, t_max))
+
     for i, env_id in enumerate(env_ids):
         env_id_int = int(env_id.item())
-        # XY around base with curriculum range (environment coordinates + origin)
-        dx = sample_uniform(-xy_range, xy_range, (1,), device=env.device).squeeze(0)
-        dy = sample_uniform(-2*xy_range, 2*xy_range, (1,), device=env.device).squeeze(0)
-        # local (environment) coordinates before origin offset
-        x_env = torch.as_tensor(base_x, device=env.device) + dx
-        y_env = torch.as_tensor(base_y, device=env.device) + dy
-        
-        # Enforce reachable workspace (project into XY annulus) if configured
-        if hasattr(stable_pose_term, "enforce_workspace") and bool(stable_pose_term.enforce_workspace):
-            cx = torch.as_tensor(getattr(stable_pose_term, "workspace_center_x", 0.0), device=env.device)
-            cy = torch.as_tensor(getattr(stable_pose_term, "workspace_center_y", 0.0), device=env.device)
-            rmin = torch.as_tensor(getattr(stable_pose_term, "workspace_radius_min", 0.0), device=env.device)
-            rmax = torch.as_tensor(getattr(stable_pose_term, "workspace_radius_max", float("inf")), device=env.device)
-            ddx = x_env - cx
-            ddy = y_env - cy
-            rr = torch.sqrt(ddx * ddx + ddy * ddy).clamp_min(1e-9)
-            rr_clamped = torch.clamp(rr, min=rmin, max=rmax)
-            scale = rr_clamped / rr
-            x_env = cx + ddx * scale
-            y_env = cy + ddy * scale
-        
-        pos_x = x_env + env.scene.env_origins[env_id_int, 0]
-        pos_y = y_env + env.scene.env_origins[env_id_int, 1]
-        pos_z = torch.as_tensor(base_z, device=env.device)
-        
-        # Determine this env's asset and sample a stable pose (roll/pitch/yaw)
+
         asset_idx = env_id_int % len(assets_cfg)
         obj_path = assets_cfg[asset_idx].obj_path
-
-        # Get the actual current scale from USD (dynamic scale system)
         scale_tensor = scales[i]
         scale = tuple(scale_tensor.cpu().numpy())
+
+        # Object canonical points scaled (pose unknown yet, use for half-extents only)
+        obj_cloud_obj = get_cached_cloud(obj_path)
+        obj_pts_local = torch.tensor(obj_cloud_obj.points, dtype=torch.float32, device=env.device) * scale_tensor.float()
+        obj_half = (obj_pts_local.max(dim=0).values - obj_pts_local.min(dim=0).values) / 2.0
+
+        t_min, t_max = tool_aabbs[env_id_int]
+
+        max_attempts = 20
+        for _attempt in range(max_attempts):
+            dx = sample_uniform(-xy_range, xy_range, (1,), device=env.device).squeeze(0)
+            dy = sample_uniform(-2*xy_range, 2*xy_range, (1,), device=env.device).squeeze(0)
+            x_env = torch.as_tensor(base_x, device=env.device) + dx
+            y_env = torch.as_tensor(base_y, device=env.device) + dy
+
+            # Enforce reachable workspace (project into XY annulus) if configured
+            if hasattr(stable_pose_term, "enforce_workspace") and bool(stable_pose_term.enforce_workspace):
+                cx = torch.as_tensor(getattr(stable_pose_term, "workspace_center_x", 0.0), device=env.device)
+                cy = torch.as_tensor(getattr(stable_pose_term, "workspace_center_y", 0.0), device=env.device)
+                rmin = torch.as_tensor(getattr(stable_pose_term, "workspace_radius_min", 0.0), device=env.device)
+                rmax = torch.as_tensor(getattr(stable_pose_term, "workspace_radius_max", float("inf")), device=env.device)
+                ddx = x_env - cx
+                ddy = y_env - cy
+                rr = torch.sqrt(ddx * ddx + ddy * ddy).clamp_min(1e-9)
+                rr_clamped = torch.clamp(rr, min=rmin, max=rmax)
+                scale_ws = rr_clamped / rr
+                x_env = cx + ddx * scale_ws
+                y_env = cy + ddy * scale_ws
+
+            pos_x = x_env + env.scene.env_origins[env_id_int, 0]
+            pos_y = y_env + env.scene.env_origins[env_id_int, 1]
+            pos_z = torch.as_tensor(base_z, device=env.device)
+
+            # Object AABB at this candidate position (axis-aligned, identity rotation approx)
+            obj_center = torch.stack([pos_x, pos_y, pos_z])
+            obj_min = obj_center - obj_half
+            obj_max = obj_center + obj_half
+
+            # AABB intersection test
+            overlap = (obj_min <= t_max).all() and (obj_max >= t_min).all()
+            if not overlap or _attempt == max_attempts - 1:
+                break
 
         object_cloud = get_cached_cloud(obj_path)
         sample_pose = object_cloud.sample_stable_pose_trimesh(scale=scale)
@@ -290,9 +366,43 @@ def compute_head_area_offsets_from_usd(env) -> "torch.Tensor":
             print(f"[WARNING head_area] Prim not found: {prim_path}")
             continue
 
-        # Local bbox: in the prim's own un-scaled coordinate space (= OBJ mesh space).
-        # This is rotation-independent, so head_area_norm interpolation is always correct.
-        bbox_local = bbox_cache.ComputeLocalBound(prim)
+        # Extract scale from the prim's own xformOps (set by UsdFileCfg.scale at spawn)
+        scale = [1.0, 1.0, 1.0]
+        xform_ops = UsdGeom.Xformable(prim).GetOrderedXformOps()
+        for op in xform_ops:
+            if op.GetOpType() == UsdGeom.XformOp.TypeScale:
+                s = op.Get()
+                scale = [s[0], s[1], s[2]]
+                break
+
+        # Find the child mesh/xform prim to get a bbox in the eef prim's LOCAL frame.
+        # ComputeLocalBound on the root /eef prim includes the eef's own translate/rotate
+        # xformOps (which differ per environment), so we use a child prim instead — a child
+        # has no translate/rotate of its own, so its local bound IS the mesh geometry bbox.
+        mesh_prim = None
+        stage = omni.usd.get_context().get_stage()
+        for child in prim.GetChildren():
+            type_name = child.GetTypeName()
+            if type_name in ("Mesh", "Xform"):
+                mesh_prim = child
+                break
+        if mesh_prim is None:
+            # Fallback: search one more level deep
+            for child in prim.GetChildren():
+                for grandchild in child.GetChildren():
+                    if grandchild.GetTypeName() in ("Mesh", "Xform"):
+                        mesh_prim = grandchild
+                        break
+                if mesh_prim is not None:
+                    break
+
+        if mesh_prim is None:
+            print(f"[WARNING head_area env_{env_id}] No child Mesh/Xform found, falling back to root prim bbox")
+            mesh_prim = prim
+
+        # ComputeLocalBound on the child gives the bbox in eef-local space (pure mesh geometry,
+        # no world translate/rotate applied), matching the OBJ file coordinate space.
+        bbox_local = bbox_cache.ComputeLocalBound(mesh_prim)
         bbox_range = bbox_local.GetRange()
         bbox_min_l = [bbox_range.GetMin()[i] for i in range(3)]
         bbox_max_l = [bbox_range.GetMax()[i] for i in range(3)]
@@ -302,15 +412,6 @@ def compute_head_area_offsets_from_usd(env) -> "torch.Tensor":
             bbox_min_l[i] + mid_norm[i] * (bbox_max_l[i] - bbox_min_l[i])
             for i in range(3)
         ]
-
-        # Extract scale from the prim's own xformOps (set by UsdFileCfg.scale at spawn)
-        scale = [1.0, 1.0, 1.0]
-        xform_ops = UsdGeom.Xformable(prim).GetOrderedXformOps()
-        for op in xform_ops:
-            if op.GetOpType() == UsdGeom.XformOp.TypeScale:
-                s = op.Get()
-                scale = [s[0], s[1], s[2]]
-                break
 
         # Scale the local offset: this is the fixed vector in link8's local frame
         head_area_local = [head_area_unscaled[i] * scale[i] for i in range(3)]

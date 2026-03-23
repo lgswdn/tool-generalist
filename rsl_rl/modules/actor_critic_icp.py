@@ -30,7 +30,8 @@ class ActorCriticICP(nn.Module):
         num_critic_obs,         # Critic network input dimension  
         num_actions,            # Action dimension
         icp_point_dim=3,        # Point cloud feature dimension per point
-        icp_num_points=512,     # Number of points in point cloud
+        icp_num_points=512,     # Number of points in object point cloud
+        tool_num_points=512,    # Number of points in tool point cloud (0 to disable)
         icp_weights_path=None,  # Path to pretrained ICP weights
         freeze_icp=True,        # Whether to freeze ICP parameters
         actor_hidden_dims=[256, 256, 256],
@@ -65,10 +66,10 @@ class ActorCriticICP(nn.Module):
         # Save configuration
         self.icp_point_dim = icp_point_dim
         self.icp_num_points = icp_num_points
-        
-        # Calculate dimensions
-        # The rest obs (non-pointcloud, excluding hand_state which goes to context)
-        self.nonpc_obs_dim = num_actor_obs - (icp_point_dim * icp_num_points) - 9
+        self.tool_num_points = tool_num_points
+
+        # Layout: [obj_cloud(icp_num_points*3), tool_cloud(tool_num_points*3), hand_state(9), rest...]
+        self.nonpc_obs_dim = num_actor_obs - (icp_point_dim * icp_num_points) - (icp_point_dim * tool_num_points) - 9
         
         # Initialize ICPNet point cloud encoder
         if icp_weights_path is not None:
@@ -187,18 +188,20 @@ class ActorCriticICP(nn.Module):
         # ICPNet output feature dimension - get from actual encoder config or use default
         # Since we have headers (collision), use dim_out which is 128
         icp_feature_dim = self.icp_encoder.cfg.dim_out
-        
+        # Two clouds encoded with shared encoder → concatenated features
+        combined_icp_feature_dim = icp_feature_dim * 2
+
         print(f"ICP encoder cfg.dim_out: {self.icp_encoder.cfg.dim_out}")
         print(f"ICP encoder cfg.encoder.layer.hidden_size: {self.icp_encoder.cfg.encoder.layer.hidden_size}")
-        print(f"Using ICP feature dim: {icp_feature_dim}")
-        
+        print(f"Using combined ICP feature dim (obj+tool): {combined_icp_feature_dim}")
+
         # Choose fusion backend: StateDependentCrossFeatNet or classic concat
         self.use_sd_cross = use_sd_cross
-        
+
         # Set default fusion hidden dimensions
         if fusion_hidden_dims is None:
             fusion_hidden_dims = [512, 256, 128]
-        
+
         if self.use_sd_cross:
             # Default query keys: only the remaining observations (rest)
             if sd_query_keys is None:
@@ -209,7 +212,7 @@ class ActorCriticICP(nn.Module):
 
             # Note: StateDependentCrossFeatNet only uses the last entry of dim_in as embed dim
             sd_cfg = StateDependentCrossFeatNet.Config(
-                dim_in=(1, icp_feature_dim),
+                dim_in=(1, combined_icp_feature_dim),
                 dim_out=sd_emb_dim,
                 query_keys=tuple(sd_query_keys),
                 num_query=sd_num_query,
@@ -232,7 +235,7 @@ class ActorCriticICP(nn.Module):
             print(f"Using StateDependentCrossFeatNet for fusion. SD output dim: {sd_out_dim}, Fusion output dim: {fusion_hidden_dims[-1]}")
         else:
             # Classic concat -> MLP fusion
-            fusion_input_dim = self.nonpc_obs_dim + icp_feature_dim
+            fusion_input_dim = self.nonpc_obs_dim + combined_icp_feature_dim
 
         # Build fusion MLP (shared logic for both fusion types)
         self.feature_fusion = self._build_fusion_mlp(
@@ -388,51 +391,31 @@ class ActorCriticICP(nn.Module):
 
     def _split_obs(self, obs):
         """
-        Split observations into point cloud, hand_state, and regular observations
-        Layout: [point_cloud_flat, hand_state(9), other_obs...]
-        
-        Args:
-            obs: (batch, total_obs_dim) - flattened observations
-            
-        Returns:
-            pc: (batch, num_points, point_dim) - point cloud
-            hand_state: (batch, 9) - hand state
-            rest: (batch, remaining_obs_dim) - remaining regular observations
+        Split observations into object point cloud, tool point cloud, hand_state, and rest.
+        Layout: [obj_cloud_flat, tool_cloud_flat, hand_state(9), other_obs...]
         """
-        # obs: (batch, total_obs_dim)
-        pc_flat = obs[:, :self.icp_num_points * self.icp_point_dim]
-        pc = pc_flat.view(-1, self.icp_num_points, self.icp_point_dim)
-        
-        # Extract hand_state (9 dimensions after point cloud)
-        hand_state_start = self.icp_num_points * self.icp_point_dim
+        obj_pc_flat = obs[:, :self.icp_num_points * self.icp_point_dim]
+        obj_pc = obj_pc_flat.view(-1, self.icp_num_points, self.icp_point_dim)
+
+        tool_start = self.icp_num_points * self.icp_point_dim
+        tool_end = tool_start + self.tool_num_points * self.icp_point_dim
+        tool_pc_flat = obs[:, tool_start:tool_end]
+        tool_pc = tool_pc_flat.view(-1, self.tool_num_points, self.icp_point_dim)
+
+        hand_state_start = tool_end
         hand_state_end = hand_state_start + 9
         hand_state = obs[:, hand_state_start:hand_state_end]
-        
-        # The rest of observations
+
         rest = obs[:, hand_state_end:]
-        
-        return pc, hand_state, rest
+        return obj_pc, tool_pc, hand_state, rest
 
     def _extract_point_cloud_and_context(self, observations):
-        """
-        Extract point cloud and context information from flattened observation tensor
-        
-        Args:
-            observations: Flattened observation tensor (batch, total_obs_dim)
-            
-        Returns:
-            point_cloud: Point cloud tensor (batch, num_points, 3)
-            context: Context dictionary with hand_state
-            regular_obs: Regular observation tensor
-        """
         if isinstance(observations, torch.Tensor):
-            # Split flattened observations
-            point_cloud, hand_state, regular_obs = self._split_obs(observations)
-            context = {'hand_state': hand_state}  # Put hand_state in context for ICP
+            obj_pc, tool_pc, hand_state, regular_obs = self._split_obs(observations)
+            context = {'hand_state': hand_state}
         else:
             raise ValueError("observations must be a tensor for flattened observation mode")
-            
-        return point_cloud, context, regular_obs
+        return obj_pc, tool_pc, context, regular_obs
 
     def _get_fused_features(self, observations):
         """
@@ -444,12 +427,20 @@ class ActorCriticICP(nn.Module):
         Returns:
             features: Fused feature tensor (batch, fusion_hidden_dim)
         """
-        # Extract point cloud and context
-        point_cloud, context, regular_obs = self._extract_point_cloud_and_context(observations)
-        
-        # Encode point cloud using ICPNet (if enabled and available)
+        # Extract point clouds and context
+        obj_pc, tool_pc, context, regular_obs = self._extract_point_cloud_and_context(observations)
+
+        # Encode both clouds with the shared ICP encoder
         with torch.no_grad() if not self.icp_encoder.training else torch.enable_grad():
-            icp_output, icp_features = self.icp_encoder(point_cloud, context)
+            _, obj_features = self.icp_encoder(obj_pc, context)
+            _, tool_features = self.icp_encoder(tool_pc, context)
+
+        # Concatenate object and tool features along feature dim
+        if len(obj_features.shape) > 2:
+            obj_features = obj_features.mean(dim=1)
+        if len(tool_features.shape) > 2:
+            tool_features = tool_features.mean(dim=1)
+        icp_features = torch.cat([obj_features, tool_features], dim=-1)  # (B, 2*D)
         
         if self.use_sd_cross:
             # Fuse with StateDependentCrossFeatNet first
