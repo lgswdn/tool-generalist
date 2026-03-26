@@ -37,8 +37,8 @@ class Cloud:
     def _get_points_torch(self, device: torch.device) -> torch.Tensor:
         pts = self._points_torch.get(device)
         if pts is None:
-            pts = torch.tensor(self.points, dtype=torch.float32, device=device)
-            self._points_torch[device] = pts.to(dtype=torch.float16)
+            pts = torch.tensor(self.points, dtype=torch.float16, device=device)
+            self._points_torch[device] = pts
         return pts
 
     @staticmethod

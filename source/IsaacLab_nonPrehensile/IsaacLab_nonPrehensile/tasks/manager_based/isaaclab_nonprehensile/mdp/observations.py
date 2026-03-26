@@ -277,63 +277,66 @@ def phys_params(
     env: ManagerBasedRLEnv,
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
     hand_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    eef_cfg: SceneEntityCfg = SceneEntityCfg("eef"),
 ) -> torch.Tensor:
     """Physical parameters observation for non-prehensile manipulation.
-    
-    Returns 5D tensor: [object_mass, object_friction, hand_friction, ground_friction, object_restitution]
+
+    Returns 6D tensor: [object_mass, tool_mass, object_friction, hand_friction, ground_friction, object_restitution]
+    # NOTE: uncomment tool_mass block below (and update stack) to restore 6D for new training runs.
 
     Args:
         env: The RL environment
         object_cfg: Configuration for the object asset
         hand_cfg: Configuration for the robot hand
-        
+        eef_cfg: Configuration for the tool/eef asset
+
     Returns:
         torch.Tensor: Shape (num_envs, 5) containing [object_mass, object_friction, hand_friction, ground_friction, object_restitution]
     """
+    device = env.scene[object_cfg.name].data.root_pos_w.device
     object: RigidObject = env.scene[object_cfg.name]
     hand: RigidObject = env.scene[hand_cfg.name]
-    
+    # eef: RigidObject = env.scene[eef_cfg.name]  # uncomment for 6D
+
     # 1. Get object mass from IsaacLab's built-in interface
     object_mass = object.root_physx_view.get_masses().squeeze(-1)  # Shape: (num_envs,)
 
-    # 2. Get object material properties from PhysX view
+    # 2. Get tool (eef) mass  -- uncomment for 6D
+    # tool_mass = eef.root_physx_view.get_masses().squeeze(-1)  # Shape: (num_envs,)
+
+    # 3. Get object material properties from PhysX view
     # Material properties format: [static_friction, dynamic_friction, restitution]
     object_material_props = object.root_physx_view.get_material_properties()  # Shape: (num_envs, num_bodies, 3)
     object_friction = object_material_props[:, :, 0].mean(dim=1)   # (num_envs,) - object static friction
     object_restitution = object_material_props[:, :, 2].mean(dim=1)  # (num_envs,) - object restitution
 
-    # 3. Get hand friction from robot's physics properties
+    # 4. Get hand friction from robot's physics properties
     hand_material_props = hand.root_physx_view.get_material_properties()    # Shape: (num_envs, num_bodies, 3)
     hand_friction = hand_material_props[:, -1, 0]      # Use static friction for hand (last body)
 
-    # 4. Get ground/terrain friction - read actual randomized values from USD prim
-    # Read the actual physics material values that were set by randomization
+    # 5. Get ground/terrain friction - read actual randomized values from USD prim
     terrain = env.scene["terrain"]
-    
-    # Get the actual terrain prim path (same as in randomization)
     terrain_prim_path = terrain.cfg.prim_path + "/terrain"
     physics_material_path = f"{terrain_prim_path}/physicsMaterial"
-    
+
     import isaacsim.core.utils.prims as prim_utils
     from pxr import UsdPhysics
-    
-    # Read the actual physics material values
+
     physics_material_prim = prim_utils.get_prim_at_path(physics_material_path)
     physics_material = UsdPhysics.MaterialAPI(physics_material_prim)
-    static_friction_attr = physics_material.GetStaticFrictionAttr()
-    ground_friction_value = static_friction_attr.Get()
-    
+    ground_friction_value = physics_material.GetStaticFrictionAttr().Get()
     ground_friction = torch.full_like(object_mass, ground_friction_value)
-    
-    # Stack into observation tensor: [object_mass, object_friction, hand_friction, ground_friction, object_restitution]
+
+    # Stack into observation tensor: 5D (revert) -- for 6D add tool_mass as 2nd element
     phys_params_tensor = torch.stack([
-        object_mass.to(device=object.data.root_pos_w.device),                      # (num_envs,) - object mass [0.1, 0.5]
-        object_friction.to(device=object.data.root_pos_w.device),                  # (num_envs,) - object static friction [0.7, 1.0]
-        hand_friction.to(device=object.data.root_pos_w.device),                    # (num_envs,) - hand friction coefficient [1.0, 1.5]
-        ground_friction.to(device=object.data.root_pos_w.device),                  # (num_envs,) - ground friction coefficient [0.3, 0.8]
-        object_restitution.to(device=object.data.root_pos_w.device)                # (num_envs,) - object restitution coefficient [0.1, 0.2]
-    ], dim=1)  # (num_envs, 5)
-    
+        object_mass.to(device=device),        # (num_envs,) - object mass [0.1, 0.5]
+        # tool_mass.to(device=device),         # uncomment for 6D: tool mass [0.1, 0.5]
+        object_friction.to(device=device),     # (num_envs,) - object static friction [0.7, 1.0]
+        hand_friction.to(device=device),       # (num_envs,) - hand friction coefficient [1.0, 1.5]
+        ground_friction.to(device=device),     # (num_envs,) - ground friction coefficient [0.3, 0.8]
+        object_restitution.to(device=device)   # (num_envs,) - object restitution coefficient [0.1, 0.2]
+    ], dim=1)  # (num_envs, 5) -- change to 6 when tool_mass is re-enabled
+
     return _dbg(env, "phys_params", phys_params_tensor)
 
 
@@ -546,7 +549,7 @@ def visualize_object_pointcloud(
     pointcloud_reshaped = pointcloud_tensor.view(num_envs, points_per_env, 3)
     
     # For visualization, show points from the first environment only
-    first_env_points = pointcloud_reshaped[1]  # Shape: (num_points, 3)
+    first_env_points = pointcloud_reshaped[0]  # Shape: (num_points, 3)
     
     # Create identity quaternions for all points (spheres don't need rotation)
     num_points = first_env_points.shape[0]

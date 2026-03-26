@@ -18,8 +18,6 @@ from isaaclab.assets import RigidObject
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils.math import combine_frame_transforms
 
-from scipy.spatial.transform import Rotation as R
-
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
@@ -59,14 +57,8 @@ def object_reached_goal(
     object_pos_env = object_pos_w - env.scene.env_origins  # convert to environment coordinates
     
     # get current object orientation
-    from scipy.spatial.transform import Rotation as R
     object_quat_w = object.data.root_quat_w  # (num_envs, 4) [w, x, y, z]
-    
-    # Convert quaternion to euler angles for comparison
-    # Isaac uses [w,x,y,z] format, scipy expects [x,y,z,w]
-    quat_scipy = object_quat_w[:, [1, 2, 3, 0]]  # Convert from [w,x,y,z] to [x,y,z,w]
-    quat_np = quat_scipy.cpu().numpy()
-    
+
     # calculate position distance (only consider x,y if planar=True)
     if planar:
         position_distance = torch.norm(des_pos_env[:, :2] - object_pos_env[:, :2], dim=1)

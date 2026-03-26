@@ -1,0 +1,18 @@
+# File paths for env_tool.py
+# Edit this file to change asset locations without modifying code.
+
+# DGN object dataset
+dgn:
+  candidates_json: /mnt/afs/zhuwenxuan/DGN/dev_minimal.json
+  usd_dir: /mnt/afs/zhuwenxuan/DGN/coacd_usd
+  obj_dir: /mnt/afs/zhuwenxuan/DGN/coacd_normalized
+
+# End-effector tool dataset
+tool:
+  tools_json: /mnt/afs/zhuwenxuan/project/RobotSmith/eef/tools_adjusted.json
+  usd_dir: /mnt/afs/zhuwenxuan/project/RobotSmith/eef/objects_usd
+  obj_dir: /mnt/afs/zhuwenxuan/project/RobotSmith/eef/normalized_models
+
+# Robot USD
+robot:
+  franka_usd: /mnt/afs/zhuwenxuan/project/inp/IsaacLab-nonPrehensile/bare_panda_instanceable.usd

@@ -113,7 +113,7 @@ def reset_initial_object_position(
     for env_id_int in range(env.num_envs):
         tool_idx = env_id_int % len(eef_assets_cfg)
         tool_cloud_obj = get_cached_cloud(eef_assets_cfg[tool_idx].obj_path)
-        pts = torch.tensor(tool_cloud_obj.points, dtype=torch.float32, device=env.device)
+        pts = tool_cloud_obj._get_points_torch(env.device).float()
         if hasattr(env, "_tool_scales"):
             pts = pts * env._tool_scales[env_id_int].float()
         t_min, t_max = _get_aabb(eef_pos_w[env_id_int], eef_rot[env_id_int], pts)
@@ -332,100 +332,86 @@ def randomize_terrain_material(
     sim_utils.bind_physics_material(collision_prim.GetPrimPath(), physics_material_path)
 
 def compute_head_area_offsets_from_usd(env) -> "torch.Tensor":
-    """Compute per-env head area offsets in the tool's LOCAL frame using USD bounding boxes.
+    """Compute per-env head area offsets in the tool's LOCAL frame using OBJ mesh bounds.
 
-    Uses ComputeLocalBound (mesh-local, unaffected by world rotation) + prim scale to
-    correctly map head_area_norm (normalized to the OBJ mesh bbox) to a scaled local offset.
+    Uses the tool's OBJ file (via cached point cloud) to compute bounding box bounds in
+    canonical (unscaled) mesh space, applies head_area_norm interpolation, then scales by
+    the per-tool-type scale from UsdFileCfg.
+
+    This avoids the instance-proxy contamination that occurs when querying USD BBoxCache
+    on env_1+ prims in Isaac Lab multi-env setups: those prims are instance proxies whose
+    ComputeLocalBound results include the environment world-origin offset, causing markers
+    to drift by one env_spacing per tool type index.
     """
-    from pxr import UsdGeom, Usd
+    from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import get_cached_cloud
 
     eef_asset = env.scene["eef"]
     assets_cfg = eef_asset.cfg.spawn.assets_cfg
 
     head_area_offsets = torch.zeros(env.num_envs, 3, device=env.device)
+    num_tool_types = len(assets_cfg)
 
-    bbox_cache = UsdGeom.BBoxCache(
-        Usd.TimeCode.Default(), includedPurposes=[UsdGeom.Tokens.default_]
-    )
+    type_offsets = {}  # asset_idx -> torch.Tensor (3,)
 
-    for env_id in range(env.num_envs):
-        asset_idx = env_id % len(assets_cfg)
+    for asset_idx in range(num_tool_types):
         tool_cfg = assets_cfg[asset_idx]
 
         head_area_norm = getattr(tool_cfg, "head_area_norm", None)
         if head_area_norm is None:
-            if env_id < 3:
-                print(f"[DEBUG head_area env_{env_id}] No head_area_norm on cfg, offset=[0,0,0]")
+            type_offsets[asset_idx] = torch.zeros(3, device=env.device)
+            # print(f"[DEBUG head_area tool_{asset_idx}] No head_area_norm, offset=[0,0,0]")
+            continue
+
+        obj_path = getattr(tool_cfg, "obj_path", None)
+        if obj_path is None:
+            type_offsets[asset_idx] = torch.zeros(3, device=env.device)
+            # print(f"[WARNING head_area tool_{asset_idx}] No obj_path, offset=[0,0,0]")
             continue
 
         mid_norm = [(head_area_norm[0][i] + head_area_norm[1][i]) / 2.0 for i in range(3)]
 
-        prim_path = f"/World/envs/env_{env_id}/eef"
-        prim = prim_utils.get_prim_at_path(prim_path)
-        if not prim or not prim.IsValid():
-            print(f"[WARNING head_area] Prim not found: {prim_path}")
-            continue
+        # Compute OBJ-space bbox from the cached point cloud (canonical, no env offset).
+        cloud = get_cached_cloud(obj_path)
+        pts = torch.tensor(cloud.points, dtype=torch.float32, device=env.device)
+        bbox_min = pts.min(dim=0).values
+        bbox_max = pts.max(dim=0).values
 
-        # Extract scale from the prim's own xformOps (set by UsdFileCfg.scale at spawn)
-        scale = [1.0, 1.0, 1.0]
-        xform_ops = UsdGeom.Xformable(prim).GetOrderedXformOps()
-        for op in xform_ops:
-            if op.GetOpType() == UsdGeom.XformOp.TypeScale:
-                s = op.Get()
-                scale = [s[0], s[1], s[2]]
-                break
+        # Head area center in unscaled OBJ space
+        mid_norm_t = torch.tensor(mid_norm, dtype=torch.float32, device=env.device)
+        head_area_unscaled = bbox_min + mid_norm_t * (bbox_max - bbox_min)
 
-        # Find the child mesh/xform prim to get a bbox in the eef prim's LOCAL frame.
-        # ComputeLocalBound on the root /eef prim includes the eef's own translate/rotate
-        # xformOps (which differ per environment), so we use a child prim instead — a child
-        # has no translate/rotate of its own, so its local bound IS the mesh geometry bbox.
-        mesh_prim = None
-        stage = omni.usd.get_context().get_stage()
-        for child in prim.GetChildren():
-            type_name = child.GetTypeName()
-            if type_name in ("Mesh", "Xform"):
-                mesh_prim = child
-                break
-        if mesh_prim is None:
-            # Fallback: search one more level deep
-            for child in prim.GetChildren():
-                for grandchild in child.GetChildren():
-                    if grandchild.GetTypeName() in ("Mesh", "Xform"):
-                        mesh_prim = grandchild
-                        break
-                if mesh_prim is not None:
-                    break
+        # Scale: read directly from UsdFileCfg.scale (set at load time, no USD query needed)
+        cfg_scale = getattr(tool_cfg, "scale", None)
+        if cfg_scale is not None:
+            scale_t = torch.tensor(list(cfg_scale), dtype=torch.float32, device=env.device)
+        elif hasattr(env, "_tool_scales"):
+            scale_t = env._tool_scales[asset_idx].float()
+        else:
+            scale_t = torch.ones(3, device=env.device)
 
-        if mesh_prim is None:
-            print(f"[WARNING head_area env_{env_id}] No child Mesh/Xform found, falling back to root prim bbox")
-            mesh_prim = prim
+        # The normalized OBJ is centered at z=0, but in simulation panda_link8 sits at the
+        # BASE of the tool (z≈bbox_min in normalized space, because the normalization process
+        # centered the original mesh whose attachment end was at z≈0).
+        # For X and Y panda_link8 is at the OBJ origin (≈0), so those components are unchanged.
+        # For Z, subtract bbox_min[2] so the offset is measured from the attachment point.
+        head_area_from_attachment = head_area_unscaled.clone()
+        head_area_from_attachment[2] = head_area_unscaled[2] - bbox_min[2]
+        head_area_local = head_area_from_attachment * scale_t
+        type_offsets[asset_idx] = head_area_local
 
-        # ComputeLocalBound on the child gives the bbox in eef-local space (pure mesh geometry,
-        # no world translate/rotate applied), matching the OBJ file coordinate space.
-        bbox_local = bbox_cache.ComputeLocalBound(mesh_prim)
-        bbox_range = bbox_local.GetRange()
-        bbox_min_l = [bbox_range.GetMin()[i] for i in range(3)]
-        bbox_max_l = [bbox_range.GetMax()[i] for i in range(3)]
+        # print(f"[DEBUG head_area tool_{asset_idx}] mid_norm={[round(v,3) for v in mid_norm]}")
+        # print(f"[DEBUG head_area tool_{asset_idx}] bbox_min={[round(v,4) for v in bbox_min.tolist()]} max={[round(v,4) for v in bbox_max.tolist()]}")
+        # print(f"[DEBUG head_area tool_{asset_idx}] scale={[round(v,4) for v in scale_t.tolist()]}")
+        # print(f"[DEBUG head_area tool_{asset_idx}] head_area_local={[round(v,4) for v in head_area_local.tolist()]}")
 
-        # Head area position in un-scaled local (OBJ) space
-        head_area_unscaled = [
-            bbox_min_l[i] + mid_norm[i] * (bbox_max_l[i] - bbox_min_l[i])
-            for i in range(3)
-        ]
+    # Broadcast: assign each env the offset for its tool type.
+    for env_id in range(env.num_envs):
+        asset_idx = env_id % num_tool_types
+        head_area_offsets[env_id] = type_offsets.get(asset_idx, torch.zeros(3, device=env.device))
 
-        # Scale the local offset: this is the fixed vector in link8's local frame
-        head_area_local = [head_area_unscaled[i] * scale[i] for i in range(3)]
-        head_area_offsets[env_id] = torch.tensor(
-            head_area_local, dtype=torch.float32, device=env.device
-        )
-
-        if env_id < 3:
-            print(f"[DEBUG head_area env_{env_id}] mid_norm={[round(v,3) for v in mid_norm]}")
-            print(f"[DEBUG head_area env_{env_id}] bbox_local_min={[round(v,4) for v in bbox_min_l]} max={[round(v,4) for v in bbox_max_l]}")
-            print(f"[DEBUG head_area env_{env_id}] scale={[round(v,4) for v in scale]}")
-            print(f"[DEBUG head_area env_{env_id}] head_area_local={[round(v,4) for v in head_area_local]}")
-
-    print(f"[DEBUG head_area] Done. offsets[0]={head_area_offsets[0].tolist()}")
+    #print(f"[DEBUG head_area] Done. offsets[0]={head_area_offsets[0].tolist()}")
+    #if env.num_envs > 1:
+    #    print(f"[DEBUG head_area] offsets[1]={head_area_offsets[1].tolist()} (should equal offsets[0] if same tool type)")
     return head_area_offsets
 
 
@@ -508,40 +494,30 @@ def update_eef_pose(env, env_ids=None):
     eef.data.root_state_w[env_ids, 3:7] = robot.data.body_state_w[env_ids, link7_idx, 3:7]
     eef.write_root_state_to_sim(eef.data.root_state_w, env_ids=env_ids)
 
-    # Debug: print eef base vs head area once every 200 calls
-    if not hasattr(env, '_update_eef_debug_counter'):
-        env._update_eef_debug_counter = 0
-    env._update_eef_debug_counter += 1
-    if env._update_eef_debug_counter % 2 == 1:
-        from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.mdp.observations import get_head_area_pos_w
-        eef_base_w = eef.data.root_state_w[0, :3].tolist()
-        head_area_w = get_head_area_pos_w(env)[0].tolist()
-        offsets = getattr(env, '_head_area_offsets', None)
-        offset0 = offsets[0].tolist() if offsets is not None else None
-        print(f"[DEBUG update_eef step={env._update_eef_debug_counter}]")
-        print(f"  eef_base_w  (env0): {[round(v,4) for v in eef_base_w]}")
-        print(f"  head_area_w (env0): {[round(v,4) for v in head_area_w]}")
-        print(f"  _head_area_offsets[0]: {[round(v,4) for v in offset0] if offset0 else None}")
-
-    # Visualize eef tool position
+    # Visualize head area position using freshly-set eef state (avoids ee_frame sensor lag).
     if getattr(env.cfg, 'visualize_eef_position', False):
-        from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.mdp.observations import get_head_area_pos_w
-        head_area_pos_w = get_head_area_pos_w(env)  # (N, 3) – actual head area world pos
-        # Build 7D pose for visualizer: [x, y, z, qw, qx, qy, qz]
-        head_area_pose_7d = torch.cat([head_area_pos_w, eef.data.root_state_w[:, 3:7]], dim=-1)
+        from isaaclab.utils.math import matrix_from_quat as _mfq
+        eef_pos_w = eef.data.root_state_w[:, :3]    # (N, 3) – current panda_link8 pos
+        eef_quat_w = eef.data.root_state_w[:, 3:7]  # (N, 4)
+        R = _mfq(eef_quat_w)                         # (N, 3, 3)
+        offset = env._head_area_offsets              # (N, 3)
+        head_area_pos_w = eef_pos_w + torch.bmm(R, offset.unsqueeze(-1)).squeeze(-1)
+        head_area_pose_7d = torch.cat([head_area_pos_w, eef_quat_w], dim=-1)
         visualize_eef_position(env, head_area_pose_7d)
 
 def visualize_eef_position(env, eef_pose_7d: torch.Tensor):
     """Visualize the eef tool position."""
     try:
-        from isaaclab.markers import VisualizationMarkers
-        from isaaclab.markers.config import FRAME_MARKER_CFG
+        # Create the visualizer only once and cache it on the env object.
+        # Recreating it every step causes stale USD prims and wrong visual positions.
+        if not hasattr(env, '_eef_position_visualizer') or env._eef_position_visualizer is None:
+            from isaaclab.markers import VisualizationMarkers
+            from isaaclab.markers.config import FRAME_MARKER_CFG
 
-        marker_cfg = FRAME_MARKER_CFG.copy()
-        marker_cfg.prim_path = "/Visuals/EefPosition"
-        marker_cfg.markers["frame"].scale = (0.1, 0.1, 0.1)
-        env._eef_position_visualizer = VisualizationMarkers(marker_cfg)
-        print(f"[DEBUG visualize_eef] Visualizer created at /Visuals/EefPosition")
+            marker_cfg = FRAME_MARKER_CFG.copy()
+            marker_cfg.prim_path = "/Visuals/EefPosition"
+            marker_cfg.markers["frame"].scale = (0.1, 0.1, 0.1)
+            env._eef_position_visualizer = VisualizationMarkers(marker_cfg)
 
         world_positions = eef_pose_7d[:, :3]
         quaternions = eef_pose_7d[:, 3:7]

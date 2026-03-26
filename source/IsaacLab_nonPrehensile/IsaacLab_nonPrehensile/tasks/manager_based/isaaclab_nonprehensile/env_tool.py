@@ -141,8 +141,8 @@ def load_tools_from_json(tools_json_path, usd_dir, obj_dir, color=(0.8, 0.3, 0.3
             print(f"[WARNING] Tool USD not found: {usd_path}, skipping...")
             continue
 
-        # Randomize scale (0.1 to 0.2 range as absolute scale, matching original behavior)
-        scale_factor = random.uniform(0.1, 0.2)
+        # Randomize scale (0.08 to 0.17 range as absolute scale, matching original behavior)
+        scale_factor = random.uniform(0.08, 0.17)
         final_scale = scale_factor  # Use directly, not multiplied by TOOL_SCALE
 
         # Store raw head_area normalized [0,1] data for later USD-bbox-based computation
@@ -175,8 +175,6 @@ def get_cached_cloud(obj_path):
     return _CLOUD_CACHE[key]
 
 
-# Tool scale factor (applied to USD and calculations)
-TOOL_SCALE = 0.01
 
 default_joint_pos = FRANKA_PANDA_HIGH_PD_CFG.init_state.joint_pos.copy()
 # User-defined joint workspace for Franka arm (7 DOF)
@@ -389,7 +387,8 @@ class ObservationsCfg:
         # abs_goal = ObsTerm(func=mdp.abs_pose_goal, params={"command_name": "target_object_pose"})
         # cur_pose = ObsTerm(func=mdp.object_pose_9d_in_env_frame)
         
-        # Physical Parameters (5D: mass, object_static_friction, object_dynamic_friction, hand_friction, restitution)
+        # Physical Parameters (5D: object_mass, object_static_friction, hand_friction, ground_friction, restitution)
+        # NOTE: enable tool_mass in mdp.phys_params to restore 6D for new training runs.
         phys_params = ObsTerm(func=mdp.phys_params)
 
         def __post_init__(self):
@@ -460,7 +459,7 @@ class EventCfg:
         func=mdp.randomize_rigid_body_mass,
         mode="reset",
         params={
-            "asset_cfg": SceneEntityCfg("object"),
+            "asset_cfg": SceneEntityCfg("eef"),
             "mass_distribution_params": (0.1, 0.5),  # Mass range: 0.1 to 0.5 kg
             "operation": "abs",  # Absolute value operation
             "distribution": "uniform",
@@ -611,8 +610,8 @@ class NonPrehensileEnvCfg(ManagerBasedRLEnvCfg):
         self.episode_length_s = 30
         
         # Viewer settings
-        # self.viewer.eye = (2.5, 0.5, 0.8)
-        self.viewer.eye = (6, 0, 6)
+        self.viewer.eye = (2.5, 0.5, 0.8)
+        # self.viewer.eye = (6, 0, 6)
         
         # Simulation settings - match reference config dt
         self.sim.dt = 1 / 80
