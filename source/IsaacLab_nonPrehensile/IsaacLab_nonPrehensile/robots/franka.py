@@ -24,15 +24,15 @@ from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
 
 import os
 
-FRANKA_FORK_USD_PATH = os.path.join(
+FRANKA_TOOL_USD_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     '..', '..', '..', '..',
-    'Franka_with_000_robotic_fork_effector_var_000', 'panda_instanceable_tool.usd'
+    'robot_usd', 'panda_instanceable_000_robotic_fork_effector_var_000.usd'
 )
 
-FRANKA_PANDA_FORK_CFG = ArticulationCfg(
+FRANKA_PANDA_TOOL_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
-        usd_path=FRANKA_FORK_USD_PATH,
+        usd_path=FRANKA_TOOL_USD_PATH,
         activate_contact_sensors=False,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
@@ -73,12 +73,12 @@ FRANKA_PANDA_FORK_CFG = ArticulationCfg(
 """Configuration of Franka Emika Panda robot."""
 
 
-FRANKA_PANDA_FORK_HIGH_PD_CFG = FRANKA_PANDA_FORK_CFG.copy()
-FRANKA_PANDA_FORK_HIGH_PD_CFG.spawn.rigid_props.disable_gravity = True
-FRANKA_PANDA_FORK_HIGH_PD_CFG.actuators["panda_shoulder"].stiffness = 400.0
-FRANKA_PANDA_FORK_HIGH_PD_CFG.actuators["panda_shoulder"].damping = 80.0
-FRANKA_PANDA_FORK_HIGH_PD_CFG.actuators["panda_forearm"].stiffness = 400.0
-FRANKA_PANDA_FORK_HIGH_PD_CFG.actuators["panda_forearm"].damping = 80.0
+FRANKA_PANDA_TOOL_HIGH_PD_CFG = FRANKA_PANDA_TOOL_CFG.copy()
+FRANKA_PANDA_TOOL_HIGH_PD_CFG.spawn.rigid_props.disable_gravity = True
+FRANKA_PANDA_TOOL_HIGH_PD_CFG.actuators["panda_shoulder"].stiffness = 400.0
+FRANKA_PANDA_TOOL_HIGH_PD_CFG.actuators["panda_shoulder"].damping = 80.0
+FRANKA_PANDA_TOOL_HIGH_PD_CFG.actuators["panda_forearm"].stiffness = 400.0
+FRANKA_PANDA_TOOL_HIGH_PD_CFG.actuators["panda_forearm"].damping = 80.0
 """Configuration of Franka Emika Panda robot with stiffer PD control.
 
 This configuration is useful for task-space control using differential IK.

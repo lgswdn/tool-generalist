@@ -12,10 +12,11 @@ paths.yaml
 **/.thumbs
 
 # No USD files allowed in the repo
-# **/*.usd
-# **/*.usda
-# **/*.usdc
-# **/*.usdz
+**/*.usd
+**/*.usda
+**/*.usdc
+**/*.usdz
+robot_usd/
 
 # Python
 .DS_Store

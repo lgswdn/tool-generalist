@@ -1,4 +1,6 @@
 import argparse
+import glob
+import math
 import os
 from datetime import datetime
 
@@ -9,6 +11,12 @@ parser.add_argument("--num_envs", type=int, default=16, help="Number of environm
 parser.add_argument("--video", action="store_true", default=False, help="Record a video and save it.")
 parser.add_argument("--video_length", type=int, default=300, help="Length of recorded video (in steps).")
 parser.add_argument("--video_fps", type=int, default=30, help="FPS of the recorded video.")
+parser.add_argument(
+    "--robot_usd_dir",
+    type=str,
+    default=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "robot_usd")),
+    help="Directory containing robot USD files. All '*.usd' files in this directory will be used.",
+)
 
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -34,7 +42,7 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.terrains import TerrainImporterCfg
 
 from isaaclab_assets.robots.franka import FRANKA_PANDA_HIGH_PD_CFG
-from IsaacLab_nonPrehensile.robots.franka import FRANKA_PANDA_FORK_HIGH_PD_CFG
+from IsaacLab_nonPrehensile.robots.franka import FRANKA_PANDA_TOOL_HIGH_PD_CFG
 
 from isaaclab.envs.mdp.actions.actions_cfg import RelativeJointPositionActionCfg
 
@@ -47,6 +55,41 @@ from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR, check_file_path
 # LOCAL_FRANKA_USD_PATH = "/mnt/afs/wangyuze/ToolGeneralist/static/franka/Robots/FrankaEmika/panda_instanceable.usd"
 # REMOTE_FRANKA_USD_PATH = f"{ISAACLAB_NUCLEUS_DIR}/Robots/FrankaEmika/panda_instanceable.usd"
 # FRANKA_USD_PATH_TO_USE = LOCAL_FRANKA_USD_PATH if os.path.isfile(LOCAL_FRANKA_USD_PATH) else REMOTE_FRANKA_USD_PATH
+
+
+def collect_robot_usd_paths(usd_dir: str) -> list[str]:
+    """Collect and sort all USD files in a directory (non-recursive)."""
+    usd_dir = os.path.abspath(usd_dir)
+    if not os.path.isdir(usd_dir):
+        raise FileNotFoundError(f"Robot USD directory does not exist: {usd_dir}")
+
+    usd_paths = sorted(
+        p
+        for p in glob.glob(os.path.join(usd_dir, "*.usd"))
+        if os.path.isfile(p) and os.path.basename(p) != "panda_instanceable.usd"
+    )
+    if len(usd_paths) == 0:
+        raise FileNotFoundError(f"No USD files found in directory: {usd_dir}")
+    return usd_paths
+
+
+def build_multi_usd_robot_cfg(usd_paths: list[str]):
+    """Create a robot cfg that cycles through USD files across envs in order."""
+    robot_cfg = FRANKA_PANDA_TOOL_HIGH_PD_CFG.copy()
+    base_spawn_cfg = robot_cfg.spawn
+
+    robot_cfg.spawn = sim_utils.MultiUsdFileCfg(
+        usd_path=usd_paths,
+        random_choice=False,
+        activate_contact_sensors=base_spawn_cfg.activate_contact_sensors,
+        rigid_props=base_spawn_cfg.rigid_props,
+        articulation_props=base_spawn_cfg.articulation_props,
+        collision_props=base_spawn_cfg.collision_props,
+        mass_props=base_spawn_cfg.mass_props,
+        visual_material=base_spawn_cfg.visual_material,
+        semantic_tags=base_spawn_cfg.semantic_tags,
+    )
+    return robot_cfg
 
 def load_objects():
     usd_cfg = sim_utils.UsdFileCfg(
@@ -71,19 +114,20 @@ class NonPrehensileSceneCfg(InteractiveSceneCfg):
     record_camera = CameraCfg(
         prim_path="{ENV_REGEX_NS}/RecordCamera",
         update_period=0.0,
-        height=720,
-        width=1280,
+        height=1080,
+        width=1920,
         data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(
-            focal_length=24.0,
+            focal_length=18.0,
             focus_distance=400.0,
             horizontal_aperture=20.955,
             clipping_range=(0.1, 1.0e5),
         ),
-        # This pose roughly looks at the environment origin.
+        # Diagonal view from above, looking toward the env origin.
         offset=CameraCfg.OffsetCfg(
-            pos=(2.5, 2.5, 2.5),
-            rot=(-0.1759, 0.3399, 0.8205, -0.4247),
+            pos=(8.0, 8.0, 8.0),
+            # yaw right by ~45 deg from previous diagonal view
+            rot=(-0.3251, 0.6280, 0.6280, -0.3251),
             convention="ros",
         ),
     )
@@ -108,7 +152,7 @@ class NonPrehensileSceneCfg(InteractiveSceneCfg):
         spawn=sim_utils.DomeLightCfg(color=(0.75, 0.75, 0.75), intensity=3000.0),
     )
 
-    robot = FRANKA_PANDA_FORK_HIGH_PD_CFG.replace(
+    robot = FRANKA_PANDA_TOOL_HIGH_PD_CFG.replace(
         prim_path="{ENV_REGEX_NS}/robot",
     )
 
@@ -175,14 +219,33 @@ def main():
     # else:
     #     raise FileNotFoundError(f"Franka USD not found: {FRANKA_USD_PATH_TO_USE}")
 
+    usd_paths = collect_robot_usd_paths(args_cli.robot_usd_dir)
+    print(f"[INFO] Loaded {len(usd_paths)} robot USD files from: {os.path.abspath(args_cli.robot_usd_dir)}")
+    for i, usd_path in enumerate(usd_paths):
+        print(f"       [{i:02d}] {usd_path}")
+
     env_cfg = NonPrehensileEnvCfg()
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.sim.device = args_cli.device
+    env_cfg.scene.robot = build_multi_usd_robot_cfg(usd_paths).replace(prim_path="{ENV_REGEX_NS}/robot")
+
+    print(
+        "[INFO] Record camera diagonal-view pose: "
+        f"pos={env_cfg.scene.record_camera.offset.pos}, "
+        f"rot={env_cfg.scene.record_camera.offset.rot}, "
+        f"resolution={env_cfg.scene.record_camera.width}x{env_cfg.scene.record_camera.height}"
+    )
+
+    preview_envs = min(args_cli.num_envs, 16)
+    print(f"[INFO] Deterministic env->USD assignment preview (first {preview_envs} envs):")
+    for env_id in range(preview_envs):
+        usd_path = usd_paths[env_id % len(usd_paths)]
+        print(f"       env_{env_id:03d} -> {os.path.basename(usd_path)}")
+
     env = ManagerBasedEnv(cfg=env_cfg)
 
     # Reset once to initialize internal buffers and sensors.
     env.reset()
-    zero_action = torch.zeros((env.num_envs, env.action_manager.total_action_dim), device=env.device)
 
     # ── DEBUG: robot articulation info ──
     robot = env.scene["robot"]
@@ -194,7 +257,7 @@ def main():
     print(f"[DEBUG] Joint names: {robot.joint_names}")
     print(f"[DEBUG] Action dim : {env.action_manager.total_action_dim}")
     print(f"[DEBUG] Init joint pos (cfg):")
-    for jname, jval in FRANKA_PANDA_FORK_HIGH_PD_CFG.init_state.joint_pos.items():
+    for jname, jval in FRANKA_PANDA_TOOL_HIGH_PD_CFG.init_state.joint_pos.items():
         print(f"         {jname}: {jval}")
     print(f"[DEBUG] Actual joint pos after reset (env 0):")
     jp = robot.data.joint_pos[0].cpu().numpy()
@@ -211,6 +274,7 @@ def main():
     video_writer = None
     frame_count = 0
     video_path = None
+    frames_dir = None
 
     if args_cli.video:
         log_dir = os.path.join(os.getcwd(), "videos", "test_eef", datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
@@ -228,7 +292,11 @@ def main():
 
     step_count = 0
     while simulation_app.is_running():
-        env.step(zero_action)
+        # Sample random actions in [-1, 1] for each env and each action dimension.
+        random_action = 2.0 * torch.rand(
+            (env.num_envs, env.action_manager.total_action_dim), device=env.device
+        ) - 1.0
+        env.step(0.5 * random_action)
         step_count += 1
 
         # Print joint info every 50 steps for first 500 steps
@@ -249,7 +317,7 @@ def main():
             frame_count += 1
 
             # Save key frames as PNG (viewable in VSCode)
-            if frame_count == 1 or frame_count % 50 == 0 or frame_count >= args_cli.video_length:
+            if frames_dir is not None and (frame_count == 1 or frame_count % 50 == 0 or frame_count >= args_cli.video_length):
                 png_path = os.path.join(frames_dir, f"frame_{frame_count:04d}.png")
                 cv2.imwrite(png_path, frame_bgr)
                 print(f"[INFO] Saved frame: {png_path}")

@@ -105,9 +105,24 @@ parser.add_argument(
 parser.add_argument("--tool-mount-name", type=str, default="tool_mount", help="Prim name for tool mount xform.")
 parser.add_argument("--joint-name", type=str, default="tool_weld_joint", help="Fixed joint prim name.")
 
-parser.add_argument("--tool-pos", type=str, default="0,0,0", help="Tool mount translation xyz.")
-parser.add_argument("--tool-rot", type=str, default="1,0,0,0", help="Tool mount quaternion wxyz.")
-parser.add_argument("--tool-scale", type=str, default="1,1,1", help="Tool mount scale xyz.")
+parser.add_argument(
+	"--tool-pos",
+	type=str,
+	default="0.08799998,-4.9709342e-8,0.926",
+	help="Tool mount translation xyz.",
+)
+parser.add_argument(
+	"--tool-rot",
+	type=str,
+	default="-1.4551854e-11,0.9238795,0.38268346,-4.6566123e-10",
+	help="Tool mount quaternion wxyz.",
+)
+parser.add_argument(
+	"--tool-scale",
+	type=str,
+	default="0.1,0.1,0.1",
+	help="Tool mount scale xyz.",
+)
 parser.add_argument(
 	"--strip-gripper-mode",
 	type=str,
@@ -125,6 +140,12 @@ parser.add_argument("--contact-offset", type=float, default=0.005)
 parser.add_argument("--rest-offset", type=float, default=0.0)
 
 parser.add_argument("--overwrite", action="store_true", default=False)
+parser.add_argument(
+	"--reuse-output-root",
+	action="store_true",
+	default=False,
+	help="Reuse existing output-root instead of failing when it already exists.",
+)
 args = parser.parse_args()
 
 app_launcher = AppLauncher(args)
@@ -377,11 +398,21 @@ def main():
 
 	# 1) Copy source tree
 	if out_root.exists():
-		if not args.overwrite:
-			raise FileExistsError(f"output-root already exists: {out_root}. Use --overwrite to replace it.")
-		shutil.rmtree(out_root)
-	shutil.copytree(src_root, out_root)
-	print("Source tree copied.")
+		if args.overwrite:
+			shutil.rmtree(out_root)
+			shutil.copytree(src_root, out_root)
+			print("Source tree copied.")
+		elif args.reuse_output_root:
+			# Keep existing output-root and ensure base Franka assets exist.
+			shutil.copytree(src_root, out_root, dirs_exist_ok=True)
+			print("Source tree reused (merged missing base assets).")
+		else:
+			raise FileExistsError(
+				f"output-root already exists: {out_root}. Use --overwrite to replace it or --reuse-output-root to append new USDs."
+			)
+	else:
+		shutil.copytree(src_root, out_root)
+		print("Source tree copied.")
 
 	# 2) Copy source USD to a new output USD for editing
 	shutil.copy2(out_root / args.src_usd, out_usd)
@@ -429,8 +460,11 @@ def main():
 		raise RuntimeError(f"Attach link not found by name: {args.attach_link_name}")
 	print(f"Attach link found: {link_prim.GetPath()}")
 	
-	# 6) Add tool reference under attach link
-	tool_mount_path = link_prim.GetPath().AppendChild(args.tool_mount_name)
+	# 6) Add tool reference under /panda (not under panda_link7), matching spatula.usd.
+	panda_root_prim = stage.GetPrimAtPath(Sdf.Path(PANDA_ROOT_PATH))
+	if not panda_root_prim.IsValid():
+		raise RuntimeError(f"Expected panda root not found: {PANDA_ROOT_PATH}")
+	tool_mount_path = panda_root_prim.GetPath().AppendChild(args.tool_mount_name)
 	tool_mount_prim = stage.DefinePrim(tool_mount_path, "Xform")
 	tool_root_prim = args.tool_root_prim.strip() or "/root"
 	tool_mount_prim.GetReferences().AddReference(authored_tool_ref_path, Sdf.Path(tool_root_prim))
@@ -447,7 +481,7 @@ def main():
 			if _apply_variant_if_exists(tool_mount_prim, vs_name, vs_value):
 				variant_changes.append(f"{vs_name}={vs_value}")
 
-	# Set mount transform
+	# Set mount transform from args (defaults match spatula.usd template).
 	pos = _parse_vec3(args.tool_pos)
 	rot = _parse_quat_wxyz(args.tool_rot)
 	scale = _parse_vec3(args.tool_scale)

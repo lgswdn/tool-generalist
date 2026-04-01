@@ -65,21 +65,18 @@ def main() -> None:
 	parser.add_argument(
 		"--generator-script",
 		type=str,
-		default="/mnt/afs/wangyuze/ToolGeneralist/IsaacLab-scripts/generate_franka.py",
+		default="/mnt/afs/wangyuze/ToolGeneralist/tool-generalist/scripts/generate_franka.py",
 		help="Path to generate_franka.py.",
 	)
 	parser.add_argument(
 		"--output-base",
 		type=str,
 		default="/mnt/afs/wangyuze/ToolGeneralist/static/franka/generated/Robots",
-		help="Base output folder. Each tool writes to output-base/Franka_with_<tool_name>",
+		help="Shared output folder. All generated USDs are written here with one copied Franka base.",
 	)
-	parser.add_argument("--tool-scale", type=str, default="1,1,1")
-	parser.add_argument("--tool-pos", type=str, default="0,0,0")
-	parser.add_argument("--tool-rot", type=str, default="1,0,0,0")
 	parser.add_argument("--headless", action="store_true", default=True)
 	parser.add_argument("--no-headless", action="store_true", default=False)
-	parser.add_argument("--mirror-tool-assets", action="store_true", default=True)
+	parser.add_argument("--mirror-tool-assets", action="store_true", default=False)
 	parser.add_argument("--no-mirror-tool-assets", action="store_true", default=False)
 	parser.add_argument("--enable-gravity", action="store_true", default=True)
 	parser.add_argument("--disable-gravity", action="store_true", default=False)
@@ -119,7 +116,8 @@ def main() -> None:
 
 	for tool_name, tool_usd in tool_items:
 		safe_tool_name = _safe_name(tool_name)
-		output_root = output_base / f"Franka_with_{safe_tool_name}"
+		output_root = output_base
+		output_usd = f"panda_instanceable_{safe_tool_name}.usd"
 
 		cmd = [
 			str(isaaclab_sh),
@@ -129,12 +127,8 @@ def main() -> None:
 			str(tool_usd),
 			"--output-root",
 			str(output_root),
-			"--tool-scale",
-			args.tool_scale,
-			"--tool-pos",
-			args.tool_pos,
-			"--tool-rot",
-			args.tool_rot,
+			"--output-usd",
+			output_usd,
 		]
 		if mirror:
 			cmd.append("--mirror-tool-assets")
@@ -142,8 +136,10 @@ def main() -> None:
 			cmd.append("--enable-gravity")
 		if headless:
 			cmd.append("--headless")
-		if overwrite:
+		if overwrite and success == 0 and len(failures) == 0:
 			cmd.append("--overwrite")
+		else:
+			cmd.append("--reuse-output-root")
 
 		env = os.environ.copy()
 		if args.cuda_visible_devices.strip():
