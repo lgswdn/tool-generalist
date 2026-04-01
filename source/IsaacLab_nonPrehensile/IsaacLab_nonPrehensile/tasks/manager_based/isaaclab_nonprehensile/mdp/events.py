@@ -503,7 +503,7 @@ def update_eef_pose(env, env_ids=None):
         offset = env._head_area_offsets              # (N, 3)
         head_area_pos_w = eef_pos_w + torch.bmm(R, offset.unsqueeze(-1)).squeeze(-1)
         head_area_pose_7d = torch.cat([head_area_pos_w, eef_quat_w], dim=-1)
-        visualize_eef_position(env, head_area_pose_7d)
+        # visualize_eef_position(env, head_area_pose_7d)
 
 def visualize_eef_position(env, eef_pose_7d: torch.Tensor):
     """Visualize the eef tool position."""

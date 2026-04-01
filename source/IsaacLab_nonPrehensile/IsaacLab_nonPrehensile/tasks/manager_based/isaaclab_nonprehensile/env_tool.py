@@ -327,7 +327,7 @@ class CommandsCfg:
     """Command terms for the MDP."""
     target_object_pose = mdp.StablePoseCommandCfg(
         resampling_time_range=(1e9, 1e9),
-        debug_vis=False,  # Visualize target pose
+        debug_vis=True,  # Visualize target pose
         xy_offset_range=0.15,
         initial_position_range=0.15,
     )
@@ -387,8 +387,7 @@ class ObservationsCfg:
         # abs_goal = ObsTerm(func=mdp.abs_pose_goal, params={"command_name": "target_object_pose"})
         # cur_pose = ObsTerm(func=mdp.object_pose_9d_in_env_frame)
         
-        # Physical Parameters (5D: object_mass, object_static_friction, hand_friction, ground_friction, restitution)
-        # NOTE: enable tool_mass in mdp.phys_params to restore 6D for new training runs.
+        # Physical Parameters (6D: object_mass, tool_mass, object_static_friction, hand_friction, ground_friction, restitution)
         phys_params = ObsTerm(func=mdp.phys_params)
 
         def __post_init__(self):
@@ -571,9 +570,9 @@ class NonPrehensileEnvCfg(ManagerBasedRLEnvCfg):
     # Observation normalization
     normalize_observations: bool = True  # Whether to normalize observations to [-1,1] range, except hand_state and pointcloud 
     # Visualization settings
-    visualize_current_object_pose: bool = False  # Enable current object pose visualization
+    visualize_current_object_pose: bool = True  # Enable current object pose visualization
     visualize_object_pointcloud: bool = False  # Enable object point cloud visualization for debug in first env
-    visualize_eef_position: bool = True  # Enable eef tool position visualization
+    visualize_eef_position: bool = False  # Enable eef tool position visualization
 
     # Performance settings
     use_torch_compile: bool = True  # Enable torch.compile on hot paths

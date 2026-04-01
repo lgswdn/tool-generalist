@@ -22,7 +22,13 @@ from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
 # Configuration
 ##
 
-FRANKA_FORK_USD_PATH = '/mnt/afs/wangyuze/ToolGeneralist/static/franka/generated/Robots/Franka_with_000_robotic_fork_effector_var_000/panda_instanceable_tool.usd'
+import os
+
+FRANKA_FORK_USD_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    '..', '..', '..', '..',
+    'Franka_with_000_robotic_fork_effector_var_000', 'panda_instanceable_tool.usd'
+)
 
 FRANKA_PANDA_FORK_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
@@ -33,7 +39,7 @@ FRANKA_PANDA_FORK_CFG = ArticulationCfg(
             max_depenetration_velocity=5.0,
         ),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-            enabled_self_collisions=True, solver_position_iteration_count=8, solver_velocity_iteration_count=0
+            enabled_self_collisions=False, solver_position_iteration_count=8, solver_velocity_iteration_count=0
         ),
         # collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.005, rest_offset=0.0),
     ),

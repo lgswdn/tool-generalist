@@ -296,13 +296,13 @@ def phys_params(
     device = env.scene[object_cfg.name].data.root_pos_w.device
     object: RigidObject = env.scene[object_cfg.name]
     hand: RigidObject = env.scene[hand_cfg.name]
-    # eef: RigidObject = env.scene[eef_cfg.name]  # uncomment for 6D
+    eef: RigidObject = env.scene[eef_cfg.name]
 
     # 1. Get object mass from IsaacLab's built-in interface
     object_mass = object.root_physx_view.get_masses().squeeze(-1)  # Shape: (num_envs,)
 
-    # 2. Get tool (eef) mass  -- uncomment for 6D
-    # tool_mass = eef.root_physx_view.get_masses().squeeze(-1)  # Shape: (num_envs,)
+    # 2. Get tool (eef) mass
+    tool_mass = eef.root_physx_view.get_masses().squeeze(-1)  # Shape: (num_envs,)
 
     # 3. Get object material properties from PhysX view
     # Material properties format: [static_friction, dynamic_friction, restitution]
@@ -330,7 +330,7 @@ def phys_params(
     # Stack into observation tensor: 5D (revert) -- for 6D add tool_mass as 2nd element
     phys_params_tensor = torch.stack([
         object_mass.to(device=device),        # (num_envs,) - object mass [0.1, 0.5]
-        # tool_mass.to(device=device),         # uncomment for 6D: tool mass [0.1, 0.5]
+        tool_mass.to(device=device),          # (num_envs,) - tool mass [0.1, 0.5]
         object_friction.to(device=device),     # (num_envs,) - object static friction [0.7, 1.0]
         hand_friction.to(device=device),       # (num_envs,) - hand friction coefficient [1.0, 1.5]
         ground_friction.to(device=device),     # (num_envs,) - ground friction coefficient [0.3, 0.8]

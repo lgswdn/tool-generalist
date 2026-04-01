@@ -184,6 +184,28 @@ def main():
     env.reset()
     zero_action = torch.zeros((env.num_envs, env.action_manager.total_action_dim), device=env.device)
 
+    # ── DEBUG: robot articulation info ──
+    robot = env.scene["robot"]
+    print(f"\n{'='*60}")
+    print(f"[DEBUG] Robot type: {type(robot)}")
+    print(f"[DEBUG] Num bodies : {robot.num_bodies}")
+    print(f"[DEBUG] Body names : {robot.body_names}")
+    print(f"[DEBUG] Num joints : {robot.num_joints}")
+    print(f"[DEBUG] Joint names: {robot.joint_names}")
+    print(f"[DEBUG] Action dim : {env.action_manager.total_action_dim}")
+    print(f"[DEBUG] Init joint pos (cfg):")
+    for jname, jval in FRANKA_PANDA_FORK_HIGH_PD_CFG.init_state.joint_pos.items():
+        print(f"         {jname}: {jval}")
+    print(f"[DEBUG] Actual joint pos after reset (env 0):")
+    jp = robot.data.joint_pos[0].cpu().numpy()
+    for i, name in enumerate(robot.joint_names):
+        print(f"         {name}: {jp[i]:.6f}")
+    print(f"[DEBUG] Actual joint vel after reset (env 0):")
+    jv = robot.data.joint_vel[0].cpu().numpy()
+    for i, name in enumerate(robot.joint_names):
+        print(f"         {name}: {jv[i]:.6f}")
+    print(f"{'='*60}\n")
+
     print(ISAACLAB_NUCLEUS_DIR)
 
     video_writer = None
@@ -194,15 +216,28 @@ def main():
         log_dir = os.path.join(os.getcwd(), "videos", "test_eef", datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
         os.makedirs(log_dir, exist_ok=True)
         video_path = os.path.join(log_dir, "test_eef.mp4")
+        frames_dir = os.path.join(log_dir, "frames")
+        os.makedirs(frames_dir, exist_ok=True)
 
         height = env.scene["record_camera"].cfg.height
         width = env.scene["record_camera"].cfg.width
         fourcc = cv2.VideoWriter.fourcc(*"mp4v")
         video_writer = cv2.VideoWriter(video_path, fourcc, args_cli.video_fps, (width, height))
         print(f"[INFO] Recording video to: {video_path}")
+        print(f"[INFO] Saving key frames (PNG) to: {frames_dir}")
 
+    step_count = 0
     while simulation_app.is_running():
         env.step(zero_action)
+        step_count += 1
+
+        # Print joint info every 50 steps for first 500 steps
+        if step_count <= 500 and step_count % 50 == 0:
+            jp = robot.data.joint_pos[0].cpu().numpy()
+            jv = robot.data.joint_vel[0].cpu().numpy()
+            max_vel = max(abs(jv))
+            drift = ""
+            print(f"[STEP {step_count:4d}] max|vel|={max_vel:.6f}  pos=[{', '.join(f'{p:.4f}' for p in jp)}]")
 
         if args_cli.video and video_writer is not None:
             rgb = env.scene["record_camera"].data.output["rgb"][0, ..., :3]
@@ -212,6 +247,12 @@ def main():
             frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
             video_writer.write(frame_bgr)
             frame_count += 1
+
+            # Save key frames as PNG (viewable in VSCode)
+            if frame_count == 1 or frame_count % 50 == 0 or frame_count >= args_cli.video_length:
+                png_path = os.path.join(frames_dir, f"frame_{frame_count:04d}.png")
+                cv2.imwrite(png_path, frame_bgr)
+                print(f"[INFO] Saved frame: {png_path}")
 
             if frame_count >= args_cli.video_length:
                 break
