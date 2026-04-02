@@ -27,7 +27,11 @@ EEF_DIR="$(cd "$EEF_DIR" && pwd)"   # canonicalize
 
 # ── External tools ────────────────────────────────────────────
 PAMO_DIR="${PAMO_DIR:-$HOME/project/pamo}"
-MAX_JOBS="${MAX_JOBS:-8}"
+
+# ── GPU detection & parallelism ───────────────────────────────
+NUM_GPUS=$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l)
+MAX_JOBS="${MAX_JOBS:-$NUM_GPUS}"   # default: 1 job per GPU
+GPU_IDX=0                           # round-robin counter
 
 # ── Sanity checks ─────────────────────────────────────────────
 if [ ! -d "$EEF_DIR/tmp_trial" ]; then
@@ -43,7 +47,8 @@ fi
 echo "──────────────────────────────────────────"
 echo "EEF_DIR  = $EEF_DIR"
 echo "PAMO_DIR = $PAMO_DIR"
-echo "MAX_JOBS = $MAX_JOBS"
+echo "NUM_GPUS = $NUM_GPUS"
+echo "MAX_JOBS = $MAX_JOBS  (round-robin across GPUs)"
 echo "──────────────────────────────────────────"
 
 # ── Conda ─────────────────────────────────────────────────────
@@ -95,9 +100,14 @@ for trial_dir in "$EEF_DIR"/tmp_trial/*; do
             wait -n 2>/dev/null || true
         done
 
+        # ── Assign GPU (round-robin) ──────────────────────────
+        GPU_ID=$(( GPU_IDX % NUM_GPUS ))
+        GPU_IDX=$(( GPU_IDX + 1 ))
+
         # ── Launch pamo + metadata copy in background ─────────
         (
-            echo "[START] $obj_file"
+            export CUDA_VISIBLE_DEVICES=$GPU_ID
+            echo "[GPU $GPU_ID] [START] $obj_file"
             python "$PAMO_DIR/example.py" \
                 --input "$obj_file" \
                 --output "$OUTPUT_OBJ" \
@@ -109,7 +119,7 @@ for trial_dir in "$EEF_DIR"/tmp_trial/*; do
             else
                 echo "Warning: Metadata JSON not found for $obj_file"
             fi
-            echo "[DONE]  $OUTPUT_OBJ"
+            echo "[GPU $GPU_ID] [DONE]  $OUTPUT_OBJ"
         ) &
 
     done
