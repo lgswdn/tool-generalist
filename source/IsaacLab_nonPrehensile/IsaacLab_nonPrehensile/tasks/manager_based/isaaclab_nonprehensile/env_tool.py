@@ -32,7 +32,11 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import GaussianNoiseCfg
 from isaaclab_assets.robots.franka import FRANKA_PANDA_HIGH_PD_CFG, FRANKA_PANDA_CFG
-from IsaacLab_nonPrehensile.robots.franka import FRANKA_PANDA_FORK_HIGH_PD_CFG
+from IsaacLab_nonPrehensile.robots.franka import (
+    FRANKA_PANDA_TOOL_HIGH_PD_CFG,
+    build_multi_tool_robot_cfg,
+    collect_robot_usd_paths,
+)
 from isaaclab.envs.mdp.actions.actions_cfg import JointPositionActionCfg, RelativeJointPositionActionCfg, JointVelocityActionCfg, JointEffortActionCfg, DifferentialInverseKinematicsActionCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdFileCfg
 from isaaclab.terrains import TerrainImporterCfg
@@ -136,22 +140,48 @@ def get_cached_cloud(obj_path):
 
 
 # ---------------------------------------------------------------------------
-# Fixed tool constants (fork welded to panda_link7 via fixed joint in robot USD)
+# Multi-tool data: each robot USD has a different welded tool. We build a
+# list of per-tool metadata (obj_path, head_area, name) that is indexed
+# at runtime via  env_id % len(TOOL_DATA).
 # ---------------------------------------------------------------------------
-TOOL_OBJ_PATH: str = _PATHS["tool_mesh"]["obj_path"]
-TOOL_SCALE: float = float(_PATHS["tool_mesh"].get("scale", 0.1))
+TOOL_SCALE: float = float(_PATHS.get("tools", _PATHS.get("tool_mesh", {})).get("scale", 0.1))
 
-# Load head_area_norm for the fixed tool from tools.json
-_TOOL_HEAD_AREA_JSON = _PATHS["tool_mesh"]["tools_json"]
-_TOOL_NAME = _PATHS["tool_mesh"]["tool_name"]
-with open(_TOOL_HEAD_AREA_JSON, "r") as _htf:
+# Collect all robot USD paths (deterministic sorted order)
+_TOOLS_CFG = _PATHS["tools"]
+TOOL_USD_PATHS: list[str] = collect_robot_usd_paths(_TOOLS_CFG["robots_usd_dir"])
+
+# Load the tools_adjusted.json (maps tool name → head_area)
+with open(_TOOLS_CFG["tools_json"], "r") as _htf:
     _tool_head_data = json.load(_htf)
-TOOL_HEAD_AREA_NORM = next(
-    (t.get("head_area") for t in _tool_head_data if t.get("name") == _TOOL_NAME),
-    None
-)
-if TOOL_HEAD_AREA_NORM is None:
-    print(f"[WARNING] head_area_norm not found for tool '{_TOOL_NAME}' in {_TOOL_HEAD_AREA_JSON}")
+_tool_head_lookup = {t["name"]: t.get("head_area") for t in _tool_head_data}
+
+# Build per-tool metadata list, one entry per USD, in the same order as TOOL_USD_PATHS
+TOOL_DATA: list[dict] = []
+for _usd_path in TOOL_USD_PATHS:
+    # Extract tool name from USD filename: panda_instanceable_<tool_name>.usd
+    _tool_name = os.path.splitext(os.path.basename(_usd_path))[0].replace("panda_instanceable_", "")
+    _obj_path = os.path.join(_TOOLS_CFG["obj_dir"], f"{_tool_name}.obj")
+    _head_area = _tool_head_lookup.get(_tool_name)
+    if _head_area is None:
+        print(f"[WARNING] head_area not found for tool '{_tool_name}' in {_TOOLS_CFG['tools_json']}")
+    if not os.path.isfile(_obj_path):
+        print(f"[WARNING] OBJ mesh not found for tool '{_tool_name}': {_obj_path}")
+    TOOL_DATA.append({
+        "name": _tool_name,
+        "obj_path": _obj_path,
+        "head_area": _head_area,
+    })
+
+print(f"[INFO] Loaded {len(TOOL_DATA)} tool variants from {_TOOLS_CFG['robots_usd_dir']}")
+
+# Legacy single-tool aliases (index 0) for backward-compatible imports
+TOOL_OBJ_PATH: str = TOOL_DATA[0]["obj_path"] if TOOL_DATA else ""
+TOOL_HEAD_AREA_NORM = TOOL_DATA[0].get("head_area") if TOOL_DATA else None
+
+
+def get_tool_data_for_env(env_id: int) -> dict:
+    """Return per-tool metadata dict for the given env_id."""
+    return TOOL_DATA[env_id % len(TOOL_DATA)]
 
 
 default_joint_pos = FRANKA_PANDA_HIGH_PD_CFG.init_state.joint_pos.copy()
@@ -240,11 +270,12 @@ class NonPrehensileSceneCfg(InteractiveSceneCfg):
     # NOTE: 'eef' RigidObjectCfg removed — tool is part of the robot articulation (welded to link7).
     # All tool observations are computed directly from the tool body's pose + cached OBJ mesh.
 
-    robot = FRANKA_PANDA_FORK_HIGH_PD_CFG.replace(
+    # Multi-tool robot: each env gets a different tool USD via MultiUsdFileCfg
+    robot = build_multi_tool_robot_cfg(TOOL_USD_PATHS).replace(
         prim_path="{ENV_REGEX_NS}/Robot",
         init_state=ArticulationCfg.InitialStateCfg(
             joint_pos=custom_joint_init
-        )
+        ),
     )
 
     # FrameTransformer anchored to link_coacd_convex_piece_0 (the tool body, welded to panda_link7 via fixed joint)
@@ -303,9 +334,9 @@ class ObservationsCfg:
             noise=GaussianNoiseCfg(mean=0.0, std=0.005, operation="add"),
         )
 
-        # Tool Cloud (512*3=1536D: tool point cloud in EE local frame)
+        # Tool Cloud (512*3=1536D: tool point cloud in environment frame)
         tool_cloud = ObsTerm(
-            func=mdp.get_tool_pointcloud_in_ee_frame,
+            func=mdp.get_tool_pointcloud_in_env_frame,
             noise=GaussianNoiseCfg(mean=0.0, std=0.002, operation="add"),
         )
 
@@ -365,9 +396,6 @@ class EventCfg:
             "asset_cfg": SceneEntityCfg("object"),
         },
     )
-
-    # NOTE: setup_collision_filter removed — tool is part of robot articulation, no separate collision group needed.
-    # NOTE: update_eef (teleport event) removed — tool is welded to link7 via fixed joint.
 
     # Tool mass randomization: randomize the mass of the tool body (link_coacd_convex_piece_0)
     randomize_tool_mass = EventTerm(
@@ -516,6 +544,7 @@ class NonPrehensileEnvCfg(ManagerBasedRLEnvCfg):
     # Visualization settings
     visualize_current_object_pose: bool = True  # Enable current object pose visualization
     visualize_object_pointcloud: bool = False  # Enable object point cloud visualization for debug in first env
+    visualize_tool_pointcloud: bool = False  # Enable tool point cloud visualization (blue spheres) in first env
     visualize_eef_position: bool = False  # Enable eef tool position visualization
 
     # Performance settings

@@ -111,7 +111,7 @@ for trial_dir in "$EEF_DIR"/tmp_trial/*; do
             python "$PAMO_DIR/example.py" \
                 --input "$obj_file" \
                 --output "$OUTPUT_OBJ" \
-                --ratio 0.005
+                --ratio 0.1
 
             # Copy the metadata file if it exists
             if [ -f "$INPUT_JSON" ]; then

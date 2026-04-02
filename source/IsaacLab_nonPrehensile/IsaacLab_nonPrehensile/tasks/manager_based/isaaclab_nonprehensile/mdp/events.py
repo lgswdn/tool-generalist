@@ -59,8 +59,8 @@ def reset_initial_object_position(
     assets_cfg = asset.cfg.spawn.assets_cfg
     scales = get_rigid_body_scale(env, SceneEntityCfg("object"), env_ids)
 
-    # Pre-compute tool AABB in world frame for each env (from tool body state + fixed tool mesh)
-    from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import TOOL_OBJ_PATH, TOOL_SCALE
+    # Pre-compute tool AABB in world frame for each env (from tool body state + per-env tool mesh)
+    from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import TOOL_DATA, TOOL_SCALE
     robot = env.scene["robot"]
     tool_cfg = SceneEntityCfg("robot", body_names=["link_coacd_convex_piece_0"])
     tool_cfg.resolve(env.scene)
@@ -75,11 +75,13 @@ def reset_initial_object_position(
         pts_w = (rot @ pts_local.T).T + center_w  # (M,3)
         return pts_w.min(dim=0).values, pts_w.max(dim=0).values
 
-    # Cache tool aabbs per env (same fixed tool for all envs)
-    tool_cloud_obj = get_cached_cloud(TOOL_OBJ_PATH)
-    tool_pts_base = tool_cloud_obj._get_points_torch(env.device).float() * TOOL_SCALE
+    # Cache tool aabbs per env (each env may have a different tool)
+    num_tools = len(TOOL_DATA)
     tool_aabbs = []
     for env_id_int in range(env.num_envs):
+        td = TOOL_DATA[env_id_int % num_tools]
+        tool_cloud_obj = get_cached_cloud(td["obj_path"])
+        tool_pts_base = tool_cloud_obj._get_points_torch(env.device).float() * TOOL_SCALE
         t_min, t_max = _get_aabb(tool_pos_w[env_id_int], tool_rot[env_id_int], tool_pts_base)
         tool_aabbs.append((t_min, t_max))
 
@@ -299,46 +301,55 @@ def randomize_terrain_material(
 def compute_head_area_offsets_from_usd(env) -> "torch.Tensor":
     """Compute per-env head area offsets in the tool's LOCAL frame using OBJ mesh bounds.
 
-    Uses the fixed fork OBJ file (via cached point cloud) to compute bounding box bounds in
-    canonical (unscaled) mesh space, applies head_area_norm interpolation, then scales by
-    the constant TOOL_SCALE (0.1).
+    Each env may have a different tool (via MultiUsdFileCfg).  The function
+    iterates over TOOL_DATA and assigns tools to envs via env_id % num_tools.
 
-    Since the tool is baked into the robot USD, all envs share the same single tool type.
-    The offset is broadcast to all envs.
+    Uses the cached OBJ point cloud to compute bounding box bounds in
+    canonical (unscaled) mesh space, applies head_area_norm interpolation,
+    then scales by the constant TOOL_SCALE.
     """
     from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
-        get_cached_cloud, TOOL_OBJ_PATH, TOOL_SCALE, TOOL_HEAD_AREA_NORM,
+        get_cached_cloud, TOOL_DATA, TOOL_SCALE,
     )
 
     head_area_offsets = torch.zeros(env.num_envs, 3, device=env.device)
+    num_tools = len(TOOL_DATA)
 
-    if TOOL_HEAD_AREA_NORM is None:
-        print("[WARNING compute_head_area] No head_area_norm available, all offsets=[0,0,0]")
-        return head_area_offsets
+    # Pre-compute per-tool local offsets (cache to avoid redundant work)
+    _per_tool_offset_cache: dict[int, torch.Tensor] = {}
 
-    mid_norm = [(TOOL_HEAD_AREA_NORM[0][i] + TOOL_HEAD_AREA_NORM[1][i]) / 2.0 for i in range(3)]
+    for env_id in range(env.num_envs):
+        tool_idx = env_id % num_tools
+        if tool_idx in _per_tool_offset_cache:
+            head_area_offsets[env_id] = _per_tool_offset_cache[tool_idx]
+            continue
 
-    # Compute OBJ-space bbox from the cached point cloud (canonical, no env offset).
-    cloud = get_cached_cloud(TOOL_OBJ_PATH)
-    pts = torch.tensor(cloud.points, dtype=torch.float32, device=env.device)
-    bbox_min = pts.min(dim=0).values
-    bbox_max = pts.max(dim=0).values
+        td = TOOL_DATA[tool_idx]
+        head_area_norm = td.get("head_area")
+        if head_area_norm is None:
+            print(f"[WARNING compute_head_area] No head_area_norm for tool '{td['name']}', offset=[0,0,0]")
+            _per_tool_offset_cache[tool_idx] = torch.zeros(3, device=env.device)
+            continue
 
-    # Head area center in unscaled OBJ space
-    mid_norm_t = torch.tensor(mid_norm, dtype=torch.float32, device=env.device)
-    head_area_unscaled = bbox_min + mid_norm_t * (bbox_max - bbox_min)
+        mid_norm = [(head_area_norm[0][i] + head_area_norm[1][i]) / 2.0 for i in range(3)]
 
-    # Scale: constant TOOL_SCALE for all envs
-    scale_t = torch.tensor([TOOL_SCALE, TOOL_SCALE, TOOL_SCALE], dtype=torch.float32, device=env.device)
+        # Compute OBJ-space bbox from the cached point cloud
+        cloud = get_cached_cloud(td["obj_path"])
+        pts = torch.tensor(cloud.points, dtype=torch.float32, device=env.device)
+        bbox_min = pts.min(dim=0).values
+        bbox_max = pts.max(dim=0).values
 
-    # The normalized OBJ has bbox_min[Z] ≈ 0 (attachment end at origin).
-    # Subtract bbox_min[Z] so the offset is measured from the attachment point.
-    head_area_from_attachment = head_area_unscaled.clone()
-    head_area_from_attachment[2] = head_area_unscaled[2] - bbox_min[2]
-    head_area_local = head_area_from_attachment * scale_t
+        mid_norm_t = torch.tensor(mid_norm, dtype=torch.float32, device=env.device)
+        head_area_unscaled = bbox_min + mid_norm_t * (bbox_max - bbox_min)
 
-    # Broadcast: same offset for all envs (single fixed tool)
-    head_area_offsets[:] = head_area_local
+        scale_t = torch.tensor([TOOL_SCALE] * 3, dtype=torch.float32, device=env.device)
+
+        head_area_from_attachment = head_area_unscaled.clone()
+        head_area_from_attachment[2] = head_area_unscaled[2] - bbox_min[2]
+        head_area_local = head_area_from_attachment * scale_t
+
+        _per_tool_offset_cache[tool_idx] = head_area_local
+        head_area_offsets[env_id] = head_area_local
 
     return head_area_offsets
 

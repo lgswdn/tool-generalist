@@ -735,36 +735,175 @@ def get_object_pointcloud_in_env_frame(
     return pointcloud_env_flat
 
 
+def visualize_tool_pointcloud(
+    env: ManagerBasedRLEnv,
+    pointcloud_tensor: torch.Tensor,
+    point_size: float = 0.005,
+    color: tuple = (0.0, 0.0, 1.0),  # Blue color for tool point cloud
+) -> None:
+    """Visualize the tool's point cloud for debugging purposes.
+
+    The point cloud is displayed in world coordinates, showing the actual
+    transformed points at the tool's current position and orientation.
+    Only the first environment is visualized to avoid clutter.
+
+    Args:
+        env: The RL environment
+        pointcloud_tensor: Pre-computed point cloud tensor, shape (num_envs, num_points*3)
+        point_size: Size of the visualization spheres
+        color: RGB color tuple for the point cloud visualization
+    """
+    from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
+    import isaaclab.sim as sim_utils
+
+    # Create visualization markers if they don't exist
+    if not hasattr(env, '_tool_pointcloud_visualizer'):
+        marker_cfg = VisualizationMarkersCfg(
+            prim_path="/Visuals/ToolPointCloud",
+            markers={
+                "sphere": sim_utils.SphereCfg(
+                    radius=point_size,
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=color),
+                ),
+            },
+        )
+        env._tool_pointcloud_visualizer = VisualizationMarkers(marker_cfg)
+
+    # Reshape flattened point cloud back to (num_envs, num_points, 3) for visualization
+    num_envs = pointcloud_tensor.shape[0]
+    points_per_env = pointcloud_tensor.shape[1] // 3
+    pointcloud_reshaped = pointcloud_tensor.view(num_envs, points_per_env, 3)
+
+    # For visualization, show points from the first environment only
+    first_env_points = pointcloud_reshaped[0]  # Shape: (num_points, 3)
+
+    # Create identity quaternions for all points (spheres don't need rotation)
+    num_points = first_env_points.shape[0]
+    orientations = torch.tensor([[1.0, 0.0, 0.0, 0.0]] * num_points).to(first_env_points.device)
+
+    # Visualize the points in world coordinates
+    env._tool_pointcloud_visualizer.visualize(
+        translations=first_env_points,
+        orientations=orientations
+    )
+
+
 @profile_obs
-def get_tool_pointcloud_in_ee_frame(
+def get_tool_pointcloud_in_env_frame(
     env: ManagerBasedRLEnv,
 ) -> torch.Tensor:
-    """Get tool point cloud in the EE (link_coacd_convex_piece_0) local frame.
+    """Get tool point cloud in the environment frame.
 
-    The tool mesh is sampled at unit scale and cached. At runtime the points
-    are scaled by the constant TOOL_SCALE (0.1) and expressed in the EE local frame
-    (i.e. NOT rotated to world – the network sees a canonical tool shape).
+    Each env may have a different tool (via MultiUsdFileCfg).  The canonical
+    mesh is transformed using Cloud.get_pointcloud() with the tool body's
+    world-frame pose and a uniform scale of TOOL_SCALE, then env_origins
+    are subtracted to get env-frame coordinates.
 
-    Since the tool is part of the robot articulation (welded to link7), all envs share the same fixed fork OBJ.
+    This mirrors the pattern used by get_object_pointcloud_in_env_frame.
 
     Returns:
         torch.Tensor: shape (num_envs, num_points*3), float32
     """
     from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
-        get_cached_cloud, TOOL_OBJ_PATH, TOOL_SCALE,
+        get_cached_cloud, TOOL_DATA, TOOL_SCALE,
     )
 
     num_envs = env.num_envs
     device = env.device
+    num_tools = len(TOOL_DATA)
 
-    # Load cached canonical points (unit scale) for the fixed fork OBJ
-    tool_cloud = get_cached_cloud(TOOL_OBJ_PATH)
-    base_pts = tool_cloud._get_points_torch(device).float()  # (M, 3)
+    # Get tool body world pose from the robot articulation
+    robot = env.scene["robot"]
+    if not hasattr(env, "_tool_body_cfg_resolved"):
+        from isaaclab.managers import SceneEntityCfg
+        _cfg = SceneEntityCfg("robot", body_names=["link_coacd_convex_piece_0"])
+        _cfg.resolve(env.scene)
+        env._tool_body_cfg_resolved = _cfg
+    tool_body_idx = env._tool_body_cfg_resolved.body_ids[0]
+    tool_pos_w = robot.data.body_state_w[:, tool_body_idx, :3]    # (num_envs, 3)
+    tool_quat_w = robot.data.body_state_w[:, tool_body_idx, 3:7]  # (num_envs, 4)
 
-    # Scale by constant TOOL_SCALE (same for all envs)
-    pts = base_pts * TOOL_SCALE  # (M, 3)
+    out_tensor = None
 
-    # Broadcast to all envs: (num_envs, M, 3)
-    out_tensor = pts.unsqueeze(0).expand(num_envs, -1, -1)
+    # Group envs by tool type for efficient batch processing
+    tool_to_envs: dict[int, list[int]] = {}
+    for env_id in range(num_envs):
+        tidx = env_id % num_tools
+        if tidx not in tool_to_envs:
+            tool_to_envs[tidx] = []
+        tool_to_envs[tidx].append(env_id)
 
-    return out_tensor.reshape(num_envs, -1)
+    for tidx, env_ids_list in tool_to_envs.items():
+        td = TOOL_DATA[tidx]
+        tool_cloud = get_cached_cloud(td["obj_path"])
+        base_pts = tool_cloud._get_points_torch(device).float()  # (M, 3)
+
+        # Scale canonical points
+        pts = base_pts * TOOL_SCALE  # (M, 3)
+
+        # The canonical mesh is symmetric around Z=0 (body origin = mesh center).
+        # In the USD, local +Z maps toward the tool tip (visible, away from link7),
+        # while local -Z maps INTO link7 (embedded, not visible).
+        # Shift Z so all points have Z >= 0, placing the full cloud in the visible region.
+        pts = pts.clone()
+        pts[:, 2] = pts[:, 2] - pts[:, 2].min()
+
+        env_indices = torch.tensor(env_ids_list, device=device, dtype=torch.long)
+
+        # Get per-env rotation matrices and positions
+        batch_quat = tool_quat_w[env_indices].contiguous()  # (B, 4)
+        batch_pos = tool_pos_w[env_indices].contiguous()     # (B, 3)
+        batch_rot = matrix_from_quat(batch_quat)             # (B, 3, 3)
+
+        # Rotate points by body orientation and translate to body position
+        # pts: (M, 3) -> (1, 3, M);  batch_rot: (B, 3, 3)
+        pts_rotated = torch.bmm(
+            batch_rot,
+            pts.T.unsqueeze(0).expand(len(env_ids_list), -1, -1),
+        ).transpose(1, 2)  # (B, M, 3)
+        pts_world = pts_rotated + batch_pos.unsqueeze(1)
+
+        # --- Debug: print key coordinates on first call ---
+        if not hasattr(env, "_tool_pc_debug_done"):
+            env._tool_pc_debug_done = True
+            print(f"[DEBUG tool_pc] OBJ: {td['name']}")
+            print(f"[DEBUG tool_pc] Canonical pts (scaled) min: {pts.min(dim=0).values.cpu().numpy()}")
+            print(f"[DEBUG tool_pc] Canonical pts (scaled) max: {pts.max(dim=0).values.cpu().numpy()}")
+            print(f"[DEBUG tool_pc] Canonical pts (scaled) mean: {pts.mean(dim=0).cpu().numpy()}")
+            print(f"[DEBUG tool_pc] Body pos (world): {batch_pos[0].cpu().numpy()}")
+            print(f"[DEBUG tool_pc] Body quat (world): {batch_quat[0].cpu().numpy()}")
+            print(f"[DEBUG tool_pc] Rot matrix [2,:]: {batch_rot[0, 2, :].cpu().numpy()}")
+            print(f"[DEBUG tool_pc] PC world min: {pts_world[0].min(dim=0).values.cpu().numpy()}")
+            print(f"[DEBUG tool_pc] PC world max: {pts_world[0].max(dim=0).values.cpu().numpy()}")
+            print(f"[DEBUG tool_pc] PC world mean: {pts_world[0].mean(dim=0).cpu().numpy()}")
+            # Also print link7 position for reference
+            link7_names = [n for n in robot.data.body_names if "link7" in n]
+            if link7_names:
+                l7_idx = list(robot.data.body_names).index(link7_names[0])
+                l7_pos = robot.data.body_state_w[0, l7_idx, :3]
+                print(f"[DEBUG tool_pc] panda_link7 pos (world): {l7_pos.cpu().numpy()}")
+                print(f"[DEBUG tool_pc] body-link7 delta: {(batch_pos[0] - l7_pos).cpu().numpy()}")
+
+        # Allocate output on first iteration
+        if out_tensor is None:
+            num_points = pts_world.shape[1]
+            out_tensor = torch.empty(
+                (num_envs, num_points, 3),
+                device=device,
+                dtype=pts_world.dtype,
+            )
+
+        out_tensor[env_indices] = pts_world
+
+    # Convert to env frame: subtract env_origins
+    pointcloud_w = out_tensor  # (num_envs, M, 3) in world frame
+    pointcloud_env = pointcloud_w - env.scene.env_origins.unsqueeze(1)
+
+    # Flatten to (num_envs, M*3)
+    pointcloud_env_flat = pointcloud_env.reshape(num_envs, -1)
+
+    # Optional visualization (world frame for marker rendering)
+    if getattr(env.cfg, "visualize_tool_pointcloud", False):
+        visualize_tool_pointcloud(env, out_tensor.reshape(num_envs, -1).float())
+
+    return pointcloud_env_flat

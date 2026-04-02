@@ -597,7 +597,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-	try:
-		main()
-	finally:
-		simulation_app.close()
+	print("MAIN")
+	#try:
+	main()
+	#finally:
+	simulation_app.close()
