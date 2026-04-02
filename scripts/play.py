@@ -155,14 +155,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     first_frame_diagnostic = True
     # simulate environment
     while simulation_app.is_running():
-        if timestep%10 == 0:
-            scene = env.unwrapped.scene if hasattr(env, "unwrapped") else env.scene
+        # if timestep%10 == 0:
+        #     scene = env.unwrapped.scene if hasattr(env, "unwrapped") else env.scene
             
-            # Directly access the known assets
-            eef_physics_pos = env.unwrapped.scene["eef"].data.root_pos_w[0]
-            flange_physics_pos = env.unwrapped.scene["robot"].data.body_pos_w[0, 7] # Assuming link7 is index 7
-            print(f"[DIAGNOSTIC] - Physics Engine Tool Pos: {eef_physics_pos}")
-            print(f"[DIAGNOSTIC] - Physics Engine Flange Pos: {flange_physics_pos}")
+        #     # Directly access the known assets
+        #     eef_physics_pos = env.unwrapped.scene["eef"].data.root_pos_w[0]
+        #     flange_physics_pos = env.unwrapped.scene["robot"].data.body_pos_w[0, 7] # Assuming link7 is index 7
+        #     print(f"[DIAGNOSTIC] - Physics Engine Tool Pos: {eef_physics_pos}")
+        #     print(f"[DIAGNOSTIC] - Physics Engine Flange Pos: {flange_physics_pos}")
             
 
         start_time = time.time()

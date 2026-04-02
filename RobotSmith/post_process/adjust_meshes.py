@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Adjust tool meshes so base_center is at origin, and update head_area accordingly."""
 
+import argparse
 import json
 import numpy as np
 import glob
 import os
 import xml.etree.ElementTree as ET
 import shutil
+from pathlib import Path
 
 def load_obj(filepath):
     vertices = []
@@ -63,10 +65,10 @@ def repair_urdf(urdf_path):
         tree.write(urdf_path)
         print(f"  Repaired URDF: {urdf_path}")
 
-def adjust_tool_meshes():
-    meshdata_dir = "/mnt/afs/zhuwenxuan/project/RobotSmith/eef/meshdata"
-    output_meshdata_dir = "/mnt/afs/zhuwenxuan/project/RobotSmith/eef/meshdata_adjusted"
-    tools_json_path = "/mnt/afs/zhuwenxuan/project/RobotSmith/eef/tools.json"
+def adjust_tool_meshes(eef_dir):
+    meshdata_dir = os.path.join(eef_dir, "meshdata")
+    output_meshdata_dir = os.path.join(eef_dir, "meshdata_adjusted")
+    tools_json_path = os.path.join(eef_dir, "tools.json")
 
     with open(tools_json_path, 'r') as f:
         tools_data = json.load(f)
@@ -145,7 +147,7 @@ def adjust_tool_meshes():
         })
 
     # Save updated tools.json
-    output_path = "/mnt/afs/zhuwenxuan/project/RobotSmith/eef/tools_adjusted.json"
+    output_path = os.path.join(eef_dir, "tools_adjusted.json")
     with open(output_path, 'w') as f:
         json.dump(updated_tools, f, indent=2)
 
@@ -153,4 +155,14 @@ def adjust_tool_meshes():
     print(f"[INFO] Adjusted meshes saved to {output_meshdata_dir}")
 
 if __name__ == "__main__":
-    adjust_tool_meshes()
+    parser = argparse.ArgumentParser(description="Adjust tool meshes so base_center is at origin")
+    parser.add_argument("--eef-dir", type=str, default=None,
+                        help="Path to the eef directory (default: ../eef relative to this script)")
+    args = parser.parse_args()
+
+    if args.eef_dir is None:
+        eef_dir = str(Path(__file__).resolve().parent.parent / "eef")
+    else:
+        eef_dir = str(Path(args.eef_dir).resolve())
+
+    adjust_tool_meshes(eef_dir)

@@ -1,10 +1,13 @@
 import argparse
 import os
 import glob
+from pathlib import Path
 
 from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser("Batch URDF to USD Converter")
+parser.add_argument("--eef-dir", type=str, default=None,
+                    help="Path to the eef directory (default: ../eef relative to this script)")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -13,9 +16,9 @@ simulation_app = app_launcher.app
 
 from isaaclab.sim.converters import UrdfConverter, UrdfConverterCfg
 
-def run_batch_conversion():
-    input_base_dir = "/mnt/afs/zhuwenxuan/project/RobotSmith/eef/meshdata_adjusted"
-    output_base_dir = "/mnt/afs/zhuwenxuan/project/RobotSmith/eef/objects_usd"
+def run_batch_conversion(eef_dir):
+    input_base_dir = os.path.join(eef_dir, "meshdata_adjusted")
+    output_base_dir = os.path.join(eef_dir, "objects_usd")
 
     search_pattern = os.path.join(input_base_dir, "*", "coacd", "coacd.urdf")
     urdf_files = glob.glob(search_pattern)
@@ -48,6 +51,11 @@ def run_batch_conversion():
     print("Batch conversion completed successfully.")
 
 if __name__ == "__main__":
-    run_batch_conversion()
+    if args_cli.eef_dir is None:
+        eef_dir = str(Path(__file__).resolve().parent.parent / "eef")
+    else:
+        eef_dir = str(Path(args_cli.eef_dir).resolve())
+
+    run_batch_conversion(eef_dir)
     # Shut down the application
     simulation_app.close()

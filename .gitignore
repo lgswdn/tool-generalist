@@ -1,6 +1,8 @@
 # Local path config (machine-specific, do not commit)
 paths.yaml
 
+**/eef/
+
 # C++
 **/cmake-build*/
 **/build*/

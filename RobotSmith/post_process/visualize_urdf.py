@@ -1,3 +1,4 @@
+import argparse
 import pybullet as p
 import numpy as np
 from PIL import Image
@@ -81,4 +82,11 @@ def render_urdf_dynamic_scale(urdf_path, output_image_path):
     p.disconnect()
 
 if __name__ == "__main__":
-    render_urdf_dynamic_scale("/mnt/afs/zhuwenxuan/project/RobotSmith/eef/meshdata_adjusted/000_robotic_fork_effector_var_000/coacd/coacd.urdf", "urdf.png")
+    parser = argparse.ArgumentParser(description="Render a URDF with coordinate axes")
+    parser.add_argument("--urdf", type=str, required=True,
+                        help="Path to the URDF file to render")
+    parser.add_argument("--output", type=str, default="urdf.png",
+                        help="Output image path (default: urdf.png)")
+    args = parser.parse_args()
+
+    render_urdf_dynamic_scale(args.urdf, args.output)

@@ -32,6 +32,7 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import GaussianNoiseCfg
 from isaaclab_assets.robots.franka import FRANKA_PANDA_HIGH_PD_CFG, FRANKA_PANDA_CFG
+from IsaacLab_nonPrehensile.robots.franka import FRANKA_PANDA_FORK_HIGH_PD_CFG
 from isaaclab.envs.mdp.actions.actions_cfg import JointPositionActionCfg, RelativeJointPositionActionCfg, JointVelocityActionCfg, JointEffortActionCfg, DifferentialInverseKinematicsActionCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdFileCfg
 from isaaclab.terrains import TerrainImporterCfg
@@ -125,47 +126,6 @@ def load_object_candidates(
         assets.append(usd_cfg)
     return assets
 
-def load_tools_from_json(tools_json_path, usd_dir, obj_dir, color=(0.8, 0.3, 0.3)):
-    """Load tools from tools.json with head_area metadata and randomized scale."""
-    import random
-    with open(tools_json_path, "r") as f:
-        tools_data = json.load(f)
-
-    assets = []
-    for tool in tools_data:
-        name = tool["name"]
-        usd_path = os.path.join(usd_dir, name, f"{name}.usd")
-        obj_path = os.path.join(obj_dir, f"{name}.obj")
-
-        if not os.path.exists(usd_path):
-            print(f"[WARNING] Tool USD not found: {usd_path}, skipping...")
-            continue
-
-        # Randomize scale (0.08 to 0.17 range as absolute scale, matching original behavior)
-        scale_factor = random.uniform(0.08, 0.17)
-        final_scale = scale_factor  # Use directly, not multiplied by TOOL_SCALE
-
-        # Store raw head_area normalized [0,1] data for later USD-bbox-based computation
-        head_area_norm = tool.get("head_area", None)  # [[min_xyz], [max_xyz]] in [0,1]
-
-        usd_cfg = sim_utils.UsdFileCfg(
-            usd_path=usd_path,
-            scale=(final_scale, final_scale, final_scale),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=color),
-            rigid_props=RigidBodyPropertiesCfg(
-                solver_position_iteration_count=16,
-                solver_velocity_iteration_count=1,
-                max_angular_velocity=1000.0,
-                max_linear_velocity=1000.0,
-                max_depenetration_velocity=5.0,
-                disable_gravity=True,
-            ),
-        )
-        usd_cfg.obj_path = obj_path
-        usd_cfg.head_area_norm = head_area_norm  # [[min_xyz],[max_xyz]] normalized [0,1], or None
-        assets.append(usd_cfg)
-    return assets
-
 
 # Helper for point cloud caching, compatible with IsaacLab multi-env
 def get_cached_cloud(obj_path):
@@ -174,6 +134,24 @@ def get_cached_cloud(obj_path):
         _CLOUD_CACHE[key] = Cloud(obj_path)  # No scale parameter needed
     return _CLOUD_CACHE[key]
 
+
+# ---------------------------------------------------------------------------
+# Fixed tool constants (fork welded to panda_link7 via fixed joint in robot USD)
+# ---------------------------------------------------------------------------
+TOOL_OBJ_PATH: str = _PATHS["tool_mesh"]["obj_path"]
+TOOL_SCALE: float = float(_PATHS["tool_mesh"].get("scale", 0.1))
+
+# Load head_area_norm for the fixed tool from tools.json
+_TOOL_HEAD_AREA_JSON = _PATHS["tool_mesh"]["tools_json"]
+_TOOL_NAME = _PATHS["tool_mesh"]["tool_name"]
+with open(_TOOL_HEAD_AREA_JSON, "r") as _htf:
+    _tool_head_data = json.load(_htf)
+TOOL_HEAD_AREA_NORM = next(
+    (t.get("head_area") for t in _tool_head_data if t.get("name") == _TOOL_NAME),
+    None
+)
+if TOOL_HEAD_AREA_NORM is None:
+    print(f"[WARNING] head_area_norm not found for tool '{_TOOL_NAME}' in {_TOOL_HEAD_AREA_JSON}")
 
 
 default_joint_pos = FRANKA_PANDA_HIGH_PD_CFG.init_state.joint_pos.copy()
@@ -212,13 +190,9 @@ class NonPrehensileSceneCfg(InteractiveSceneCfg):
         prim_path="/World/ground",
         terrain_type="plane",  # optional: "plane", "usd", "generator"
         collision_group=-1,
-        physics_material=sim_utils.RigidBodyMaterialCfg(
-            friction_combine_mode="multiply",
-            restitution_combine_mode="multiply",
-            static_friction=1.0,
-            dynamic_friction=1.0,
-            restitution=0.0,
-        ),
+        # Explicitly None to skip bind_physics_material in spawn_ground_plane().
+        # Terrain friction is set at reset by the randomize_terrain_material event.
+        physics_material=None,
         visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.5, 0.5, 0.5)),
         debug_vis=False,
     )
@@ -263,55 +237,27 @@ class NonPrehensileSceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    eef = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/eef",
-        init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(0.08, 0.0, 1.03)
-        ),
-        spawn=sim_utils.MultiAssetSpawnerCfg(
-            assets_cfg=load_tools_from_json(
-                _PATHS["tool"]["tools_json"],
-                usd_dir=_PATHS["tool"]["usd_dir"],
-                obj_dir=_PATHS["tool"]["obj_dir"],
-                color=(0.3, 0.8, 0.3)  # Green for eef
-            ),
-            random_choice=False,
-            rigid_props=RigidBodyPropertiesCfg(
-                solver_position_iteration_count=16,
-                solver_velocity_iteration_count=1,
-                max_angular_velocity=1000.0,
-                max_linear_velocity=1000.0,
-                max_depenetration_velocity=5.0,
-                disable_gravity=True,
-                #kinematic_enabled=True,
-            ),
-            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
-        ),
-    )
+    # NOTE: 'eef' RigidObjectCfg removed — tool is part of the robot articulation (welded to link7).
+    # All tool observations are computed directly from the tool body's pose + cached OBJ mesh.
 
-    robot = FRANKA_PANDA_HIGH_PD_CFG.replace(
+    robot = FRANKA_PANDA_FORK_HIGH_PD_CFG.replace(
         prim_path="{ENV_REGEX_NS}/Robot",
-        actuators=arm_only_actuators,
         init_state=ArticulationCfg.InitialStateCfg(
             joint_pos=custom_joint_init
-        ),
-        spawn=FRANKA_PANDA_HIGH_PD_CFG.spawn.replace(
-            usd_path=bare_franka_path,
-            activate_contact_sensors=False
         )
     )
 
-    # Dummy Configuration: Anchoring all frames to the robot's mounting flange
+    # FrameTransformer anchored to link_coacd_convex_piece_0 (the tool body, welded to panda_link7 via fixed joint)
     ee_frame = FrameTransformerCfg(
         prim_path="{ENV_REGEX_NS}/Robot/panda_link0",
         debug_vis=False,
         visualizer_cfg=FRAME_MARKER_SMALL_CFG.replace(prim_path="/Visuals/EndEffectorFrameTransformer"),
         target_frames=[
             FrameTransformerCfg.FrameCfg(
-                prim_path="{ENV_REGEX_NS}/Robot/panda_link8",
+                prim_path="{ENV_REGEX_NS}/Robot/tool_mount/link_coacd_convex_piece_0",
                 name="ee_tool",
                 offset=OffsetCfg(
-                    pos=(0.0, 0.0, 0.0), # Placeholder, updated from tool's head_area_middle in __init__
+                    pos=(0.0, 0.0, 0.0),  # Offset is applied in get_head_area_pos_w via _head_area_offsets
                 ),
             ),
         ],
@@ -387,7 +333,7 @@ class ObservationsCfg:
         # abs_goal = ObsTerm(func=mdp.abs_pose_goal, params={"command_name": "target_object_pose"})
         # cur_pose = ObsTerm(func=mdp.object_pose_9d_in_env_frame)
         
-        # Physical Parameters (6D: object_mass, tool_mass, object_static_friction, hand_friction, ground_friction, restitution)
+        # Physical Parameters (7D: object_mass, object_friction, tool_mass, tool_friction, hand_friction, ground_friction, restitution)
         phys_params = ObsTerm(func=mdp.phys_params)
 
         def __post_init__(self):
@@ -420,9 +366,27 @@ class EventCfg:
         },
     )
 
-    setup_collision_filter = EventTerm(
-        func=mdp.setup_tool_robot_collision_filter,
-        mode="prestartup",
+    # NOTE: setup_collision_filter removed — tool is part of robot articulation, no separate collision group needed.
+    # NOTE: update_eef (teleport event) removed — tool is welded to link7 via fixed joint.
+
+    # Tool mass randomization: randomize the mass of the tool body (link_coacd_convex_piece_0)
+    randomize_tool_mass = EventTerm(
+        func=mdp.randomize_tool_mass,
+        mode="reset",
+        params={
+            "mass_range": (0.1, 0.5),  # Tool mass range in kg
+        },
+    )
+
+    # Tool friction randomization: randomize friction of the tool body's collision shapes
+    randomize_tool_friction = EventTerm(
+        func=mdp.randomize_tool_friction,
+        mode="reset",
+        params={
+            "static_friction_range": (0.8, 1.5),
+            "dynamic_friction_range": (0.8, 1.5),
+            "restitution_range": (0.0, 0.0),
+        },
     )
 
     # Physical parameter randomization events
@@ -437,7 +401,7 @@ class EventCfg:
             "recompute_inertia": True,
         },
     )
-    
+
     # object material randomization
     randomize_object_material = EventTerm(
         func=mdp.randomize_rigid_body_material,
@@ -447,29 +411,9 @@ class EventCfg:
             "static_friction_range": (0.7, 1.0),
             "dynamic_friction_range": (0.7, 1.0),
             "restitution_range": (0.1, 0.2),
-            "num_buckets": 256,  # Add some randomization
+            "num_buckets": 256,
             "make_consistent": True,  # Ensure dynamic <= static friction
         },
-    )
-
-    # randomize_eef_scale removed - scale variation now applied during tool loading
-
-    randomize_eef_mass = EventTerm(
-        func=mdp.randomize_rigid_body_mass,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("eef"),
-            "mass_distribution_params": (0.1, 0.5),  # Mass range: 0.1 to 0.5 kg
-            "operation": "abs",  # Absolute value operation
-            "distribution": "uniform",
-            "recompute_inertia": True,
-        },
-    )
-
-    update_eef = EventTerm(
-        func=mdp.update_eef_pose,
-        mode="interval",
-        interval_range_s=(0.0, 0.0),  # Every step
     )
 
     # Terrain friction randomization - using custom function to randomize terrain material
@@ -513,7 +457,7 @@ class RewardsCfg:
         params={
             "std": 0.5,
             "command_name": "target_object_pose",
-            "obj_ee_distance_threshold": 0.05,
+            "obj_ee_distance_threshold": 0.1,
             "ee_frame_cfg": SceneEntityCfg("ee_frame"),
             "object_cfg": SceneEntityCfg("object"),
         },
@@ -525,7 +469,7 @@ class RewardsCfg:
         params={
             "std": 0.2,
             "command_name": "target_object_pose",
-            "obj_ee_distance_threshold": 0.05,
+            "obj_ee_distance_threshold": 0.1,
             "ee_frame_cfg": SceneEntityCfg("ee_frame"),
             "object_cfg": SceneEntityCfg("object"),
         },
@@ -732,14 +676,9 @@ class NonPrehensileEnv(ManagerBasedRLEnv):
             scales = scales.to(device=self.device)
         self._object_scales = scales
 
-        # Cache tool (eef) scales for all envs
-        tool_scales = mdp.get_rigid_body_scale(self, SceneEntityCfg("eef"), all_env_ids)
-        if not isinstance(tool_scales, torch.Tensor):
-            tool_scales = torch.as_tensor(tool_scales, device=self.device, dtype=torch.float16)
-        else:
-            tool_scales = tool_scales.to(device=self.device)
-        self._tool_scales = tool_scales
+        # NOTE: _tool_scales removed — tool scale is now a fixed constant (TOOL_SCALE=0.1)
+        # baked into the robot USD, no per-env eef prim query needed.
 
-        # Compute per-env head area offsets now that USD prims are fully spawned.
-        # Each offset is in the tool's local frame (i.e. relative to panda_link8 origin).
+        # Compute per-env head area offsets from the fixed fork OBJ + head_area_norm.
+        # Each offset is in the tool's local frame (relative to link_coacd_convex_piece_0 origin).
         self._head_area_offsets = mdp.compute_head_area_offsets_from_usd(self)
