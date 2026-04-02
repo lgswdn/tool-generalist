@@ -1,0 +1,94 @@
+{
+    "name": "complex_robotic_hook",
+    "parts": [
+        {
+            "geom": "cylinder",
+            "base_parameters": [0.6, 2.0],
+            "scale_variance_range": [0.5, 3.0],
+            "semantic_group": "handle",
+            "contact_point": null
+        },
+        {
+            "geom": "cylinder",
+            "base_parameters": [0.4, 2.0],
+            "scale_variance_range": [0.5, 3.0],
+            "semantic_group": "hook_arm_horizontal",
+            "contact_point": null
+        },
+        {
+            "geom": "cylinder",
+            "base_parameters": [0.4, 1.5],
+            "scale_variance_range": [0.5, 3.0],
+            "semantic_group": "hook_arm_vertical",
+            "contact_point": null
+        },
+        {
+            "geom": "cone",
+            "base_parameters": [0.4, 1.2],
+            "scale_variance_range": [0.5, 3.0],
+            "semantic_group": "hook_tip",
+            "contact_point": "max"
+        },
+        {
+            "geom": "ring",
+            "base_parameters": [0.8, 0.3],
+            "scale_variance_range": [0.5, 3.0],
+            "semantic_group": "handle_base_ring",
+            "contact_point": null
+        },
+        {
+            "geom": "ring",
+            "base_parameters": [0.7, 0.2],
+            "scale_variance_range": [0.5, 3.0],
+            "semantic_group": "handle",
+            "contact_point": null
+        }
+    ],
+    "operations": [
+        {
+            "op": "union_attach",
+            "target": 2,
+            "source": 3,
+            "target_point": [0.5, 0.5, 1.0],
+            "source_point": [0.5, 0.5, 0.0],
+            "rotation": [0, 90, 0],
+            "rotation_variance": [0, 0, 30]
+        },
+        {
+            "op": "union_attach",
+            "target": 1,
+            "source": 2,
+            "target_point": [0.5, 0.5, 1.0],
+            "source_point": [0.5, 0.5, 0.0],
+            "rotation": [0, 90, 0],
+            "rotation_variance": [0, 0, 20]
+        },
+        {
+            "op": "union_attach",
+            "target": 0,
+            "source": 1,
+            "target_point": [0.5, 0.5, 1.0],
+            "source_point": [0.5, 0.5, 0.0],
+            "rotation": [0, 90, 0],
+            "rotation_variance": [0, 0, 45]
+        },
+        {
+            "op": "union_attach",
+            "target": 0,
+            "source": 4,
+            "target_point": [0.5, 0.5, 0.1],
+            "source_point": [0.5, 0.5, 0.5],
+            "rotation": [0, 0, 0],
+            "rotation_variance": [0, 0, 0]
+        },
+        {
+            "op": "subtract_attach",
+            "target": 0,
+            "source": 5,
+            "target_point": [0.5, 0.5, 0.5],
+            "source_point": [0.5, 0.5, 0.5],
+            "rotation": [0, 0, 0],
+            "rotation_variance": [0, 0, 0]
+        }
+    ]
+}
