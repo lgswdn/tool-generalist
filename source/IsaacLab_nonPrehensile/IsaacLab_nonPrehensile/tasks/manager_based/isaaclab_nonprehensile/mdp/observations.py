@@ -94,23 +94,50 @@ def _dbg_cloud(env: "ManagerBasedRLEnv", name: str, cloud_env: torch.Tensor) -> 
 def get_head_area_pos_w(env: "ManagerBasedRLEnv") -> torch.Tensor:
     """Return the head area center in world space for every environment.
 
-    Uses the robot's panda_link8 pose from the ee_frame sensor plus the
-    per-env local offset stored in env._head_area_offsets (computed once in
-    post_reset via USD bounding-box queries).
+    Uses the tool body (link_coacd_convex_piece_0) pose from the ee_frame sensor
+    plus the per-env local offset stored in env._head_area_offsets (computed once
+    in post_reset via OBJ bounding-box queries).
 
     Returns:
         torch.Tensor: Shape (num_envs, 3) – world-space positions.
     """
     ee_frame = env.scene["ee_frame"]
-    link8_pos_w = ee_frame.data.target_pos_w[..., 0, :]   # (N, 3)
+    tool_pos_w = ee_frame.data.target_pos_w[..., 0, :]   # (N, 3)
 
     if not (hasattr(env, "_head_area_offsets") and env._head_area_offsets is not None):
-        return link8_pos_w
+        return tool_pos_w
 
-    link8_quat_w = ee_frame.data.target_quat_w[..., 0, :]  # (N, 4)
-    R = matrix_from_quat(link8_quat_w)                      # (N, 3, 3)
+    tool_quat_w = ee_frame.data.target_quat_w[..., 0, :]  # (N, 4)
+    R = matrix_from_quat(tool_quat_w)                      # (N, 3, 3)
     offset = env._head_area_offsets                         # (N, 3)
-    return link8_pos_w + torch.bmm(R, offset.unsqueeze(-1)).squeeze(-1)
+    head_pos_w = tool_pos_w + torch.bmm(R, offset.unsqueeze(-1)).squeeze(-1)
+
+    # --- Debug visualization: red sphere at head area center ---
+    _visualize_head_area_center(env, head_pos_w)
+
+    return head_pos_w
+
+
+def _visualize_head_area_center(env: "ManagerBasedRLEnv", head_pos_w: torch.Tensor):
+    """Draw a small red sphere at the head area center for each environment."""
+    from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
+    import isaaclab.sim as sim_utils
+
+    if not hasattr(env, "_head_area_visualizer"):
+        marker_cfg = VisualizationMarkersCfg(
+            prim_path="/Visuals/HeadAreaCenter",
+            markers={
+                "sphere": sim_utils.SphereCfg(
+                    radius=0.01,
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)),
+                ),
+            },
+        )
+        env._head_area_visualizer = VisualizationMarkers(marker_cfg)
+
+    num_envs = head_pos_w.shape[0]
+    orientations = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=head_pos_w.device).expand(num_envs, -1)
+    env._head_area_visualizer.visualize(head_pos_w, orientations)
 
 
 @profile_obs
@@ -125,7 +152,7 @@ def hand_state(
     """
     ee_frame = env.scene[ee_frame_cfg.name]
 
-    # Head area world position (panda_link8 + rotated per-env local offset)
+    # Head area world position (tool body + rotated per-env local offset)
     ee_pos_w = get_head_area_pos_w(env)          # (num_envs, 3)
     ee_quat_w = ee_frame.data.target_quat_w[..., 0, :]  # (num_envs, 4)
 
@@ -277,42 +304,56 @@ def phys_params(
     env: ManagerBasedRLEnv,
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
     hand_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    eef_cfg: SceneEntityCfg = SceneEntityCfg("eef"),
 ) -> torch.Tensor:
     """Physical parameters observation for non-prehensile manipulation.
 
-    Returns 6D tensor: [object_mass, tool_mass, object_friction, hand_friction, ground_friction, object_restitution]
-    # NOTE: uncomment tool_mass block below (and update stack) to restore 6D for new training runs.
+    Returns 7D tensor: [object_mass, object_friction, tool_mass, tool_friction,
+                        hand_friction, ground_friction, object_restitution]
 
     Args:
         env: The RL environment
         object_cfg: Configuration for the object asset
         hand_cfg: Configuration for the robot hand
-        eef_cfg: Configuration for the tool/eef asset
 
     Returns:
-        torch.Tensor: Shape (num_envs, 5) containing [object_mass, object_friction, hand_friction, ground_friction, object_restitution]
+        torch.Tensor: Shape (num_envs, 7)
     """
     device = env.scene[object_cfg.name].data.root_pos_w.device
     object: RigidObject = env.scene[object_cfg.name]
     hand: RigidObject = env.scene[hand_cfg.name]
-    eef: RigidObject = env.scene[eef_cfg.name]
 
     # 1. Get object mass from IsaacLab's built-in interface
     object_mass = object.root_physx_view.get_masses().squeeze(-1)  # Shape: (num_envs,)
 
-    # 2. Get tool (eef) mass
-    tool_mass = eef.root_physx_view.get_masses().squeeze(-1)  # Shape: (num_envs,)
-
-    # 3. Get object material properties from PhysX view
+    # 2. Get object material properties from PhysX view
     # Material properties format: [static_friction, dynamic_friction, restitution]
     object_material_props = object.root_physx_view.get_material_properties()  # Shape: (num_envs, num_bodies, 3)
     object_friction = object_material_props[:, :, 0].mean(dim=1)   # (num_envs,) - object static friction
     object_restitution = object_material_props[:, :, 2].mean(dim=1)  # (num_envs,) - object restitution
 
+    # 3. Get tool mass and friction from robot articulation
+    # Resolve tool body index (link_coacd_convex_piece_0)
+    if not hasattr(env, "_tool_body_idx"):
+        tool_body_cfg = SceneEntityCfg("robot", body_names=["link_coacd_convex_piece_0"])
+        tool_body_cfg.resolve(env.scene)
+        env._tool_body_idx = tool_body_cfg.body_ids[0]
+
+    tool_idx = env._tool_body_idx
+    robot_masses = hand.root_physx_view.get_masses()  # (num_envs, num_bodies)
+    tool_mass = robot_masses[:, tool_idx]  # (num_envs,)
+
+    # Tool friction from robot's material properties
+    robot_material_props = hand.root_physx_view.get_material_properties()  # (num_envs, num_shapes, 3)
+    num_shapes = robot_material_props.shape[1]
+    num_bodies = robot_masses.shape[1]
+    shapes_per_body = num_shapes // num_bodies
+    tool_shape_start = tool_idx * shapes_per_body
+    tool_shape_end = min((tool_idx + 1) * shapes_per_body, num_shapes)
+    tool_friction = robot_material_props[:, tool_shape_start:tool_shape_end, 0].mean(dim=1)  # (num_envs,)
+
     # 4. Get hand friction from robot's physics properties
-    hand_material_props = hand.root_physx_view.get_material_properties()    # Shape: (num_envs, num_bodies, 3)
-    hand_friction = hand_material_props[:, -1, 0]      # Use static friction for hand (last body)
+    hand_material_props = robot_material_props
+    hand_friction = hand_material_props[:, -1, 0]      # Use static friction for hand (last body before tool)
 
     # 5. Get ground/terrain friction - read actual randomized values from USD prim
     terrain = env.scene["terrain"]
@@ -323,19 +364,26 @@ def phys_params(
     from pxr import UsdPhysics
 
     physics_material_prim = prim_utils.get_prim_at_path(physics_material_path)
-    physics_material = UsdPhysics.MaterialAPI(physics_material_prim)
-    ground_friction_value = physics_material.GetStaticFrictionAttr().Get()
+    if physics_material_prim and physics_material_prim.IsValid() and physics_material_prim.HasAPI(UsdPhysics.MaterialAPI):
+        physics_material = UsdPhysics.MaterialAPI(physics_material_prim)
+        ground_friction_value = physics_material.GetStaticFrictionAttr().Get()
+        if ground_friction_value is None:
+            ground_friction_value = 1.0
+    else:
+        # Material not yet created (before first reset); use default
+        ground_friction_value = 1.0
     ground_friction = torch.full_like(object_mass, ground_friction_value)
 
-    # Stack into observation tensor: 5D (revert) -- for 6D add tool_mass as 2nd element
+    # Stack into observation tensor: 7D
     phys_params_tensor = torch.stack([
         object_mass.to(device=device),        # (num_envs,) - object mass [0.1, 0.5]
-        tool_mass.to(device=device),          # (num_envs,) - tool mass [0.1, 0.5]
         object_friction.to(device=device),     # (num_envs,) - object static friction [0.7, 1.0]
-        hand_friction.to(device=device),       # (num_envs,) - hand friction coefficient [1.0, 1.5]
+        tool_mass.to(device=device),           # (num_envs,) - tool mass [0.1, 0.5]
+        tool_friction.to(device=device),       # (num_envs,) - tool static friction [0.8, 1.5]
+        hand_friction.to(device=device),       # (num_envs,) - hand friction coefficient
         ground_friction.to(device=device),     # (num_envs,) - ground friction coefficient [0.3, 0.8]
         object_restitution.to(device=device)   # (num_envs,) - object restitution coefficient [0.1, 0.2]
-    ], dim=1)  # (num_envs, 5) -- change to 6 when tool_mass is re-enabled
+    ], dim=1)  # (num_envs, 7)
 
     return _dbg(env, "phys_params", phys_params_tensor)
 
@@ -691,64 +739,32 @@ def get_object_pointcloud_in_env_frame(
 def get_tool_pointcloud_in_ee_frame(
     env: ManagerBasedRLEnv,
 ) -> torch.Tensor:
-    """Get tool (eef) point cloud in the EE (link8) local frame.
+    """Get tool point cloud in the EE (link_coacd_convex_piece_0) local frame.
 
-    The tool mesh is sampled at unit scale and cached.  At runtime the points
-    are scaled by the per-env tool scale and expressed in the EE local frame
+    The tool mesh is sampled at unit scale and cached. At runtime the points
+    are scaled by the constant TOOL_SCALE (0.1) and expressed in the EE local frame
     (i.e. NOT rotated to world – the network sees a canonical tool shape).
+
+    Since the tool is part of the robot articulation (welded to link7), all envs share the same fixed fork OBJ.
 
     Returns:
         torch.Tensor: shape (num_envs, num_points*3), float32
     """
-    from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import get_cached_cloud
+    from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
+        get_cached_cloud, TOOL_OBJ_PATH, TOOL_SCALE,
+    )
 
-    eef_asset = env.scene["eef"]
-    assets_cfg = eef_asset.cfg.spawn.assets_cfg
     num_envs = env.num_envs
-    device = eef_asset.data.root_pos_w.device
+    device = env.device
 
-    num_assets = len(assets_cfg)
-    out_tensor = None
+    # Load cached canonical points (unit scale) for the fixed fork OBJ
+    tool_cloud = get_cached_cloud(TOOL_OBJ_PATH)
+    base_pts = tool_cloud._get_points_torch(device).float()  # (M, 3)
 
-    for asset_idx in range(num_assets):
-        if asset_idx >= num_envs:
-            continue
-        env_indices = torch.arange(asset_idx, num_envs, num_assets, device=device, dtype=torch.long)
-        if env_indices.numel() == 0:
-            continue
+    # Scale by constant TOOL_SCALE (same for all envs)
+    pts = base_pts * TOOL_SCALE  # (M, 3)
 
-        obj_path = assets_cfg[asset_idx].obj_path
-        tool_cloud = get_cached_cloud(obj_path)
-
-        # Per-env scale (N,3) – cached in post_reset
-        if hasattr(env, "_tool_scales"):
-            scales = env._tool_scales[env_indices]  # (batch,3) or (batch,)
-        else:
-            scales = None
-
-        # Sample canonical points (unit scale, no translation/rotation)
-        base_pts = tool_cloud._get_points_torch(device).float()  # (M,3)
-        batch = env_indices.numel()
-
-        if scales is not None:
-            s = scales.float()
-            if s.dim() == 1:
-                s = s.unsqueeze(-1)  # (batch,1)
-            # broadcast: (batch,1,3) or (batch,1,1)
-            if s.shape[-1] == 3:
-                pts = base_pts.unsqueeze(0) * s.unsqueeze(1)  # (batch,M,3)
-            else:
-                pts = base_pts.unsqueeze(0) * s.unsqueeze(1)
-        else:
-            pts = base_pts.unsqueeze(0).expand(batch, -1, -1)
-
-        if out_tensor is None:
-            num_points = pts.shape[1]
-            out_tensor = torch.empty((num_envs, num_points, 3), device=device, dtype=torch.float32)
-
-        out_tensor[env_indices] = pts
-
-    if out_tensor is None:
-        return torch.zeros((num_envs, 512 * 3), device=device, dtype=torch.float32)
+    # Broadcast to all envs: (num_envs, M, 3)
+    out_tensor = pts.unsqueeze(0).expand(num_envs, -1, -1)
 
     return out_tensor.reshape(num_envs, -1)

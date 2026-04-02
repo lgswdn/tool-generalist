@@ -21,42 +21,6 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 
-def setup_tool_robot_collision_filter(env: "ManagerBasedRLEnv", env_ids=None):
-    """Create PhysicsCollisionGroups to filter out tool<->robot collisions.
-
-    Called once at prestartup. Puts all tool prims in one group and all robot
-    prims in another, then adds a filtered pair so PhysX ignores contacts
-    between them.
-    """
-    stage = omni.usd.get_context().get_stage()
-
-    # Create collision groups at world scope
-    tool_group_path = "/World/CollisionGroups/ToolGroup"
-    robot_group_path = "/World/CollisionGroups/RobotGroup"
-
-    for path in (tool_group_path, robot_group_path):
-        if not stage.GetPrimAtPath(path).IsValid():
-            stage.DefinePrim(path, "PhysicsCollisionGroup")
-
-    tool_group = UsdPhysics.CollisionGroup.Get(stage, tool_group_path)
-    robot_group = UsdPhysics.CollisionGroup.Get(stage, robot_group_path)
-
-    # Add filtered pair: tool group ignores robot group
-    tool_group.GetFilteredGroupsRel().AddTarget(robot_group_path)
-    robot_group.GetFilteredGroupsRel().AddTarget(tool_group_path)
-
-    # Include all tool prims
-    tool_includes = tool_group.GetCollidersCollectionAPI().GetIncludesRel()
-    for env_id in range(env.num_envs):
-        tool_includes.AddTarget(f"/World/envs/env_{env_id}/eef")
-
-    # Include all robot prims
-    robot_includes = robot_group.GetCollidersCollectionAPI().GetIncludesRel()
-    for env_id in range(env.num_envs):
-        robot_includes.AddTarget(f"/World/envs/env_{env_id}/Robot")
-
-    print(f"[INFO] Tool<->Robot collision filter set up for {env.num_envs} envs.")
-
 
 def reset_initial_object_position(
     env: ManagerBasedRLEnv,
@@ -95,28 +59,28 @@ def reset_initial_object_position(
     assets_cfg = asset.cfg.spawn.assets_cfg
     scales = get_rigid_body_scale(env, SceneEntityCfg("object"), env_ids)
 
-    # Pre-compute tool AABB in world frame for each env (from eef asset current pose + mesh)
-    eef_asset = env.scene["eef"]
-    eef_assets_cfg = eef_asset.cfg.spawn.assets_cfg
-    eef_pos_w = eef_asset.data.root_pos_w   # (num_envs, 3)
-    eef_quat_w = eef_asset.data.root_quat_w  # (num_envs, 4)
+    # Pre-compute tool AABB in world frame for each env (from tool body state + fixed tool mesh)
+    from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import TOOL_OBJ_PATH, TOOL_SCALE
+    robot = env.scene["robot"]
+    tool_cfg = SceneEntityCfg("robot", body_names=["link_coacd_convex_piece_0"])
+    tool_cfg.resolve(env.scene)
+    tool_idx = tool_cfg.body_ids[0]
+    tool_pos_w = robot.data.body_state_w[:, tool_idx, :3]   # (num_envs, 3)
+    tool_quat_w = robot.data.body_state_w[:, tool_idx, 3:7]  # (num_envs, 4)
     from isaaclab.utils.math import matrix_from_quat
-    eef_rot = matrix_from_quat(eef_quat_w)  # (num_envs, 3, 3)
+    tool_rot = matrix_from_quat(tool_quat_w)  # (num_envs, 3, 3)
 
     def _get_aabb(center_w, rot, pts_local):
         """pts_local: (M,3) canonical points. Returns (min_w, max_w) each (3,)."""
         pts_w = (rot @ pts_local.T).T + center_w  # (M,3)
         return pts_w.min(dim=0).values, pts_w.max(dim=0).values
 
-    # Cache tool aabbs per env
+    # Cache tool aabbs per env (same fixed tool for all envs)
+    tool_cloud_obj = get_cached_cloud(TOOL_OBJ_PATH)
+    tool_pts_base = tool_cloud_obj._get_points_torch(env.device).float() * TOOL_SCALE
     tool_aabbs = []
     for env_id_int in range(env.num_envs):
-        tool_idx = env_id_int % len(eef_assets_cfg)
-        tool_cloud_obj = get_cached_cloud(eef_assets_cfg[tool_idx].obj_path)
-        pts = tool_cloud_obj._get_points_torch(env.device).float()
-        if hasattr(env, "_tool_scales"):
-            pts = pts * env._tool_scales[env_id_int].float()
-        t_min, t_max = _get_aabb(eef_pos_w[env_id_int], eef_rot[env_id_int], pts)
+        t_min, t_max = _get_aabb(tool_pos_w[env_id_int], tool_rot[env_id_int], tool_pts_base)
         tool_aabbs.append((t_min, t_max))
 
     for i, env_id in enumerate(env_ids):
@@ -296,231 +260,182 @@ def randomize_terrain_material(
     restitution = restitution_buckets[bucket_id]
     
     # Update terrain physics material
-    # For terrain, we need to access the physics material prim directly
     import isaacsim.core.utils.prims as prim_utils
-    from pxr import UsdPhysics
-    
+    from pxr import UsdPhysics, UsdShade, Sdf
+
     # Get the terrain prim path
-    # For plane terrain, the actual prim path is {cfg.prim_path}/terrain
     terrain_prim_path = terrain.cfg.prim_path + "/terrain"
-    
-    # Find the physics material prim
+
+    # Create physics material prim if it doesn't exist
     physics_material_path = f"{terrain_prim_path}/physicsMaterial"
     physics_material_prim = prim_utils.get_prim_at_path(physics_material_path)
+    if not physics_material_prim or not physics_material_prim.IsValid():
+        # Create the prim and define it as a Material + PhysicsMaterial
+        from isaacsim.core.utils.stage import get_current_stage
+        stage = get_current_stage()
+        physics_material_prim = stage.DefinePrim(physics_material_path, "Material")
 
-    # Create or get the physics material
+    # Apply PhysicsMaterialAPI and set properties
     physics_material = UsdPhysics.MaterialAPI.Apply(physics_material_prim)
-    
-    # Set material properties
     physics_material.CreateStaticFrictionAttr().Set(static_friction.item())
     physics_material.CreateDynamicFrictionAttr().Set(dynamic_friction.item())
     physics_material.CreateRestitutionAttr().Set(restitution.item())
-    
-    # Apply the material to the terrain mesh
-    # For plane terrain, we need to find the actual collision prim (Plane type)
-    mesh_prim_path = f"{terrain_prim_path}/mesh"
-    mesh_prim = prim_utils.get_prim_at_path(mesh_prim_path)
-    
-    # Find the collision prim (Plane type) for ground plane
+
+    # Bind physics material to the terrain collision prim
+    # Try to find a Plane child; fall back to the terrain prim itself
     collision_prim = prim_utils.get_first_matching_child_prim(
-        terrain_prim_path, 
+        terrain_prim_path,
         predicate=lambda x: prim_utils.get_prim_type_name(x) == "Plane"
     )
-    
-    # Use IsaacLab's bind_physics_material function
+    if collision_prim is not None:
+        target_path = collision_prim.GetPrimPath()
+    else:
+        # Fall back: bind to the terrain prim directly
+        target_path = terrain_prim_path
+
     import isaaclab.sim as sim_utils
-    sim_utils.bind_physics_material(collision_prim.GetPrimPath(), physics_material_path)
+    sim_utils.bind_physics_material(target_path, physics_material_path)
 
 def compute_head_area_offsets_from_usd(env) -> "torch.Tensor":
     """Compute per-env head area offsets in the tool's LOCAL frame using OBJ mesh bounds.
 
-    Uses the tool's OBJ file (via cached point cloud) to compute bounding box bounds in
+    Uses the fixed fork OBJ file (via cached point cloud) to compute bounding box bounds in
     canonical (unscaled) mesh space, applies head_area_norm interpolation, then scales by
-    the per-tool-type scale from UsdFileCfg.
+    the constant TOOL_SCALE (0.1).
 
-    This avoids the instance-proxy contamination that occurs when querying USD BBoxCache
-    on env_1+ prims in Isaac Lab multi-env setups: those prims are instance proxies whose
-    ComputeLocalBound results include the environment world-origin offset, causing markers
-    to drift by one env_spacing per tool type index.
+    Since the tool is baked into the robot USD, all envs share the same single tool type.
+    The offset is broadcast to all envs.
     """
-    from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import get_cached_cloud
-
-    eef_asset = env.scene["eef"]
-    assets_cfg = eef_asset.cfg.spawn.assets_cfg
+    from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
+        get_cached_cloud, TOOL_OBJ_PATH, TOOL_SCALE, TOOL_HEAD_AREA_NORM,
+    )
 
     head_area_offsets = torch.zeros(env.num_envs, 3, device=env.device)
-    num_tool_types = len(assets_cfg)
 
-    type_offsets = {}  # asset_idx -> torch.Tensor (3,)
+    if TOOL_HEAD_AREA_NORM is None:
+        print("[WARNING compute_head_area] No head_area_norm available, all offsets=[0,0,0]")
+        return head_area_offsets
 
-    for asset_idx in range(num_tool_types):
-        tool_cfg = assets_cfg[asset_idx]
+    mid_norm = [(TOOL_HEAD_AREA_NORM[0][i] + TOOL_HEAD_AREA_NORM[1][i]) / 2.0 for i in range(3)]
 
-        head_area_norm = getattr(tool_cfg, "head_area_norm", None)
-        if head_area_norm is None:
-            type_offsets[asset_idx] = torch.zeros(3, device=env.device)
-            # print(f"[DEBUG head_area tool_{asset_idx}] No head_area_norm, offset=[0,0,0]")
-            continue
+    # Compute OBJ-space bbox from the cached point cloud (canonical, no env offset).
+    cloud = get_cached_cloud(TOOL_OBJ_PATH)
+    pts = torch.tensor(cloud.points, dtype=torch.float32, device=env.device)
+    bbox_min = pts.min(dim=0).values
+    bbox_max = pts.max(dim=0).values
 
-        obj_path = getattr(tool_cfg, "obj_path", None)
-        if obj_path is None:
-            type_offsets[asset_idx] = torch.zeros(3, device=env.device)
-            # print(f"[WARNING head_area tool_{asset_idx}] No obj_path, offset=[0,0,0]")
-            continue
+    # Head area center in unscaled OBJ space
+    mid_norm_t = torch.tensor(mid_norm, dtype=torch.float32, device=env.device)
+    head_area_unscaled = bbox_min + mid_norm_t * (bbox_max - bbox_min)
 
-        mid_norm = [(head_area_norm[0][i] + head_area_norm[1][i]) / 2.0 for i in range(3)]
+    # Scale: constant TOOL_SCALE for all envs
+    scale_t = torch.tensor([TOOL_SCALE, TOOL_SCALE, TOOL_SCALE], dtype=torch.float32, device=env.device)
 
-        # Compute OBJ-space bbox from the cached point cloud (canonical, no env offset).
-        cloud = get_cached_cloud(obj_path)
-        pts = torch.tensor(cloud.points, dtype=torch.float32, device=env.device)
-        bbox_min = pts.min(dim=0).values
-        bbox_max = pts.max(dim=0).values
+    # The normalized OBJ has bbox_min[Z] ≈ 0 (attachment end at origin).
+    # Subtract bbox_min[Z] so the offset is measured from the attachment point.
+    head_area_from_attachment = head_area_unscaled.clone()
+    head_area_from_attachment[2] = head_area_unscaled[2] - bbox_min[2]
+    head_area_local = head_area_from_attachment * scale_t
 
-        # Head area center in unscaled OBJ space
-        mid_norm_t = torch.tensor(mid_norm, dtype=torch.float32, device=env.device)
-        head_area_unscaled = bbox_min + mid_norm_t * (bbox_max - bbox_min)
+    # Broadcast: same offset for all envs (single fixed tool)
+    head_area_offsets[:] = head_area_local
 
-        # Scale: read directly from UsdFileCfg.scale (set at load time, no USD query needed)
-        cfg_scale = getattr(tool_cfg, "scale", None)
-        if cfg_scale is not None:
-            scale_t = torch.tensor(list(cfg_scale), dtype=torch.float32, device=env.device)
-        elif hasattr(env, "_tool_scales"):
-            scale_t = env._tool_scales[asset_idx].float()
-        else:
-            scale_t = torch.ones(3, device=env.device)
-
-        # The normalized OBJ is centered at z=0, but in simulation panda_link8 sits at the
-        # BASE of the tool (z≈bbox_min in normalized space, because the normalization process
-        # centered the original mesh whose attachment end was at z≈0).
-        # For X and Y panda_link8 is at the OBJ origin (≈0), so those components are unchanged.
-        # For Z, subtract bbox_min[2] so the offset is measured from the attachment point.
-        head_area_from_attachment = head_area_unscaled.clone()
-        head_area_from_attachment[2] = head_area_unscaled[2] - bbox_min[2]
-        head_area_local = head_area_from_attachment * scale_t
-        type_offsets[asset_idx] = head_area_local
-
-        # print(f"[DEBUG head_area tool_{asset_idx}] mid_norm={[round(v,3) for v in mid_norm]}")
-        # print(f"[DEBUG head_area tool_{asset_idx}] bbox_min={[round(v,4) for v in bbox_min.tolist()]} max={[round(v,4) for v in bbox_max.tolist()]}")
-        # print(f"[DEBUG head_area tool_{asset_idx}] scale={[round(v,4) for v in scale_t.tolist()]}")
-        # print(f"[DEBUG head_area tool_{asset_idx}] head_area_local={[round(v,4) for v in head_area_local.tolist()]}")
-
-    # Broadcast: assign each env the offset for its tool type.
-    for env_id in range(env.num_envs):
-        asset_idx = env_id % num_tool_types
-        head_area_offsets[env_id] = type_offsets.get(asset_idx, torch.zeros(3, device=env.device))
-
-    #print(f"[DEBUG head_area] Done. offsets[0]={head_area_offsets[0].tolist()}")
-    #if env.num_envs > 1:
-    #    print(f"[DEBUG head_area] offsets[1]={head_area_offsets[1].tolist()} (should equal offsets[0] if same tool type)")
     return head_area_offsets
 
 
-def adjust_eef_origin_to_base_center(env, env_ids):
-    """Shift tool mesh so base_center becomes the geometric center."""
-    if env_ids is None:
-        env_ids = range(env.num_envs)
+# ---------------------------------------------------------------------------
+# Tool (link_coacd_convex_piece_0) mass and friction randomization
+# ---------------------------------------------------------------------------
 
-    eef_asset = env.scene["eef"]
-    assets_cfg = eef_asset.cfg.spawn.assets_cfg
-    print(f"[DEBUG adjust_eef_origin] Processing {len(list(env_ids))} environments")
+def randomize_tool_mass(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    mass_range: tuple[float, float] = (0.1, 0.5),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+):
+    """Randomize the mass of the tool body (link_coacd_convex_piece_0).
 
-    for i in env_ids:
-        ee_root_path = f"/World/envs/env_{i}/eef"
-        print(f"\n[DEBUG adjust_eef_origin] === Env {i} ===")
-        print(f"[DEBUG adjust_eef_origin] Tool path: {ee_root_path}")
+    The tool is a separate rigid body in the robot articulation, connected
+    to panda_link7 via a fixed weld joint. We target it by body name.
 
-        ee_prim = prim_utils.get_prim_at_path(ee_root_path)
-        if not ee_prim:
-            print(f"[DEBUG adjust_eef_origin] ERROR: Tool prim not found at {ee_root_path}")
-            continue
+    Args:
+        env: The environment instance.
+        env_ids: Environment IDs to randomize.
+        mass_range: (min, max) mass in kg.
+        robot_cfg: Robot scene entity config.
+    """
+    robot = env.scene[robot_cfg.name]
+    # Resolve tool body index
+    tool_body_cfg = SceneEntityCfg("robot", body_names=["link_coacd_convex_piece_0"])
+    tool_body_cfg.resolve(env.scene)
+    tool_idx = tool_body_cfg.body_ids[0]
 
-        # Get tool config and base_center
-        asset_idx = i % len(assets_cfg)
-        tool_cfg = assets_cfg[asset_idx]
-        base_center_norm = torch.tensor(tool_cfg.base_center, device=env.device)
-        print(f"[DEBUG adjust_eef_origin] Tool config index: {asset_idx}")
-        print(f"[DEBUG adjust_eef_origin] base_center_norm: {base_center_norm.tolist()}")
+    # Sample random masses
+    num_envs = len(env_ids)
+    new_masses = torch.rand(num_envs, device=env.device) * (mass_range[1] - mass_range[0]) + mass_range[0]
 
-        # Compute bbox
-        bbox_cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), includedPurposes=[UsdGeom.Tokens.default_])
-        bbox = bbox_cache.ComputeLocalBound(ee_prim)
-        bbox_range = bbox.GetRange()
-        bbox_min = torch.tensor([bbox_range.GetMin()[0], bbox_range.GetMin()[1], bbox_range.GetMin()[2]], device=env.device)
-        bbox_max = torch.tensor([bbox_range.GetMax()[0], bbox_range.GetMax()[1], bbox_range.GetMax()[2]], device=env.device)
-        bbox_size = bbox_max - bbox_min
-        print(f"[DEBUG adjust_eef_origin] BBox min: {bbox_min.tolist()}")
-        print(f"[DEBUG adjust_eef_origin] BBox max: {bbox_max.tolist()}")
-        print(f"[DEBUG adjust_eef_origin] BBox size: {bbox_size.tolist()}")
+    # Update only the tool body's mass.
+    # PhysX view tensors are always on CPU regardless of env.device.
+    current_masses = robot.root_physx_view.get_masses().clone()  # CPU tensor
+    env_ids_cpu = env_ids.cpu()  # index on CPU
+    current_masses[env_ids_cpu, tool_idx] = new_masses.cpu()  # values also on CPU
+    robot.root_physx_view.set_masses(current_masses, env_ids_cpu)
 
-        # Compute offset to shift mesh: (0.5 - base_center_norm) * bbox_size
-        offset = (0.5 - base_center_norm) * bbox_size
-        print(f"[DEBUG adjust_eef_origin] Computed offset: {offset.tolist()}")
 
-        # Apply transform to mesh child prim
-        child_found = False
-        for child in ee_prim.GetChildren():
-            child_type = child.GetTypeName()
-            print(f"[DEBUG adjust_eef_origin] Checking child: {child.GetPath()} (type: {child_type})")
-            if child.IsA(UsdGeom.Mesh) or child.IsA(UsdGeom.Xform):
-                xform = UsdGeom.Xformable(child)
-                existing_ops = xform.GetOrderedXformOps()
-                print(f"[DEBUG adjust_eef_origin] Found transformable child, existing ops: {len(existing_ops)}")
+def randomize_tool_friction(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    static_friction_range: tuple[float, float] = (0.8, 1.2),
+    dynamic_friction_range: tuple[float, float] = (0.8, 1.2),
+    restitution_range: tuple[float, float] = (0.0, 0.0),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+):
+    """Randomize friction of the tool body's collision shapes.
 
-                # Get existing translate op or create if doesn't exist
-                translate_op = existing_ops[0] if existing_ops else xform.AddTranslateOp()
-                translate_op.Set(Gf.Vec3d(offset[0].item(), offset[1].item(), offset[2].item()))
-                print(f"[DEBUG adjust_eef_origin] Applied transform to {child.GetPath()}")
-                child_found = True
-                break
+    The tool (link_coacd_convex_piece_0) has multiple collision shapes.
+    We set the same friction value across all shapes for simplicity.
 
-        if not child_found:
-            print(f"[DEBUG adjust_eef_origin] WARNING: No Mesh or Xform child found for env {i}")
+    Args:
+        env: The environment instance.
+        env_ids: Environment IDs to randomize.
+        static_friction_range: (min, max) static friction coefficient.
+        dynamic_friction_range: (min, max) dynamic friction coefficient.
+        restitution_range: (min, max) restitution coefficient.
+        robot_cfg: Robot scene entity config.
+    """
+    robot = env.scene[robot_cfg.name]
+    # Resolve tool body index
+    tool_body_cfg = SceneEntityCfg("robot", body_names=["link_coacd_convex_piece_0"])
+    tool_body_cfg.resolve(env.scene)
+    tool_idx = tool_body_cfg.body_ids[0]
 
-def update_eef_pose(env, env_ids=None):
-    """Teleport eef tool to follow robot end effector each step."""
-    if env_ids is None:
-        env_ids = torch.arange(env.num_envs, device=env.device)
+    num_envs = len(env_ids)
+    # Sample random friction/restitution values
+    static_fric = torch.rand(num_envs, device=env.device) * (static_friction_range[1] - static_friction_range[0]) + static_friction_range[0]
+    dynamic_fric = torch.rand(num_envs, device=env.device) * (dynamic_friction_range[1] - dynamic_friction_range[0]) + dynamic_friction_range[0]
+    # Ensure dynamic <= static
+    dynamic_fric = torch.min(dynamic_fric, static_fric)
+    restitution = torch.rand(num_envs, device=env.device) * (restitution_range[1] - restitution_range[0]) + restitution_range[0]
 
-    robot = env.scene["robot"]
-    eef = env.scene["eef"]
+    # PhysX view tensors are always on CPU regardless of env.device.
+    # Index and values must all be on CPU.
+    current_props = robot.root_physx_view.get_material_properties().clone()  # CPU tensor (num_envs, num_shapes, 3)
+    num_shapes = current_props.shape[1]
+    num_bodies = robot.root_physx_view.get_masses().shape[1]
 
-    # Get panda_link7 body pose (flange/wrist)
-    robot_cfg = SceneEntityCfg("robot", body_names=["panda_link8"])
-    robot_cfg.resolve(env.scene)
-    link7_idx = robot_cfg.body_ids[0]
+    # Find the shape range for the tool body (shapes are ordered by body)
+    shapes_per_body = num_shapes // num_bodies
+    shape_start = tool_idx * shapes_per_body
+    shape_end = min((tool_idx + 1) * shapes_per_body, num_shapes)
 
-    # Copy link7 pose to tool
-    eef.data.root_state_w[env_ids, :3] = robot.data.body_state_w[env_ids, link7_idx, :3]
-    eef.data.root_state_w[env_ids, 3:7] = robot.data.body_state_w[env_ids, link7_idx, 3:7]
-    eef.write_root_state_to_sim(eef.data.root_state_w, env_ids=env_ids)
+    env_ids_cpu = env_ids.cpu()
+    static_fric_cpu = static_fric.cpu()
+    dynamic_fric_cpu = dynamic_fric.cpu()
+    restitution_cpu = restitution.cpu()
 
-    # Visualize head area position using freshly-set eef state (avoids ee_frame sensor lag).
-    if getattr(env.cfg, 'visualize_eef_position', False):
-        from isaaclab.utils.math import matrix_from_quat as _mfq
-        eef_pos_w = eef.data.root_state_w[:, :3]    # (N, 3) – current panda_link8 pos
-        eef_quat_w = eef.data.root_state_w[:, 3:7]  # (N, 4)
-        R = _mfq(eef_quat_w)                         # (N, 3, 3)
-        offset = env._head_area_offsets              # (N, 3)
-        head_area_pos_w = eef_pos_w + torch.bmm(R, offset.unsqueeze(-1)).squeeze(-1)
-        head_area_pose_7d = torch.cat([head_area_pos_w, eef_quat_w], dim=-1)
-        # visualize_eef_position(env, head_area_pose_7d)
+    for shape_i in range(shape_start, shape_end):
+        current_props[env_ids_cpu, shape_i, 0] = static_fric_cpu
+        current_props[env_ids_cpu, shape_i, 1] = dynamic_fric_cpu
+        current_props[env_ids_cpu, shape_i, 2] = restitution_cpu
 
-def visualize_eef_position(env, eef_pose_7d: torch.Tensor):
-    """Visualize the eef tool position."""
-    try:
-        # Create the visualizer only once and cache it on the env object.
-        # Recreating it every step causes stale USD prims and wrong visual positions.
-        if not hasattr(env, '_eef_position_visualizer') or env._eef_position_visualizer is None:
-            from isaaclab.markers import VisualizationMarkers
-            from isaaclab.markers.config import FRAME_MARKER_CFG
-
-            marker_cfg = FRAME_MARKER_CFG.copy()
-            marker_cfg.prim_path = "/Visuals/EefPosition"
-            marker_cfg.markers["frame"].scale = (0.1, 0.1, 0.1)
-            env._eef_position_visualizer = VisualizationMarkers(marker_cfg)
-
-        world_positions = eef_pose_7d[:, :3]
-        quaternions = eef_pose_7d[:, 3:7]
-        env._eef_position_visualizer.visualize(translations=world_positions, orientations=quaternions)
-    except Exception as e:
-        print(f"[ERROR visualize_eef_position] {type(e).__name__}: {e}")
+    robot.root_physx_view.set_material_properties(current_props, env_ids_cpu)

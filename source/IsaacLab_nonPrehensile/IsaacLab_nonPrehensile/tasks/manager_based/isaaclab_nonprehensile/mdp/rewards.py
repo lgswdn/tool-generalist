@@ -30,7 +30,7 @@ def object_ee_distance_tanh(
     object: RigidObject = env.scene[object_cfg.name]
     # Target object position: (num_envs, 3)
     obj_pos_w = object.data.root_pos_w
-    # Head area world position (panda_link8 + rotated per-env local offset): (num_envs, 3)
+    # Head area world position (tool body + rotated per-env local offset): (num_envs, 3)
     ee_pos = get_head_area_pos_w(env)
     # Distance of the end-effector to the object: (num_envs,)
     object_ee_distance = torch.norm(obj_pos_w - ee_pos, dim=1)
