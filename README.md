@@ -7,7 +7,11 @@ python scripts/record_video.py --task tool-v0 --num_envs 30 --video_length 30 --
 ## 从工具生成具有不同末端的机械臂
 
 ```bash
-python ./scripts/batch_generate_franka.py --output-base ./robot_usd/ --mirror-tool-assets --disable-gravity --overwrite --tools-root /your/tools/root --isaaclab-sh /your/isaaclab/sh --generator-script ./scripts/generate_franka.py
+./isaaclab.sh -p batch_generate_franka_single_launch.py \
+  --tools-root /your/tools/root \
+  --src-root /../tool-generalist/FrankaEmika \
+  --output-root /../tool-generalist/robot_usd \
+  --overwrite --reuse-output-root --mirror-tool-assets --disable-gravity
 ```
 
 ## Project Overview

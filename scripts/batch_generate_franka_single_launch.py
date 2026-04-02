@@ -1,39 +1,92 @@
 #!/usr/bin/env python3
-"""Generate a Franka USD with removed gripper and welded custom tool.
+"""Batch-generate Franka USDs with different tools in a single IsaacLab launch.
 
-This script performs the full pipeline:
-1) Copy Franka source asset tree (to keep relative references valid)
-2) Copy source USD into a new output USD
-3) Deactivate gripper/finger prims and finger joints
-4) Add custom tool as a reference under the attach link (default: panda_link8)
-5) Apply rigid-body / collision / mass (and PhysX, if available) properties
-6) Create a UsdPhysics.FixedJoint between link8 and the tool rigid body
+This script merges the behavior of:
+- generate_franka.py (single-tool generation logic)
+- batch_generate_franka.py (tool discovery + batch loop)
 
-Run inside Isaac Lab/Isaac Sim Python environment, for example:
-  ./IsaacLab-2.2.0/isaaclab.sh -p ./IsaacLab-scripts/generate_franka.py -- \
-	  --tool-usd /abs/path/to/tool.usd \
-	  --output-root /mnt/afs/wangyuze/ToolGeneralist/static/franka/generated
+Key difference:
+- IsaacLab is launched only once, then all tool USDs are processed in one run.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
-import sys
 from pathlib import Path
 
 from isaaclab.app import AppLauncher
 
-parser = argparse.ArgumentParser(description="Generate Franka USD with custom welded tool.")
+
+def _safe_name(name: str) -> str:
+	return re.sub(r"[^a-zA-Z0-9._-]+", "_", name).strip("_") or "tool"
+
+
+def _discover_tool_usds(tools_root: Path) -> list[tuple[str, Path]]:
+	"""Discover one primary tool USD per immediate child folder.
+
+	Rules:
+	1) If folder has <folder_name>.usd at its top-level, use it.
+	2) Else if exactly one top-level *.usd exists, use it.
+	3) Else skip this folder (ambiguous or missing).
+	"""
+	results: list[tuple[str, Path]] = []
+
+	# Also accept top-level usd files directly under tools_root.
+	for usd in sorted(tools_root.glob("*.usd")):
+		results.append((usd.stem, usd.resolve()))
+
+	for child in sorted(tools_root.iterdir()):
+		if not child.is_dir():
+			continue
+
+		same_name = child / f"{child.name}.usd"
+		if same_name.is_file():
+			results.append((child.name, same_name.resolve()))
+			continue
+
+		root_usds = sorted(child.glob("*.usd"))
+		if len(root_usds) == 1:
+			results.append((child.name, root_usds[0].resolve()))
+
+	return results
+
+
+parser = argparse.ArgumentParser(
+	description="Batch-generate Franka USDs for many tools in one IsaacLab process."
+)
 
 AppLauncher.add_app_launcher_args(parser)
 
+# Batch discovery options
+parser.add_argument(
+	"--tools-root",
+	type=str,
+	default="/mnt/afs/wangyuze/ToolGeneralist/static/objects_usd",
+	help="Directory containing tool USD folders/files.",
+)
+parser.add_argument(
+	"--output-usd-prefix",
+	type=str,
+	default="panda_instanceable_",
+	help="Prefix of generated USD name: <prefix><tool_name>.usd",
+)
+parser.add_argument(
+	"--fail-fast",
+	action="store_true",
+	default=False,
+	help="Stop immediately when one tool generation fails.",
+)
+parser.add_argument("--dry-run", action="store_true", default=False)
+
+# Franka source/output options (from generate_franka.py)
 parser.add_argument(
 	"--src-root",
 	type=str,
 	default="/mnt/afs/wangyuze/ToolGeneralist/static/franka/Robots/FrankaEmika",
-	help="Source Franka asset root that contains panda_instanceable.usd, Props/, Materials/",
+	help="Source Franka asset root that contains panda_instanceable.usd, Props/, Materials/.",
 )
 parser.add_argument(
 	"--src-usd",
@@ -44,27 +97,40 @@ parser.add_argument(
 parser.add_argument(
 	"--output-root",
 	type=str,
-	default="/mnt/afs/wangyuze/ToolGeneralist/static/franka/generated/Robots/FrankaEmika",
-	help="Output asset root. Entire src-root is copied here.",
+	default="/mnt/afs/wangyuze/ToolGeneralist/static/franka/generated/Robots",
+	help="Output asset root. Entire src-root is copied here once.",
 )
 parser.add_argument(
-	"--output-usd",
-	type=str,
-	default="panda_instanceable_tool.usd",
-	help="Output robot USD file name under output-root.",
+	"--overwrite",
+	action="store_true",
+	default=True,
+	help="Delete output-root and recreate from src-root before generation.",
 )
-parser.add_argument("--tool-usd", type=str, required=True, help="Absolute path to tool USD.")
+parser.add_argument(
+	"--no-overwrite",
+	action="store_true",
+	default=False,
+	help="Disable overwrite behavior.",
+)
+parser.add_argument(
+	"--reuse-output-root",
+	action="store_true",
+	default=False,
+	help="Reuse existing output-root and merge missing base assets.",
+)
+
+# Tool reference and variants
 parser.add_argument(
 	"--tool-root-prim",
 	type=str,
 	default="/root",
-	help="Tool prim path to reference inside tool USD. For provided fork.usda use /root.",
+	help="Tool prim path to reference inside tool USD.",
 )
 parser.add_argument(
 	"--mirror-tool-assets",
 	action="store_true",
 	default=False,
-	help="Copy tool USD directory under output-root/ToolAssets to keep relative payloads valid.",
+	help="Copy each tool USD directory under output-root/ToolAssets for relative refs.",
 )
 parser.add_argument(
 	"--tool-variant-physics",
@@ -94,17 +160,18 @@ parser.add_argument(
 	"--tool-collider-scope",
 	type=str,
 	default="colliders",
-	help="Prefer collision meshes from this child scope under tool root (base.usda uses 'colliders').",
+	help="Prefer collision meshes from this child scope under tool root.",
 )
+
+# Attachment / transform
 parser.add_argument(
 	"--attach-link-name",
 	type=str,
 	default="panda_link7",
-	help="Franka link name to attach tool. For provided panda.usda, use panda_link7.",
+	help="Franka link name to attach tool.",
 )
 parser.add_argument("--tool-mount-name", type=str, default="tool_mount", help="Prim name for tool mount xform.")
 parser.add_argument("--joint-name", type=str, default="tool_weld_joint", help="Fixed joint prim name.")
-
 parser.add_argument(
 	"--tool-pos",
 	type=str,
@@ -131,37 +198,32 @@ parser.add_argument(
 	help="How to strip gripper from panda.usda-known prims.",
 )
 
+# Physics
 parser.add_argument("--mass-kg", type=float, default=0.2)
-parser.add_argument("--enable-gravity", action="store_true", default=False)
+parser.add_argument("--enable-gravity", action="store_true", default=True)
+parser.add_argument("--disable-gravity", action="store_true", default=False)
 parser.add_argument("--max-linear-velocity", type=float, default=1000.0)
 parser.add_argument("--max-angular-velocity", type=float, default=1000.0)
 parser.add_argument("--max-depenetration-velocity", type=float, default=5.0)
 parser.add_argument("--contact-offset", type=float, default=0.005)
 parser.add_argument("--rest-offset", type=float, default=0.0)
 
-parser.add_argument("--overwrite", action="store_true", default=False)
-parser.add_argument(
-	"--reuse-output-root",
-	action="store_true",
-	default=False,
-	help="Reuse existing output-root instead of failing when it already exists.",
-)
 args = parser.parse_args()
 
 app_launcher = AppLauncher(args)
 simulation_app = app_launcher.app
 
-print("Isaac Lab Startup")
+print("Isaac Lab Startup (single launch batch mode)")
 
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, PhysxSchema
 
 # Known prim paths from local Panda USDA layout.
 PANDA_ROOT_PATH = "/panda"
-PANDA_LINK7_PATH = "/panda/panda_link7"
 PANDA_HAND_JOINT_PATH = "/panda/panda_link7/panda_hand_joint"
 PANDA_HAND_PATH = "/panda/panda_hand"
 PANDA_LEFT_FINGER_PATH = "/panda/panda_leftfinger"
 PANDA_RIGHT_FINGER_PATH = "/panda/panda_rightfinger"
+
 
 def _parse_vec3(text: str) -> tuple[float, float, float]:
 	vals = [float(x.strip()) for x in text.split(",")]
@@ -205,10 +267,6 @@ def _remove_or_deactivate_prim(stage: Usd.Stage, prim_path: str, remove: bool) -
 
 
 def _strip_known_gripper(stage: Usd.Stage, remove: bool = True) -> list[str]:
-	"""Remove/deactivate gripper subtree using known panda.usda structure.
-
-	Order matters: remove joint first, then rigid bodies.
-	"""
 	actions = []
 	for prim_path in [
 		PANDA_HAND_JOINT_PATH,
@@ -233,12 +291,6 @@ def _collect_mesh_prims(root_prim) -> list:
 
 
 def _collect_collision_prims(root_prim, preferred_scope_name: str = "colliders") -> tuple[list, str]:
-	"""Collect collision prims with preference for a dedicated collider scope.
-
-	For the provided tool base.usda, collision geometry lives under /root/colliders.
-	We first try that scope, and fallback to all meshes under the tool mount.
-	Returns: (prims, source_tag)
-	"""
 	if preferred_scope_name:
 		scope_path = root_prim.GetPath().AppendChild(preferred_scope_name)
 		scope_prim = root_prim.GetStage().GetPrimAtPath(scope_path)
@@ -251,7 +303,6 @@ def _collect_collision_prims(root_prim, preferred_scope_name: str = "colliders")
 
 
 def _apply_variant_if_exists(prim, variant_set_name: str, variant_name: str) -> bool:
-	"""Set variant selection on prim if the variant set and variant exist."""
 	vs_api = prim.GetVariantSets()
 	if not vs_api.HasVariantSet(variant_set_name):
 		return False
@@ -263,10 +314,6 @@ def _apply_variant_if_exists(prim, variant_set_name: str, variant_name: str) -> 
 
 
 def _mirror_tool_assets_if_requested(tool_usd: Path, out_root: Path, mirror: bool) -> Path:
-	"""Optionally mirror tool folder under output root and return usd path to reference.
-
-	This helps with exported tools that use relative payloads/references (e.g. configuration/*.usd).
-	"""
 	if not mirror:
 		return tool_usd
 
@@ -279,11 +326,6 @@ def _mirror_tool_assets_if_requested(tool_usd: Path, out_root: Path, mirror: boo
 
 
 def _get_authored_reference_path(referenced_tool_usd: Path, out_usd: Path, prefer_relative: bool) -> str:
-	"""Compute the path string authored into AddReference().
-
-	When prefer_relative is True (used with mirrored tool assets), author a path
-	relative to the output USD layer for portability.
-	"""
 	if not prefer_relative:
 		return str(referenced_tool_usd)
 
@@ -302,25 +344,21 @@ def _resolve_tool_rigid_body_prim(stage: Usd.Stage, tool_mount_prim, tool_rb_hin
 			raise RuntimeError(f"tool rigid body prim not found: {rb_path}")
 		return rb_prim
 
-	# Auto-find first rigid body under tool mount
 	for prim in Usd.PrimRange(tool_mount_prim):
 		if prim.IsInstanceProxy():
 			continue
 		if prim.HasAPI(UsdPhysics.RigidBodyAPI):
 			return prim
 
-	# Heuristic for exported tool base.usda: prefer root link prim if present.
 	for child_name in ["link_coacd_convex_piece_0", "link", "base", "tool", "body"]:
 		cand = stage.GetPrimAtPath(tool_mount_prim.GetPath().AppendChild(child_name))
 		if cand.IsValid() and not cand.IsInstanceProxy():
 			return cand
 
-	# Fallback: use mount prim itself
 	return tool_mount_prim
 
 
 def _apply_tool_physics(
-	tool_mount_prim,
 	rb_prim,
 	mesh_prims: list,
 	mass_kg: float,
@@ -331,7 +369,6 @@ def _apply_tool_physics(
 	contact_offset: float,
 	rest_offset: float,
 ):
-	# Ensure rigid body and mass API
 	rb_api = UsdPhysics.RigidBodyAPI.Apply(rb_prim)
 	rb_api.CreateRigidBodyEnabledAttr().Set(True)
 	rb_api.CreateKinematicEnabledAttr().Set(False)
@@ -339,12 +376,10 @@ def _apply_tool_physics(
 	mass_api = UsdPhysics.MassAPI.Apply(rb_prim)
 	mass_api.CreateMassAttr().Set(mass_kg)
 
-	# Ensure collision API on all meshes under tool mount
 	for mesh_prim in mesh_prims:
 		col_api = UsdPhysics.CollisionAPI.Apply(mesh_prim)
 		col_api.CreateCollisionEnabledAttr().Set(True)
 
-	# PhysX-specific parameters (if available)
 	physx_rb = PhysxSchema.PhysxRigidBodyAPI.Apply(rb_prim)
 	physx_rb.CreateDisableGravityAttr().Set(not enable_gravity)
 	physx_rb.CreateMaxLinearVelocityAttr().Set(max_linear_velocity)
@@ -379,70 +414,43 @@ def _create_fixed_joint(
 	w1, x1, y1, z1 = local_rot1_wxyz
 	fixed_joint.CreateLocalRot0Attr().Set(Gf.Quatf(w0, x0, y0, z0))
 	fixed_joint.CreateLocalRot1Attr().Set(Gf.Quatf(w1, x1, y1, z1))
-	return fixed_joint
 
 
-def main():
-	src_root = Path(args.src_root).resolve()
-	src_usd = src_root / args.src_usd
-	out_root = Path(args.output_root).resolve()
-	out_usd = out_root / args.output_usd
-	tool_usd = Path(args.tool_usd).resolve()
-
-	if not src_root.is_dir():
-		raise FileNotFoundError(f"src-root not found: {src_root}")
-	if not src_usd.is_file():
-		raise FileNotFoundError(f"src-usd not found: {src_usd}")
-	if not tool_usd.is_file():
-		raise FileNotFoundError(f"tool-usd not found: {tool_usd}")
-
-	# 1) Copy source tree
+def _prepare_output_root(src_root: Path, out_root: Path, overwrite: bool, reuse_output_root: bool) -> None:
 	if out_root.exists():
-		if args.overwrite:
+		if overwrite:
 			shutil.rmtree(out_root)
 			shutil.copytree(src_root, out_root)
-			print("Source tree copied.")
-		elif args.reuse_output_root:
-			# Keep existing output-root and ensure base Franka assets exist.
+			print(f"[INFO] Recreated output root: {out_root}")
+		elif reuse_output_root:
 			shutil.copytree(src_root, out_root, dirs_exist_ok=True)
-			print("Source tree reused (merged missing base assets).")
+			print(f"[INFO] Reused output root (merged base assets): {out_root}")
 		else:
 			raise FileExistsError(
-				f"output-root already exists: {out_root}. Use --overwrite to replace it or --reuse-output-root to append new USDs."
+				f"output-root already exists: {out_root}. Use --overwrite or --reuse-output-root."
 			)
 	else:
 		shutil.copytree(src_root, out_root)
-		print("Source tree copied.")
+		print(f"[INFO] Created output root: {out_root}")
 
-	# 2) Copy source USD to a new output USD for editing
-	shutil.copy2(out_root / args.src_usd, out_usd)
-	print("Source USD copied to output USD.")
 
-	# 3) Open stage
-	stage = Usd.Stage.Open(str(out_usd))
+def _generate_one(stage_path: Path, tool_usd: Path, tool_name: str, output_root: Path) -> None:
+	stage = Usd.Stage.Open(str(stage_path))
 	if stage is None:
-		raise RuntimeError(f"Failed to open stage: {out_usd}")
-	print("Stage opened.")
+		raise RuntimeError(f"Failed to open stage: {stage_path}")
 
-	# 3.1) Optional mirror for tool assets with relative payload/references.
-	referenced_tool_usd = _mirror_tool_assets_if_requested(tool_usd, out_root, args.mirror_tool_assets)
-	print(f"Tool USD path to reference: {referenced_tool_usd}")
+	referenced_tool_usd = _mirror_tool_assets_if_requested(tool_usd, output_root, args.mirror_tool_assets)
 	authored_tool_ref_path = _get_authored_reference_path(
 		referenced_tool_usd=referenced_tool_usd,
-		out_usd=out_usd,
+		out_usd=stage_path,
 		prefer_relative=args.mirror_tool_assets,
 	)
-	print(f"Authored tool reference path: {authored_tool_ref_path}")
 
-	# 4) Strip gripper using known panda.usda paths.
 	if not stage.GetPrimAtPath(Sdf.Path(PANDA_ROOT_PATH)).IsValid():
 		raise RuntimeError(f"Expected panda root not found: {PANDA_ROOT_PATH}")
-	strip_actions = _strip_known_gripper(stage, remove=(args.strip_gripper_mode == "remove"))
-	print(f"Gripper removed, strip actions: {strip_actions}")
 
-	# Fallback by name if known strip found nothing.
+	strip_actions = _strip_known_gripper(stage, remove=(args.strip_gripper_mode == "remove"))
 	if len(strip_actions) == 0:
-		print("Fallback to deactivate prims by name")
 		to_deactivate = {
 			"panda_hand",
 			"panda_leftfinger",
@@ -454,34 +462,26 @@ def main():
 		for p in _deactivate_prims_by_name(stage, to_deactivate):
 			strip_actions.append(f"deactivated: {p}")
 
-	# 5) Find attachment link
 	link_prim = _find_first_prim_with_name(stage, args.attach_link_name)
 	if link_prim is None:
 		raise RuntimeError(f"Attach link not found by name: {args.attach_link_name}")
-	print(f"Attach link found: {link_prim.GetPath()}")
-	
-	# 6) Add tool reference under /panda (not under panda_link7), matching spatula.usd.
+
 	panda_root_prim = stage.GetPrimAtPath(Sdf.Path(PANDA_ROOT_PATH))
-	if not panda_root_prim.IsValid():
-		raise RuntimeError(f"Expected panda root not found: {PANDA_ROOT_PATH}")
 	tool_mount_path = panda_root_prim.GetPath().AppendChild(args.tool_mount_name)
 	tool_mount_prim = stage.DefinePrim(tool_mount_path, "Xform")
+
 	tool_root_prim = args.tool_root_prim.strip() or "/root"
 	tool_mount_prim.GetReferences().AddReference(authored_tool_ref_path, Sdf.Path(tool_root_prim))
-	print(f"Tool reference added under {tool_mount_path}, source prim: {tool_root_prim}")
 
-	# For variant-based tools (like provided fork.usda), select safe defaults.
 	variant_changes = []
 	for vs_name, vs_value in [
 		("Physics", args.tool_variant_physics),
 		("Sensor", args.tool_variant_sensor),
 		("Robot", args.tool_variant_robot),
 	]:
-		if vs_value:
-			if _apply_variant_if_exists(tool_mount_prim, vs_name, vs_value):
-				variant_changes.append(f"{vs_name}={vs_value}")
+		if vs_value and _apply_variant_if_exists(tool_mount_prim, vs_name, vs_value):
+			variant_changes.append(f"{vs_name}={vs_value}")
 
-	# Set mount transform from args (defaults match spatula.usd template).
 	pos = _parse_vec3(args.tool_pos)
 	rot = _parse_quat_wxyz(args.tool_rot)
 	scale = _parse_vec3(args.tool_scale)
@@ -490,62 +490,114 @@ def main():
 	xform.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(*pos))
 	xform.AddOrientOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Quatd(rot[0], rot[1], rot[2], rot[3]))
 	xform.AddScaleOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(*scale))
-	print(f"Transform applied to tool mount: " + f"pos={pos}, rot={rot}, scale={scale}")
-	
-	# 7) Resolve tool rigid body prim and apply physics
+
 	rb_hint = args.tool_rb_prim.strip() or None
 	tool_rb_prim = _resolve_tool_rigid_body_prim(stage, tool_mount_prim, rb_hint)
 	mesh_prims, collision_source = _collect_collision_prims(tool_mount_prim, args.tool_collider_scope)
+
+	enable_gravity = args.enable_gravity and not args.disable_gravity
 	_apply_tool_physics(
-		tool_mount_prim=tool_mount_prim,
 		rb_prim=tool_rb_prim,
 		mesh_prims=mesh_prims,
 		mass_kg=args.mass_kg,
-		enable_gravity=args.enable_gravity,
+		enable_gravity=enable_gravity,
 		max_linear_velocity=args.max_linear_velocity,
 		max_angular_velocity=args.max_angular_velocity,
 		max_depenetration_velocity=args.max_depenetration_velocity,
 		contact_offset=args.contact_offset,
 		rest_offset=args.rest_offset,
 	)
-	print("Physics applied")
 
-	# 8) Create fixed joint
 	_create_fixed_joint(
 		stage=stage,
 		parent_link_prim=link_prim,
 		child_rb_prim=tool_rb_prim,
 		joint_name=args.joint_name,
-		# Defaults match original panda_hand_joint in the provided panda.usda.
 		local_pos0=(0.0, 0.0, 0.107),
 		local_rot0_wxyz=(0.9238795, 0.0, 0.0, -0.38268346),
 		local_pos1=(0.0, 0.0, 0.0),
 		local_rot1_wxyz=(1.0, 0.0, 0.0, 0.0),
 	)
 
-	# 9) Save
 	stage.GetRootLayer().Save()
 
-	print("[DONE] Generated Franka tool USD")
-	print(f"  source root : {src_root}")
-	print(f"  output root : {out_root}")
-	print(f"  output usd  : {out_usd}")
-	print(f"  tool usd    : {tool_usd}")
-	print(f"  tool ref usd: {referenced_tool_usd}")
-	print(f"  tool prim   : {tool_root_prim}")
-	print(f"  attach link : {link_prim.GetPath()}")
-	print(f"  tool mount  : {tool_mount_path}")
-	print(f"  tool rb     : {tool_rb_prim.GetPath()}")
+	print(f"[DONE] {tool_name}")
+	print(f"  output usd   : {stage_path}")
+	print(f"  tool usd     : {tool_usd}")
+	print(f"  tool ref usd : {referenced_tool_usd}")
+	print(f"  attach link  : {link_prim.GetPath()}")
+	print(f"  tool mount   : {tool_mount_path}")
+	print(f"  tool rb      : {tool_rb_prim.GetPath()}")
 	print(f"  collision src: {collision_source}")
-	print(f"  collision prims: {len(mesh_prims)}")
+	print(f"  collision n  : {len(mesh_prims)}")
 	if len(variant_changes) > 0:
-		print(f"  tool variants: {', '.join(variant_changes)}")
-	else:
-		print("  tool variants: <none applied>")
-	print(f"  stripped    : {len(strip_actions)}")
-	for p in strip_actions:
-		print(f"    - {p}")
+		print(f"  variants     : {', '.join(variant_changes)}")
+	print(f"  stripped n   : {len(strip_actions)}")
+
+
+def main() -> None:
+	tools_root = Path(args.tools_root).expanduser().resolve()
+	src_root = Path(args.src_root).expanduser().resolve()
+	out_root = Path(args.output_root).expanduser().resolve()
+	src_usd = src_root / args.src_usd
+
+	if not tools_root.is_dir():
+		raise FileNotFoundError(f"tools-root not found: {tools_root}")
+	if not src_root.is_dir():
+		raise FileNotFoundError(f"src-root not found: {src_root}")
+	if not src_usd.is_file():
+		raise FileNotFoundError(f"src-usd not found: {src_usd}")
+
+	tool_items = _discover_tool_usds(tools_root)
+	if len(tool_items) == 0:
+		raise RuntimeError(f"No tool USD discovered under: {tools_root}")
+
+	overwrite = args.overwrite and not args.no_overwrite
+	reuse_output_root = args.reuse_output_root or not overwrite
+
+	print(f"[INFO] Discovered {len(tool_items)} tools")
+	for n, p in tool_items:
+		print(f"  - {n}: {p}")
+
+	_prepare_output_root(src_root, out_root, overwrite=overwrite, reuse_output_root=reuse_output_root)
+
+	success = 0
+	failures: list[tuple[str, str]] = []
+
+	for tool_name, tool_usd in tool_items:
+		safe_tool_name = _safe_name(tool_name)
+		output_usd_name = f"{args.output_usd_prefix}{safe_tool_name}.usd"
+		output_usd_path = out_root / output_usd_name
+
+		print("\n[RUN]", tool_name)
+		print(f"  source usd -> {src_usd}")
+		print(f"  output usd -> {output_usd_path}")
+
+		if args.dry_run:
+			continue
+
+		try:
+			shutil.copy2(out_root / args.src_usd, output_usd_path)
+			_generate_one(output_usd_path, tool_usd, tool_name, out_root)
+			success += 1
+		except Exception as e:  # noqa: BLE001
+			failures.append((tool_name, str(e)))
+			print(f"[ERROR] {tool_name}: {e}")
+			if args.fail_fast:
+				break
+
+	print("\n[SUMMARY]")
+	print(f"  success: {success}")
+	print(f"  failed : {len(failures)}")
+	for name, reason in failures:
+		print(f"    - {name}: {reason}")
+
+	if len(failures) > 0:
+		raise SystemExit(1)
+
 
 if __name__ == "__main__":
-	main()
-	simulation_app.close()
+	try:
+		main()
+	finally:
+		simulation_app.close()
