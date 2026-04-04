@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Automated RobotSmith pipeline using Claude API.
-Generates prompt, calls Claude API, and creates tool.
+Automated RobotSmith pipeline using OpenAI API.
+Generates prompt, calls GPT API, and creates tool.
 """
 import os
 import json
@@ -11,7 +11,7 @@ import subprocess
 import traceback
 import httpx
 import numpy as np
-from anthropic import Anthropic
+from openai import OpenAI
 
 project_path = os.path.abspath(os.path.dirname(__file__))
 
@@ -54,7 +54,13 @@ def execute_design_with_variations(design_json, log_dir, num_variations=3):
                 scale_mult = random.uniform(min_mult, max_mult)
                 semantic_groups[group] = scale_mult
             multiplier = semantic_groups[group]
-            part['parameters'] = [p * multiplier for p in part['base_parameters']]
+            # For arc, don't scale the arc_angle (4th parameter) — it's angular, not dimensional
+            if part['geom'] == 'arc':
+                scaled = [p * multiplier for p in part['base_parameters'][:3]]
+                scaled.append(part['base_parameters'][3])  # keep arc_angle as-is
+                part['parameters'] = scaled
+            else:
+                part['parameters'] = [p * multiplier for p in part['base_parameters']]
 
         # Create primitives and cache bounding boxes
         objects = {}
@@ -62,7 +68,8 @@ def execute_design_with_variations(design_json, log_dir, num_variations=3):
         for idx, part in enumerate(parts):
             is_head = part.get('is_head', False)
             is_base = (idx == 0)
-            obj = primitive(part['geom'], part['parameters'], is_head=is_head, is_base=is_base)
+            initial_rotation = part.get('arc_plane', None)
+            obj = primitive(part['geom'], part['parameters'], is_head=is_head, is_base=is_base, arc_plane=initial_rotation)
             objects[idx] = obj
             from api_tool_design import get_axis_align_bounding_box
             cached_bboxes[idx] = get_axis_align_bounding_box(obj)
@@ -115,7 +122,8 @@ def execute_design_with_variations(design_json, log_dir, num_variations=3):
         for idx, part in enumerate(parts):
             is_head = part.get('is_head', False)
             is_base = (idx == 0)
-            obj = primitive(part['geom'], part['parameters'], is_head=is_head, is_base=is_base)
+            initial_rotation = part.get('arc_plane', None)
+            obj = primitive(part['geom'], part['parameters'], is_head=is_head, is_base=is_base, arc_plane=initial_rotation)
             objects[idx] = obj
             from api_tool_design import get_axis_align_bounding_box
             cached_bboxes[idx] = get_axis_align_bounding_box(obj)
@@ -236,24 +244,26 @@ def main():
             response = f.read()
         prompt = None
     else:
-        print("CALLING CLAUDE API...")
+        print("CALLING GPT API...")
         print("="*80)
         print(f"Prompt saved to: {prompt_file}")
 
-        api_key = os.getenv("ANTHROPIC_API_KEY")
-        client = Anthropic(
+        api_key = os.getenv("OPENAI_API_KEY")
+        client = OpenAI(
             api_key=api_key,
-            base_url="http://43.106.115.130:3000",
+            base_url="http://43.106.115.130:8080/v1",
             http_client=httpx.Client(trust_env=False)
         )
-        response_j = client.messages.create(
-            model="claude-opus-4-6",
-            max_tokens=4096,
-            messages=[
+        response_j = client.responses.create(
+            model="gpt-5.4",
+            input=[
                 {"role": "user", "content": prompt}
             ]
         )
-        response = response_j.content[0].text
+        if isinstance(response_j, str):
+            response = response_j
+        else:
+            response = response_j.output_text
 
     # Save response
     response_file = os.path.join(log_dir, 'claude_response.txt')

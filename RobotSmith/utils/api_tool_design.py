@@ -29,20 +29,343 @@ class VoxelObject:
         mesh.export(filename)
         print(f"  [export] Saved to {filename}")
 
-def primitive(primitive_name, primitive_scale, is_head=False, is_base=False):
+def _create_bowl_mesh(width, depth, thickness, n_sectors=32, n_rings=16):
+    """
+    Create a watertight bowl mesh via surface of revolution.
+
+    The bowl opening faces +Z (upward), convex bottom at -Z.
+    Centered at the origin (bounding box midpoint = (0,0,0)).
+
+    Args:
+        width (float): Diameter of the bowl opening.
+        depth (float): Depth of the bowl cavity (inside).
+        thickness (float): Wall thickness.
+        n_sectors (int): Number of angular divisions around the Z axis.
+        n_rings (int): Number of latitudinal rings from pole to rim.
+
+    Returns:
+        trimesh.Trimesh: A watertight bowl mesh.
+    """
+    half_width = width / 2.0
+
+    # Derive sphere radius and cap angle from width and depth
+    # R*(1 - cos(cap_angle)) = depth, R*sin(cap_angle) = half_width
+    # => R = (half_width^2 + depth^2) / (2 * depth)
+    R_outer = (half_width ** 2 + depth ** 2) / (2.0 * depth)
+    cap_angle = np.arcsin(np.clip(half_width / R_outer, -1.0, 1.0))
+    R_inner = R_outer - thickness
+
+    if R_inner <= 0:
+        raise ValueError(
+            f"Bowl thickness ({thickness}) is too large for the given curvature "
+            f"(R={R_outer:.2f}). Reduce thickness or increase width/depth."
+        )
+
+    # Strategy: Build a solid of revolution from a 2D cross-section profile.
+    # The profile is a closed loop in the (r, z) plane:
+    #   bottom_point -> outer surface (up to rim) -> across rim -> inner surface (down to bottom) -> close
+    #
+    # We revolve this closed profile around the Z axis.
+    # The bottom point is on the axis (r=0), so it becomes a single shared vertex.
+
+    # Build the 2D profile points (r, z) going around the cross-section
+    # alpha goes from 0 (pole) to cap_angle (rim)
+    alphas = np.linspace(0, cap_angle, n_rings + 1)  # includes 0 and cap_angle
+
+    profile = []
+    # Outer surface: from pole upward to rim
+    for alpha in alphas:
+        r = R_outer * np.sin(alpha)
+        z = -R_outer * np.cos(alpha)
+        profile.append((r, z))
+    # Inner surface: from rim back down to pole
+    for alpha in reversed(alphas):
+        r = R_inner * np.sin(alpha)
+        z = -R_inner * np.cos(alpha)
+        profile.append((r, z))
+
+    # Remove duplicate at junction (inner pole = near outer pole, both at r≈0)
+    # The profile has 2*(n_rings+1) points. The first and last points are both on the axis.
+    # We'll use a single vertex for the bottom.
+    n_profile = len(profile)
+
+    # --- Build vertices and faces via revolution ---
+    vertices = []
+    faces = []
+
+    # For each profile point, if r > 0, create n_sectors vertices around Z axis.
+    # If r == 0 (on axis), create a single vertex.
+    # Track vertex indices for each profile point.
+    profile_vertex_indices = []  # For each profile point, list of vertex indices (or single index)
+
+    for pi, (r, z) in enumerate(profile):
+        if r < 1e-10:
+            # On-axis point: single vertex
+            idx = len(vertices)
+            vertices.append([0.0, 0.0, z])
+            profile_vertex_indices.append([idx] * n_sectors)  # repeat index for easy face lookup
+        else:
+            # Off-axis point: ring of n_sectors vertices
+            indices = []
+            for j in range(n_sectors):
+                phi = 2.0 * np.pi * j / n_sectors
+                idx = len(vertices)
+                vertices.append([r * np.cos(phi), r * np.sin(phi), z])
+                indices.append(idx)
+            profile_vertex_indices.append(indices)
+
+    # Create faces: quad strip between consecutive profile points, revolved
+    for pi in range(n_profile - 1):
+        idx_curr = profile_vertex_indices[pi]
+        idx_next = profile_vertex_indices[pi + 1]
+
+        for j in range(n_sectors):
+            j_next = (j + 1) % n_sectors
+
+            v0 = idx_curr[j]
+            v1 = idx_curr[j_next]
+            v2 = idx_next[j_next]
+            v3 = idx_next[j]
+
+            if v0 == v1:
+                # Current profile point is on-axis (single vertex) -> triangle
+                if v2 != v3:
+                    faces.append([v0, v3, v2])
+            elif v2 == v3:
+                # Next profile point is on-axis (single vertex) -> triangle
+                faces.append([v0, v2, v1])
+            else:
+                # Both off-axis -> quad (two triangles)
+                faces.append([v0, v3, v2])
+                faces.append([v0, v2, v1])
+
+    # Close the profile loop: connect last profile point back to first
+    idx_last = profile_vertex_indices[-1]
+    idx_first = profile_vertex_indices[0]
+    for j in range(n_sectors):
+        j_next = (j + 1) % n_sectors
+
+        v0 = idx_last[j]
+        v1 = idx_last[j_next]
+        v2 = idx_first[j_next]
+        v3 = idx_first[j]
+
+        if v0 == v1:
+            if v2 != v3:
+                faces.append([v0, v3, v2])
+        elif v2 == v3:
+            faces.append([v0, v2, v1])
+        else:
+            faces.append([v0, v3, v2])
+            faces.append([v0, v2, v1])
+
+    vertices = np.array(vertices, dtype=np.float64)
+    faces = np.array(faces, dtype=np.int64)
+
+    # Center the mesh at origin
+    bbox_min = vertices.min(axis=0)
+    bbox_max = vertices.max(axis=0)
+    center = (bbox_min + bbox_max) / 2.0
+    vertices -= center
+
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+    # Fix normals to be consistent
+    trimesh.repair.fix_normals(mesh)
+
+    print(f"  [_create_bowl_mesh] Created bowl: width={width}, depth={depth}, "
+          f"thickness={thickness}, R={R_outer:.2f}, cap_angle={np.degrees(cap_angle):.1f}deg, "
+          f"watertight={mesh.is_watertight}")
+
+    return mesh
+
+
+def _create_arc_mesh(curvature_radius, cross_width, cross_height, arc_angle_deg, n_segments=32):
+    """
+    Create a watertight arc mesh by sweeping a rectangular cross-section along a circular arc.
+
+    The arc lies in the XZ plane. One end (alpha=0) starts at the TOP (+Z direction).
+    The arc curves from +Z into +X and then toward -Z:
+        At   0deg: center is at (0, 0, +R)  -- top (attachment end)
+        At  90deg: center is at (+R, 0, 0)  -- horizontal right
+        At 180deg: center is at (0, 0, -R)  -- bottom
+    Centered at the origin (bounding box midpoint = (0,0,0)) after construction.
+
+    Args:
+        curvature_radius (float): Radius of the arc centerline.
+        cross_width (float): Width of the rectangular cross-section (radial direction).
+        cross_height (float): Height of the cross-section (Y direction, perpendicular to arc plane).
+        arc_angle_deg (float): Sweep angle in degrees (e.g., 180 for a U-hook, 90 for an L-hook).
+        n_segments (int): Number of segments along the arc.
+
+    Returns:
+        trimesh.Trimesh: A watertight arc mesh.
+    """
+    R = curvature_radius
+    hw = cross_width / 2.0   # half-width (radial)
+    hh = cross_height / 2.0  # half-height (Y)
+    arc_angle = np.radians(arc_angle_deg)
+
+    if R <= hw:
+        raise ValueError(
+            f"Arc curvature_radius ({R}) must be > cross_section_width/2 ({hw}). "
+            f"Otherwise the inner surface collapses."
+        )
+
+    # Arc starts at +Z and curves into +X.
+    # At angle alpha, the arc center is at:
+    #   x = R * sin(alpha),  z = R * cos(alpha)
+    # Cross-section corners at each angle:
+    #   Corner 0 (outer, +Y): ((R + hw)*sin(a), +hh, (R + hw)*cos(a))
+    #   Corner 1 (outer, -Y): ((R + hw)*sin(a), -hh, (R + hw)*cos(a))
+    #   Corner 2 (inner, -Y): ((R - hw)*sin(a), -hh, (R - hw)*cos(a))
+    #   Corner 3 (inner, +Y): ((R - hw)*sin(a), +hh, (R - hw)*cos(a))
+
+    angles = np.linspace(0, arc_angle, n_segments + 1)
+
+    vertices = []
+    # For each angle, add 4 corner vertices
+    for alpha in angles:
+        ca, sa = np.cos(alpha), np.sin(alpha)
+        r_outer = R + hw
+        r_inner = R - hw
+        vertices.append([r_outer * sa, +hh, r_outer * ca])  # corner 0
+        vertices.append([r_outer * sa, -hh, r_outer * ca])  # corner 1
+        vertices.append([r_inner * sa, -hh, r_inner * ca])  # corner 2
+        vertices.append([r_inner * sa, +hh, r_inner * ca])  # corner 3
+
+    faces = []
+    n_cross = 4  # corners per cross-section
+
+    # Swept faces: connect consecutive cross-sections
+    # 4 faces of the rectangular tube: outer(0-1), bottom(1-2), inner(2-3), top(3-0)
+    face_pairs = [(0, 1), (1, 2), (2, 3), (3, 0)]
+
+    for seg in range(n_segments):
+        base_curr = seg * n_cross
+        base_next = (seg + 1) * n_cross
+        for c_a, c_b in face_pairs:
+            v0 = base_curr + c_a
+            v1 = base_curr + c_b
+            v2 = base_next + c_b
+            v3 = base_next + c_a
+            # Two triangles per quad
+            faces.append([v0, v1, v2])
+            faces.append([v0, v2, v3])
+
+    # End cap at start (alpha=0): rectangle with corners 0,1,2,3
+    base_start = 0
+    faces.append([base_start + 0, base_start + 2, base_start + 1])
+    faces.append([base_start + 0, base_start + 3, base_start + 2])
+
+    # End cap at end (alpha=arc_angle): rectangle with corners 0,1,2,3
+    base_end = n_segments * n_cross
+    faces.append([base_end + 0, base_end + 1, base_end + 2])
+    faces.append([base_end + 0, base_end + 2, base_end + 3])
+
+    vertices = np.array(vertices, dtype=np.float64)
+    faces = np.array(faces, dtype=np.int64)
+
+    # Center the mesh at origin
+    bbox_min = vertices.min(axis=0)
+    bbox_max = vertices.max(axis=0)
+    center = (bbox_min + bbox_max) / 2.0
+    vertices -= center
+
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+    trimesh.repair.fix_normals(mesh)
+
+    print(f"  [_create_arc_mesh] Created arc: R={R}, cross={cross_width}x{cross_height}, "
+          f"angle={arc_angle_deg}deg, watertight={mesh.is_watertight}")
+
+    return mesh
+
+
+_AXIS_VECTORS = {
+    '+X': np.array([1.0, 0.0, 0.0]),
+    '-X': np.array([-1.0, 0.0, 0.0]),
+    '+Y': np.array([0.0, 1.0, 0.0]),
+    '-Y': np.array([0.0, -1.0, 0.0]),
+    '+Z': np.array([0.0, 0.0, 1.0]),
+    '-Z': np.array([0.0, 0.0, -1.0]),
+}
+
+
+def _arc_plane_to_rotation_matrix(arc_plane):
+    """
+    Convert an arc_plane string to a 3x3 rotation matrix that pre-orients the arc.
+
+    arc_plane is a string of exactly two signed-axis tokens, e.g. "+Z+X", "-Y+Z", "+X-Z".
+      - Token 1: the direction the arc BODY TRAVELS at its start (alpha=0). Default: +X.
+      - Token 2: the direction the arc body travels after 90 degrees of sweep. Default: -Z.
+
+    The rotation matrix R satisfies:
+        R @ [1,0,0] = T1  (maps default start tangent +X to T1)
+        R @ [0,0,-1] = T2 (maps default 90-deg tangent -Z to T2)
+        R @ [0,1,0]  = T1 x T2  (maps plane normal)
+
+    Formula:  R = column_stack([T1, cross(T1, T2), -T2])
+
+    Identity (no rotation): arc_plane="+X-Z"  (arc travels +X at start, -Z at 90deg)
+    "+Z+X": arc starts going upward (+Z), curves toward +X after 90 deg.
+    "+Z-X": arc starts going upward (+Z), curves toward -X after 90 deg.
+
+    Args:
+        arc_plane (str): Two signed-axis tokens. Token 1 = start travel direction,
+            Token 2 = travel direction after 90 degrees. Must be orthogonal.
+
+    Returns:
+        np.ndarray: 3x3 rotation matrix.
+    """
+    arc_plane = arc_plane.strip()
+    import re
+    tokens = re.findall(r'[+\-][XYZxyz]', arc_plane)
+    if len(tokens) != 2:
+        raise ValueError(
+            f"arc_plane '{arc_plane}' must contain exactly two signed-axis tokens "
+            f"(e.g. '+X-Z', '+Z+X'). Got: {tokens}"
+        )
+    tok1 = tokens[0].upper()  # start tangent
+    tok2 = tokens[1].upper()  # 90-deg tangent
+    if tok1 not in _AXIS_VECTORS or tok2 not in _AXIS_VECTORS:
+        raise ValueError(f"Unknown axis token(s): '{tok1}', '{tok2}'. Use +X/-X/+Y/-Y/+Z/-Z.")
+
+    T1 = _AXIS_VECTORS[tok1].copy()
+    T2 = _AXIS_VECTORS[tok2].copy()
+
+    if abs(np.dot(T1, T2)) > 1e-6:
+        raise ValueError(
+            f"arc_plane axes '{tok1}' and '{tok2}' must be orthogonal."
+        )
+
+    # R maps default frame (+X start tangent, -Z 90-deg tangent) to target frame.
+    # col0 = T1  (maps e_x = default start tangent)
+    # col1 = T1 x T2  (maps e_y = default plane normal)
+    # col2 = -T2  (maps e_z, since default 90-deg tangent is -e_z)
+    normal = np.cross(T1, T2)
+    rot_matrix = np.column_stack([T1, normal, -T2])
+    return rot_matrix
+
+def primitive(primitive_name, primitive_scale, is_head=False, is_base=False, arc_plane=None):
     """
     Create a 3D primitive mesh, centered at the origin with NO rotation.
 
     Args:
-        primitive_name (str): One of {'cube', 'ball', 'cylinder', 'cone', 'ring'}.
+        primitive_name (str): One of {'cube', 'ball', 'cylinder', 'cone', 'bowl', 'arc'}.
         primitive_scale (list of float):
             - If cube, [sx, sy, sz]
             - If ball, [radius]
             - If cylinder, [radius, height]
             - If cone, [radius, height]
-            - If ring, [major_radius, minor_radius]
+            - If bowl, [width, depth, thickness]
+            - If arc, [curvature_radius, cross_section_width, cross_section_height, arc_angle]
         is_head (bool): If True, this primitive is part of the head area.
         is_base (bool): If True, record the center as base center.
+        arc_plane (str or None): Optional axis-pair string for arcs only, e.g. "+Z+X".
+            Specifies the initial orientation of the arc BEFORE voxelization:
+              - Token 1: world direction the arc's start arm points (default '+Z')
+              - Token 2: world direction the arc sweeps toward first (default '+X')
+            The arc geometry is rotated in-place at the origin before being voxelized.
+            Ignored for non-arc primitives.
     Returns:
         VoxelObject: The resulting voxel object.
     """
@@ -69,35 +392,28 @@ def primitive(primitive_name, primitive_scale, is_head=False, is_base=False):
             raise ValueError("cone requires 2 scale parameters: [radius, height].")
         mesh = trimesh.creation.cone(radius=primitive_scale[0], height=primitive_scale[1], sections=32)
 
-    elif primitive_name == 'ring':
-        if len(primitive_scale) not in [2, 3]:
-            raise ValueError("ring requires 2 or 3 scale parameters: [major_radius, minor_radius] or [major_radius, minor_radius, arc_angle].")
-        arc_angle = primitive_scale[2] if len(primitive_scale) == 3 else 360.0
-        mesh = trimesh.creation.torus(major_radius=primitive_scale[0], minor_radius=primitive_scale[1], major_sections=32, minor_sections=16)
+    elif primitive_name == 'bowl':
+        if len(primitive_scale) != 3:
+            raise ValueError("bowl requires 3 scale parameters: [width, depth, thickness].")
+        bowl_width, bowl_depth, bowl_thickness = primitive_scale
+        mesh = _create_bowl_mesh(bowl_width, bowl_depth, bowl_thickness)
 
-        if arc_angle < 360.0:
-            # Create partial ring by removing faces outside the arc
-            # Keep vertices from angle 0 to arc_angle, remove arc_angle to 360
-            vertices = mesh.vertices
-            angles = np.arctan2(vertices[:, 1], vertices[:, 0]) * 180 / np.pi
-            angles = (angles + 360) % 360  # Normalize to [0, 360)
-
-            # Mark vertices to keep (within arc)
-            vertex_keep = angles <= arc_angle
-
-            # Keep faces where at least 2 vertices are within the arc
-            # This preserves boundary faces better than requiring all vertices
-            face_keep = np.array([vertex_keep[face].sum() >= 2 for face in mesh.faces])
-
-            if face_keep.any():
-                new_faces = mesh.faces[face_keep]
-                mesh = trimesh.Trimesh(vertices=mesh.vertices, faces=new_faces, process=True)
-            else:
-                print(f"  [primitive] Warning: No faces kept for {arc_angle}° ring")
+    elif primitive_name == 'arc':
+        if len(primitive_scale) != 4:
+            raise ValueError("arc requires 4 scale parameters: [curvature_radius, cross_section_width, cross_section_height, arc_angle].")
+        arc_R, arc_cw, arc_ch, arc_angle = primitive_scale
+        mesh = _create_arc_mesh(arc_R, arc_cw, arc_ch, arc_angle)
 
     else:
         raise ValueError(f"Unsupported primitive name: {primitive_name}. "
-                         "Choose from 'cube', 'ball', 'cylinder', 'cone', or 'ring'.")
+                         "Choose from 'cube', 'ball', 'cylinder', 'cone', 'bowl', or 'arc'.")
+
+    # Apply arc_plane pre-rotation to the mesh geometry (centered at origin) before voxelization.
+    # This rotates the entire arc in-place so the bounding box already reflects the new orientation.
+    if arc_plane is not None and primitive_name == 'arc':
+        rot_matrix = _arc_plane_to_rotation_matrix(arc_plane)
+        mesh.vertices = (rot_matrix @ mesh.vertices.T).T
+        print(f"  [primitive] Applied arc_plane='{arc_plane}' pre-rotation to arc")
 
     # Record base center if this is the base primitive
     if is_base:
