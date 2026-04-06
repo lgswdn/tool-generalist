@@ -65,7 +65,7 @@ python "$DGN_DIR/asset_process/decompose_list.py" \
     --src "$EEF_DIR/normalized_models" \
     --dst "$EEF_DIR/meshdata" \
     --coacd_path "$DGN_DIR/thirdparty/CoACD/build/main" \
-    --t 0.02 --k 0.3
+    --t 0.05 --k 0.3
 
 python "$DGN_DIR/asset_process/poolrun.py" -p 32
 

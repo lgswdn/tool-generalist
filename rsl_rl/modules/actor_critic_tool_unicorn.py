@@ -1,0 +1,537 @@
+#!/usr/bin/env python3
+"""
+ActorCriticToolUnicorn — Multi-cloud Unicorn policy for tool-generalist.
+
+Encodes three point clouds through a shared Unicorn (MLPEncoder) backbone:
+  1. Object cloud  (512 × 3)
+  2. Tool cloud    (512 × 3)
+  3. Merged cloud  (object + tool concatenated, downsampled to 512 × 3)
+
+Each cloud gets a learnable type token added after encoding.
+SD-Cross fusion with differentiated attention:
+  - A subset of query tokens attend only to object tokens
+  - Remaining query tokens attend to all tokens (object + tool + merged)
+
+Observation layout (flattened):
+  [object_cloud_flat, tool_cloud_flat, rest]
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Any, Dict, Optional, Tuple
+
+import torch
+import torch.nn as nn
+from torch.distributions import Normal
+
+from rsl_rl.modules.models.cloud.unicorn import MLPEncoder
+from rsl_rl.modules.models.rl.net.sd_cross import StateDependentCrossFeatNet
+from rsl_rl.modules.train.hf_hub import download_ckpt
+from rsl_rl.utils import resolve_nn_activation
+
+
+class ActorCriticToolUnicorn(nn.Module):
+    """
+    Actor-Critic with shared Unicorn encoder for object, tool, and merged clouds.
+    """
+
+    is_recurrent = False
+
+    def __init__(
+        self,
+        num_actor_obs: int,
+        num_critic_obs: int,
+        num_actions: int,
+        # Point cloud layout
+        pc_point_dim: int = 3,
+        object_pc_num_points: int = 512,
+        tool_pc_num_points: int = 512,
+        merged_pc_num_points: int = 512,
+        # Unicorn encoder settings
+        unicorn_cfg: Optional[Dict[str, Any]] = None,
+        unicorn_ckpt: Optional[str] = None,
+        freeze_unicorn: bool = False,
+        encoder_strict_load: bool = True,
+        # Fusion / MLP heads
+        fusion_hidden_dims=None,
+        fusion_use_norm: bool = True,
+        fusion_norm_type: Optional[str] = "layer",
+        actor_hidden_dims=(256, 256, 256),
+        critic_hidden_dims=(256, 256, 256),
+        actor_use_norm: bool = True,
+        actor_norm_type: Optional[str] = "layer",
+        actor_output_activation: bool = False,
+        critic_use_norm: bool = False,
+        critic_norm_type: Optional[str] = None,
+        # SD-Cross settings
+        use_sd_cross: bool = True,
+        sd_num_query: int = 16,
+        sd_num_query_object: int = 4,
+        sd_emb_dim: int = 128,
+        sd_cat_query: bool = False,
+        sd_cat_ctx: bool = True,
+        sd_query_keys=None,
+        # Activation / noise
+        activation: str = "elu",
+        init_noise_std: float = 1.0,
+        noise_std_type: str = "scalar",
+        **kwargs,
+    ):
+        if kwargs:
+            print(
+                "ActorCriticToolUnicorn.__init__ got unexpected arguments, ignoring: "
+                + str([key for key in kwargs.keys()])
+            )
+        super().__init__()
+
+        # ---- Store configuration ---- #
+        self.pc_point_dim = pc_point_dim
+        self.object_pc_num_points = object_pc_num_points
+        self.tool_pc_num_points = tool_pc_num_points
+        self.merged_pc_num_points = merged_pc_num_points
+
+        self.object_pc_dim = object_pc_num_points * pc_point_dim
+        self.tool_pc_dim = tool_pc_num_points * pc_point_dim
+        total_pc_dim = self.object_pc_dim + self.tool_pc_dim
+
+        self.nonpc_obs_dim = num_actor_obs - total_pc_dim
+        if self.nonpc_obs_dim < 0:
+            raise ValueError(
+                f"num_actor_obs ({num_actor_obs}) is too small for "
+                f"object ({self.object_pc_dim}) + tool ({self.tool_pc_dim}) point clouds. "
+                f"Need at least {total_pc_dim}."
+            )
+        self.ctx_dim = self.nonpc_obs_dim
+
+        print(f"[ActorCriticToolUnicorn] Observation layout:")
+        print(f"  - Object cloud: {self.object_pc_dim} ({object_pc_num_points} pts × {pc_point_dim}D)")
+        print(f"  - Tool cloud: {self.tool_pc_dim} ({tool_pc_num_points} pts × {pc_point_dim}D)")
+        print(f"  - Merged cloud (internal): {merged_pc_num_points} pts × {pc_point_dim}D")
+        print(f"  - Context (rest): {self.nonpc_obs_dim}D")
+        print(f"  - Total obs: {num_actor_obs}")
+
+        # ---- Build Unicorn encoder ---- #
+        cfg = MLPEncoder.Config(**(unicorn_cfg or {}))
+        self.unicorn_encoder = MLPEncoder(cfg)
+        self.unicorn_feature_dim = cfg.model_dim
+        self.unicorn_frozen = freeze_unicorn
+
+        # Initialize embedding token (will be loaded from checkpoint if available)
+        self.embedding_token = nn.Parameter(
+            torch.randn(1, 1, self.unicorn_feature_dim) * 0.02,
+            requires_grad=True,
+        )
+        self.embedding_token_proj = None
+
+        if unicorn_ckpt is not None:
+            self._load_unicorn_weights(unicorn_ckpt, strict=encoder_strict_load)
+
+        if freeze_unicorn:
+            for param in self.unicorn_encoder.parameters():
+                param.requires_grad = False
+            self.unicorn_encoder.eval()
+
+        # ---- Token counts ---- #
+        # Each cloud: num_points / patch_size patches + 1 embedding token
+        self.object_num_tokens = max(1, object_pc_num_points // cfg.patch_size) + 1
+        self.tool_num_tokens = max(1, tool_pc_num_points // cfg.patch_size) + 1
+        self.merged_num_tokens = max(1, merged_pc_num_points // cfg.patch_size) + 1
+        self.total_num_tokens = self.object_num_tokens + self.tool_num_tokens + self.merged_num_tokens
+
+        print(f"  - Tokens per cloud: object={self.object_num_tokens}, tool={self.tool_num_tokens}, merged={self.merged_num_tokens}")
+        print(f"  - Total tokens: {self.total_num_tokens}")
+
+        # ---- Learnable type tokens ---- #
+        self.object_type_token = nn.Parameter(torch.zeros(1, 1, self.unicorn_feature_dim))
+        self.tool_type_token = nn.Parameter(torch.zeros(1, 1, self.unicorn_feature_dim))
+        self.merged_type_token = nn.Parameter(torch.zeros(1, 1, self.unicorn_feature_dim))
+        nn.init.normal_(self.object_type_token, std=0.02)
+        nn.init.normal_(self.tool_type_token, std=0.02)
+        nn.init.normal_(self.merged_type_token, std=0.02)
+
+        # ---- Fusion ---- #
+        activation_fn = resolve_nn_activation(activation)
+        self.use_sd_cross = use_sd_cross
+        if fusion_hidden_dims is None:
+            fusion_hidden_dims = [512, 256, 128]
+
+        if self.use_sd_cross:
+            if sd_query_keys is None:
+                sd_query_keys = ("rest",)
+
+            num_query_object = sd_num_query_object
+            num_query_all = sd_num_query - num_query_object
+
+            print(f"  - SD-Cross: {num_query_object} object-only queries, {num_query_all} all-tokens queries")
+
+            # Object-only attention
+            if num_query_object > 0:
+                sd_cfg_object = StateDependentCrossFeatNet.Config(
+                    dim_in=(self.object_num_tokens, self.unicorn_feature_dim),
+                    dim_out=sd_emb_dim,
+                    query_keys=tuple(sd_query_keys),
+                    num_query=num_query_object,
+                    ctx_dim=self.ctx_dim,
+                    emb_dim=sd_emb_dim,
+                    cat_query=sd_cat_query,
+                    cat_ctx=False,
+                )
+                self.state_cross_encoder_object = StateDependentCrossFeatNet(sd_cfg_object)
+            else:
+                self.state_cross_encoder_object = None
+
+            # All-tokens attention
+            if num_query_all > 0:
+                sd_cfg_all = StateDependentCrossFeatNet.Config(
+                    dim_in=(self.total_num_tokens, self.unicorn_feature_dim),
+                    dim_out=sd_emb_dim,
+                    query_keys=tuple(sd_query_keys),
+                    num_query=num_query_all,
+                    ctx_dim=self.ctx_dim,
+                    emb_dim=sd_emb_dim,
+                    cat_query=sd_cat_query,
+                    cat_ctx=False,
+                )
+                self.state_cross_encoder_all = StateDependentCrossFeatNet(sd_cfg_all)
+            else:
+                self.state_cross_encoder_all = None
+
+            sd_out_dim = sd_num_query * sd_emb_dim
+            if sd_cat_query:
+                sd_out_dim += sd_num_query * sd_emb_dim
+            if sd_cat_ctx:
+                sd_out_dim += self.ctx_dim
+
+            fusion_input_dim = sd_out_dim
+            self.num_query_object = num_query_object
+            self.num_query_all = num_query_all
+            self.sd_cat_ctx = sd_cat_ctx
+        else:
+            fusion_input_dim = self.ctx_dim + self.total_num_tokens * self.unicorn_feature_dim
+
+        self.feature_fusion = self._build_mlp(
+            input_dim=fusion_input_dim,
+            hidden_dims=fusion_hidden_dims,
+            activation=activation_fn,
+            use_norm=fusion_use_norm,
+            norm_type=fusion_norm_type,
+        )
+
+        # ---- Actor / Critic heads ---- #
+        actor_in = fusion_hidden_dims[-1]
+        critic_in = fusion_hidden_dims[-1]
+
+        self.actor = self._build_actor_or_critic(
+            input_dim=actor_in,
+            hidden_dims=actor_hidden_dims,
+            output_dim=num_actions,
+            activation=activation_fn,
+            use_norm=actor_use_norm,
+            norm_type=actor_norm_type,
+            is_actor=True,
+            output_activation=actor_output_activation,
+        )
+        self.critic = self._build_actor_or_critic(
+            input_dim=critic_in,
+            hidden_dims=critic_hidden_dims,
+            output_dim=1,
+            activation=activation_fn,
+            use_norm=critic_use_norm,
+            norm_type=critic_norm_type,
+            is_actor=False,
+            output_activation=False,
+        )
+
+        # ---- Action noise ---- #
+        self.noise_std_type = noise_std_type
+        if self.noise_std_type == "scalar":
+            self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
+        elif self.noise_std_type == "log":
+            self.log_std = nn.Parameter(torch.log(init_noise_std * torch.ones(num_actions)))
+        else:
+            raise ValueError("noise_std_type must be 'scalar' or 'log'")
+
+        self.distribution = None
+        Normal.set_default_validate_args(False)
+
+        print(f"[ActorCriticToolUnicorn] Architecture summary:")
+        print(f"  - Unicorn encoder: {cfg.num_layer}-layer, dim={cfg.model_dim}, patch_size={cfg.patch_size}")
+        print(f"  - Encoder frozen: {freeze_unicorn}")
+        print(f"  - Fusion MLP: {fusion_input_dim} → {fusion_hidden_dims}")
+        print(f"  - Actor MLP: {actor_in} → {actor_hidden_dims} → {num_actions}")
+        print(f"  - Critic MLP: {critic_in} → {critic_hidden_dims} → 1")
+
+    # ------------------------------------------------------------------ #
+    # Helper builders
+    # ------------------------------------------------------------------ #
+    def _build_mlp(self, input_dim, hidden_dims, activation, use_norm, norm_type):
+        layers = []
+        prev_dim = input_dim
+        for hidden_dim in hidden_dims:
+            layers.append(nn.Linear(prev_dim, hidden_dim))
+            if use_norm and norm_type is not None:
+                if norm_type == "layer":
+                    layers.append(nn.LayerNorm(hidden_dim))
+                elif norm_type == "batch":
+                    layers.append(nn.BatchNorm1d(hidden_dim))
+                else:
+                    raise ValueError(f"Unknown normalization type: {norm_type}")
+            layers.append(activation)
+            prev_dim = hidden_dim
+        return nn.Sequential(*layers)
+
+    def _build_actor_or_critic(
+        self, input_dim, hidden_dims, output_dim, activation,
+        use_norm, norm_type, is_actor, output_activation,
+    ):
+        layers = []
+        prev_dim = input_dim
+        for hidden_dim in hidden_dims:
+            layers.append(nn.Linear(prev_dim, hidden_dim))
+            if use_norm and norm_type is not None:
+                if norm_type == "layer":
+                    layers.append(nn.LayerNorm(hidden_dim))
+                elif norm_type == "batch":
+                    layers.append(nn.BatchNorm1d(hidden_dim))
+                else:
+                    raise ValueError(f"Unknown normalization type: {norm_type}")
+            layers.append(activation)
+            prev_dim = hidden_dim
+
+        layers.append(nn.Linear(prev_dim, output_dim))
+        if is_actor and output_activation:
+            layers.append(nn.Tanh())
+        return nn.Sequential(*layers)
+
+    # ------------------------------------------------------------------ #
+    # Encoder weight loading
+    # ------------------------------------------------------------------ #
+    def _load_unicorn_weights(self, path: str, strict: bool = True):
+        ckpt_path = path
+        if not os.path.exists(ckpt_path) and ":" in ckpt_path:
+            repo_id, name = ckpt_path.split(":", maxsplit=1)
+            ckpt_path = download_ckpt(repo_id, name)
+        if not os.path.exists(ckpt_path):
+            raise FileNotFoundError(f"Unicorn checkpoint not found: {path}")
+
+        raw_state = torch.load(ckpt_path, map_location="cpu")
+        if isinstance(raw_state, dict):
+            if "model" in raw_state:
+                raw_state = raw_state["model"]
+            elif "encoder" in raw_state:
+                raw_state = raw_state["encoder"]
+
+        target_state = self.unicorn_encoder.state_dict()
+        remapped_state = {}
+        removed_keys = []
+        query_token_value = None
+
+        for key, value in raw_state.items():
+            new_key = key
+            if new_key.startswith("query_encoder."):
+                new_key = new_key[len("query_encoder."):]
+
+            if new_key == "query_token" or key == "query_token":
+                query_token_value = value
+                continue
+
+            if new_key in target_state:
+                remapped_state[new_key] = value
+            else:
+                removed_keys.append(key)
+
+        missing, unexpected = self.unicorn_encoder.load_state_dict(remapped_state, strict=False)
+
+        if strict and (missing or unexpected):
+            raise RuntimeError(
+                f"Unable to strictly load Unicorn weights. Missing: {missing}, unexpected: {unexpected}"
+            )
+
+        if missing:
+            print(f"[ActorCriticToolUnicorn] Missing keys: {missing}")
+        if unexpected:
+            print(f"[ActorCriticToolUnicorn] Unexpected keys: {unexpected}")
+        if removed_keys:
+            print(f"[ActorCriticToolUnicorn] Ignored {len(removed_keys)} keys.")
+
+        if query_token_value is not None:
+            query_token_value = query_token_value.unsqueeze(0).unsqueeze(0)
+            embedding_dim = query_token_value.shape[2]
+            if embedding_dim != self.unicorn_feature_dim:
+                self.embedding_token_proj = nn.Linear(embedding_dim, self.unicorn_feature_dim)
+            else:
+                self.embedding_token_proj = None
+            self.embedding_token = nn.Parameter(query_token_value, requires_grad=True)
+
+    # ------------------------------------------------------------------ #
+    # Observation splitting
+    # ------------------------------------------------------------------ #
+    def _split_obs(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Split flat observation into object cloud, tool cloud, and rest."""
+        start = 0
+
+        # Object cloud
+        end = start + self.object_pc_dim
+        object_cloud = obs[:, start:end].view(-1, self.object_pc_num_points, self.pc_point_dim)
+
+        # Tool cloud
+        start = end
+        end = start + self.tool_pc_dim
+        tool_cloud = obs[:, start:end].view(-1, self.tool_pc_num_points, self.pc_point_dim)
+
+        # Rest
+        rest = obs[:, end:]
+
+        return object_cloud, tool_cloud, rest
+
+    # ------------------------------------------------------------------ #
+    # Point cloud encoding
+    # ------------------------------------------------------------------ #
+    def _encode_point_cloud(self, point_cloud: torch.Tensor) -> torch.Tensor:
+        """Encode a single point cloud through the shared Unicorn encoder."""
+        ctx = torch.no_grad() if self.unicorn_frozen else torch.enable_grad()
+        with ctx:
+            batch = point_cloud.shape[0]
+            embedding_token = self.embedding_token.expand(batch, -1, -1)
+            if self.embedding_token_proj is not None:
+                embedding_token = self.embedding_token_proj(embedding_token)
+            tokens = self.unicorn_encoder(point_cloud, z_ctx=embedding_token)
+        return tokens
+
+    def _sample_points(self, points: torch.Tensor, target: int) -> torch.Tensor:
+        """Uniformly downsample points to target count."""
+        batch, num_points, dim = points.shape
+        if num_points == target:
+            return points
+        if num_points > target:
+            idx = torch.linspace(0, num_points - 1, target, device=points.device)
+            idx = idx.round().long()
+            return points.index_select(1, idx)
+        # Repeat if too few
+        repeats = (target + num_points - 1) // num_points
+        expanded = points.repeat(1, repeats, 1)
+        return expanded[:, :target, :]
+
+    def _create_merged_cloud(
+        self, object_cloud: torch.Tensor, tool_cloud: torch.Tensor
+    ) -> torch.Tensor:
+        """Concatenate object and tool clouds, downsample to merged_pc_num_points."""
+        merged = torch.cat([object_cloud, tool_cloud], dim=1)  # [B, N_obj + N_tool, 3]
+        return self._sample_points(merged, self.merged_pc_num_points)
+
+    def _encode_all_clouds(
+        self, object_cloud: torch.Tensor, tool_cloud: torch.Tensor
+    ) -> torch.Tensor:
+        """Encode all three clouds, add type tokens, concatenate tokens."""
+        merged_cloud = self._create_merged_cloud(object_cloud, tool_cloud)
+
+        tokens_list = []
+        for cloud, type_token in (
+            (object_cloud, self.object_type_token),
+            (tool_cloud, self.tool_type_token),
+            (merged_cloud, self.merged_type_token),
+        ):
+            cloud_tokens = self._encode_point_cloud(cloud) + type_token
+            tokens_list.append(cloud_tokens)
+
+        return torch.cat(tokens_list, dim=1)  # [B, total_num_tokens, feature_dim]
+
+    # ------------------------------------------------------------------ #
+    # Feature extraction
+    # ------------------------------------------------------------------ #
+    def _get_fused_features(self, observations: torch.Tensor) -> torch.Tensor:
+        object_cloud, tool_cloud, rest = self._split_obs(observations)
+        tokens = self._encode_all_clouds(object_cloud, tool_cloud)
+
+        if self.use_sd_cross:
+            sd_ctx = {"rest": rest}
+
+            # Object-only tokens
+            object_tokens = tokens[:, : self.object_num_tokens, :]
+
+            base_features_parts = []
+
+            # Object-focused queries
+            if self.num_query_object > 0 and self.state_cross_encoder_object is not None:
+                object_features = self.state_cross_encoder_object(object_tokens, ctx=sd_ctx)
+                base_features_parts.append(object_features)
+
+            # All-tokens queries
+            if self.num_query_all > 0 and self.state_cross_encoder_all is not None:
+                all_features = self.state_cross_encoder_all(tokens, ctx=sd_ctx)
+                base_features_parts.append(all_features)
+
+            base_features = (
+                torch.cat(base_features_parts, dim=-1)
+                if base_features_parts
+                else torch.empty(tokens.shape[0], 0, device=tokens.device)
+            )
+
+            if hasattr(self, "sd_cat_ctx") and self.sd_cat_ctx:
+                base_features = torch.cat([base_features, rest], dim=-1)
+
+            return self.feature_fusion(base_features)
+
+        # Fallback: no SD-Cross
+        tokens_flat = tokens.flatten(start_dim=1)
+        if rest.shape[-1] > 0:
+            raw_features = torch.cat([rest, tokens_flat], dim=-1)
+        else:
+            raw_features = tokens_flat
+        return self.feature_fusion(raw_features)
+
+    # ------------------------------------------------------------------ #
+    # RL interface
+    # ------------------------------------------------------------------ #
+    def update_distribution(self, observations: torch.Tensor):
+        fused = self._get_fused_features(observations)
+        mean = self.actor(fused)
+
+        if self.noise_std_type == "scalar":
+            std = self.std.expand_as(mean)
+        else:
+            std = torch.exp(self.log_std).expand_as(mean)
+
+        std = torch.clamp(std, min=1e-6)
+        self.distribution = Normal(mean, std)
+
+    def act(self, observations: torch.Tensor, **kwargs):
+        self.update_distribution(observations)
+        return self.distribution.sample()
+
+    def reset(self, dones=None):
+        pass
+
+    def act_inference(self, observations: torch.Tensor):
+        fused = self._get_fused_features(observations)
+        return self.actor(fused)
+
+    def get_actions_log_prob(self, actions: torch.Tensor):
+        return self.distribution.log_prob(actions).sum(dim=-1)
+
+    def evaluate(self, critic_observations: torch.Tensor, **kwargs):
+        fused = self._get_fused_features(critic_observations)
+        return self.critic(fused)
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.unicorn_frozen:
+            self.unicorn_encoder.eval()
+        return self
+
+    def load_state_dict(self, state_dict, strict: bool = True):
+        super().load_state_dict(state_dict, strict=strict)
+        return True
+
+    @property
+    def action_mean(self):
+        return self.distribution.mean
+
+    @property
+    def action_std(self):
+        return self.distribution.stddev
+
+    @property
+    def entropy(self):
+        return self.distribution.entropy().sum(dim=-1)

@@ -133,8 +133,8 @@ class TrainConfig(ConfigBase):
     chunk_size: int = 32
     # `None` or some reasonable value (16?)
     eval_batch_size: Optional[int] = None
-    loss: LossConfig = LossConfig()
-    alr: AdaptiveLearningRateConfig = AdaptiveLearningRateConfig()
+    loss: LossConfig = field(default_factory=LossConfig)
+    alr: AdaptiveLearningRateConfig = field(default_factory=AdaptiveLearningRateConfig)
     use_early_stopping: bool = True
     burn_in: int = 0
 

@@ -281,9 +281,9 @@ class ObservationsCfg:
     class PolicyCfg(ObsGroup):
         """Observations for policy group."""
         
-        # Object Cloud (3D: point cloud of the object in enviroment frame, it should be the first part of the observation)
-        object_cloud = ObsTerm(
-            func=mdp.get_object_pointcloud_in_env_frame,
+        # Object Cloud (512*7=3584D: point cloud with mass+velocity in env frame)
+        object_cloud_with_velocity_mass = ObsTerm(
+            func=mdp.get_object_pointcloud_with_mass_velocity,
             noise=GaussianNoiseCfg(mean=0.0, std=0.005, operation="add"),
         )
         
@@ -485,6 +485,7 @@ class NonPrehensileEnvCfg(ManagerBasedRLEnvCfg):
     # Visualization settings
     visualize_current_object_pose: bool = True  # Enable current object pose visualization
     visualize_object_pointcloud: bool = False  # Enable object point cloud visualization for debug in first env
+    visualize_object_velocity_mass: bool = False  # Enable 7D object velocity & mass visualization
 
     # Performance settings
     use_torch_compile: bool = True  # Enable torch.compile on hot paths
@@ -626,15 +627,5 @@ class NonPrehensileEnv(ManagerBasedRLEnv):
 
     def post_reset(self):
         self.sim.physx.bounce_threshold_velocity = 0.05
-        # self.sim.physx.friction_correlation_distance = 0.00625
-        # Cache object scales for all envs to avoid per-step USD queries
-        import IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.mdp as mdp
-        from isaaclab.managers import SceneEntityCfg
-        all_env_ids = list(range(self.num_envs))
-        scales = mdp.get_rigid_body_scale(self, SceneEntityCfg("object"), all_env_ids)
-        # Ensure tensor on correct device/dtype
-        if not isinstance(scales, torch.Tensor):
-            scales = torch.as_tensor(scales, device=self.device, dtype=torch.float16)
-        else:
-            scales = scales.to(device=self.device)
-        self._object_scales = scales
+        # NOTE: _object_scales removed — scales are now baked into
+        # per-env Cloud instances at init time (in get_object_pointcloud).

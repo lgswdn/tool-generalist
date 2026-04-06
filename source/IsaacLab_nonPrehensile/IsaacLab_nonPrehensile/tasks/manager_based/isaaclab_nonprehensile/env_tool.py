@@ -267,9 +267,6 @@ class NonPrehensileSceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    # NOTE: 'eef' RigidObjectCfg removed — tool is part of the robot articulation (welded to link7).
-    # All tool observations are computed directly from the tool body's pose + cached OBJ mesh.
-
     # Multi-tool robot: each env gets a different tool USD via MultiUsdFileCfg
     robot = build_multi_tool_robot_cfg(TOOL_USD_PATHS).replace(
         prim_path="{ENV_REGEX_NS}/Robot",
@@ -328,13 +325,13 @@ class ObservationsCfg:
     class PolicyCfg(ObsGroup):
         """Observations for policy group."""
         
-        # Object Cloud (512*3=1536D: point cloud of the object in environment frame)
+        # Object Cloud (512*3=1536D: point cloud xyz in env frame)
         object_cloud = ObsTerm(
             func=mdp.get_object_pointcloud_in_env_frame,
             noise=GaussianNoiseCfg(mean=0.0, std=0.005, operation="add"),
         )
 
-        # Tool Cloud (512*3=1536D: tool point cloud in environment frame)
+        # Tool Cloud (512*3=1536D: tool point cloud xyz in env frame)
         tool_cloud = ObsTerm(
             func=mdp.get_tool_pointcloud_in_env_frame,
             noise=GaussianNoiseCfg(mean=0.0, std=0.002, operation="add"),
@@ -475,7 +472,7 @@ class RewardsCfg:
     contact_reward = RewTerm(
         func=mdp.object_ee_distance_tanh,
         params={
-            "std": 0.1,
+            "std": 0.15,
         },
         weight=1.0,
     )
@@ -485,7 +482,7 @@ class RewardsCfg:
         params={
             "std": 0.5,
             "command_name": "target_object_pose",
-            "obj_ee_distance_threshold": 0.1,
+            "obj_ee_distance_threshold": 0.15,
             "ee_frame_cfg": SceneEntityCfg("ee_frame"),
             "object_cfg": SceneEntityCfg("object"),
         },
@@ -497,7 +494,7 @@ class RewardsCfg:
         params={
             "std": 0.2,
             "command_name": "target_object_pose",
-            "obj_ee_distance_threshold": 0.1,
+            "obj_ee_distance_threshold": 0.15,
             "ee_frame_cfg": SceneEntityCfg("ee_frame"),
             "object_cfg": SceneEntityCfg("object"),
         },
@@ -546,6 +543,8 @@ class NonPrehensileEnvCfg(ManagerBasedRLEnvCfg):
     visualize_object_pointcloud: bool = False  # Enable object point cloud visualization for debug in first env
     visualize_tool_pointcloud: bool = False  # Enable tool point cloud visualization (blue spheres) in first env
     visualize_eef_position: bool = False  # Enable eef tool position visualization
+    visualize_object_velocity_mass: bool = False  # Enable 7D object velocity & mass visualization
+    visualize_tool_velocity_mass: bool = False  # Enable 7D tool velocity & mass visualization
 
     # Performance settings
     use_torch_compile: bool = True  # Enable torch.compile on hot paths
@@ -690,23 +689,10 @@ class NonPrehensileEnv(ManagerBasedRLEnv):
                     self.extras["log"]["recent_success_rate"] = self.recent_success_rate
 
         return obs, reward, terminated, truncated, info
-    
 
     def post_reset(self):
-        # Cache object scales for all envs to avoid per-step USD queries
-        import IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.mdp as mdp
-        from isaaclab.managers import SceneEntityCfg
-        all_env_ids = list(range(self.num_envs))
-        scales = mdp.get_rigid_body_scale(self, SceneEntityCfg("object"), all_env_ids)
-        # Ensure tensor on correct device/dtype
-        if not isinstance(scales, torch.Tensor):
-            scales = torch.as_tensor(scales, device=self.device, dtype=torch.float16)
-        else:
-            scales = scales.to(device=self.device)
-        self._object_scales = scales
-
-        # NOTE: _tool_scales removed — tool scale is now a fixed constant (TOOL_SCALE=0.1)
-        # baked into the robot USD, no per-env eef prim query needed.
+        # NOTE: _object_scales and _tool_scales removed — scales are now baked into
+        # per-env Cloud instances at init time (in get_object_pointcloud).
 
         # Compute per-env head area offsets from the fixed fork OBJ + head_area_norm.
         # Each offset is in the tool's local frame (relative to link_coacd_convex_piece_0 origin).

@@ -8,7 +8,7 @@ from env.env.base import EnvIface
 from pathlib import Path
 from typing import (
     Dict, Optional, Tuple, Union, Iterable, Any, Mapping)
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from util.config import ConfigBase
 from collections import defaultdict
 from functools import partial
@@ -59,7 +59,7 @@ class PPO(nn.Module):
     @dataclass
     class Config(ConfigBase):
         # Training related
-        train: TrainConfig = TrainConfig()
+        train: TrainConfig = field(default_factory=TrainConfig)
         # Neural network device
         device: str = 'cuda:0'
         # Optionally bootstrap rewards on timeout.

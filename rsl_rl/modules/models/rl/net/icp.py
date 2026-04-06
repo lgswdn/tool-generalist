@@ -260,6 +260,39 @@ class ICPNet(nn.Module):
 
         return (p, c)
 
+    @th.no_grad()
+    def get_patch_indices(
+        self,
+        x: th.Tensor,
+        center: Optional[th.Tensor] = None,
+        sort: bool = True,
+    ) -> Tuple[th.Tensor, th.Tensor]:
+        """
+        Expose ICP grouping indices without affecting the normal forward path.
+
+        Args:
+            x: [B, N, 3] point cloud.
+            center: Optional centers (rare).
+            sort: Whether to sort neighbors (keeps default behavior).
+
+        Returns:
+            patch_indices: [B, num_patches, patch_size]
+            patch_centers: [B, num_patches, 3]
+        """
+        aux: Dict[str, th.Tensor] = {}
+        # Reuse internal grouping; _group already handles v1/v2 modules.
+        p, c = self._group(x, center=center, aux=aux)
+
+        if 'patch_index' in aux:
+            idx = aux['patch_index']
+        elif 'fps_nn_idx' in aux:
+            idx = aux['fps_nn_idx']
+        else:
+            raise RuntimeError("ICPNet grouping did not return patch indices.")
+
+        patch_indices = idx.reshape(*x.shape[:-2], -1, idx.shape[-1])
+        return patch_indices, c
+
     def forward(self, x: th.Tensor,
                 ctx: Dict[str, th.Tensor],
                 aux: Optional[Dict[str, th.Tensor]] = None) -> th.Tensor:

@@ -10,7 +10,7 @@ from typing import (
     get_args,
     get_origin
 )
-from dataclasses import dataclass, replace, is_dataclass, fields
+from dataclasses import dataclass, replace, is_dataclass, fields, field
 from omegaconf import OmegaConf
 import inspect
 from pathlib import Path
@@ -234,7 +234,7 @@ def main():
 
     @dataclass
     class Z:
-        x: X = X()
+        x: X = field(default_factory=X)
     z = Z()
     z2 = recursive_replace(z, x={'x': 2})
     z3 = recursive_replace_str(z, 'x.x', 3)

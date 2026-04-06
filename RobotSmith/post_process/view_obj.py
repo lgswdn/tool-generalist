@@ -47,7 +47,6 @@ def render_obj_to_images(obj_file, output_dir=None):
     views = [
         (30, 45, 'view1'),
         (30, 135, 'view2'),
-        (30, 225, 'view3'),
         (90, 0, 'top'),
     ]
 

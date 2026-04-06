@@ -32,12 +32,12 @@ class ActorCriticPointNet(nn.Module):
         pointnet_point_dim,
         pointnet_num_points,
         pointnet_output_dim=128,
+        fusion_hidden_dims=[256, 256, 256],
         actor_hidden_dims=[256, 256, 256],
         critic_hidden_dims=[256, 256, 256],
         activation="elu",
         init_noise_std=1.0,
         noise_std_type: str = "scalar",
-        fuser_hidden_dims=None,
         **kwargs,
     ):
         super().__init__()
@@ -53,15 +53,15 @@ class ActorCriticPointNet(nn.Module):
         fusion_input_dim = self.nonpc_obs_dim + pointnet_output_dim
 
         # Fuser MLP for feature fusion (optional)
-        self.use_fuser = fuser_hidden_dims is not None and len(fuser_hidden_dims) > 0
+        self.use_fuser = fusion_hidden_dims is not None and len(fusion_hidden_dims) > 0
         if self.use_fuser:
-            fuser_layers = [nn.Linear(fusion_input_dim, fuser_hidden_dims[0]), activation_fn]
-            for i in range(len(fuser_hidden_dims) - 1):
-                fuser_layers.append(nn.Linear(fuser_hidden_dims[i], fuser_hidden_dims[i + 1]))
+            fuser_layers = [nn.Linear(fusion_input_dim, fusion_hidden_dims[0]), activation_fn]
+            for i in range(len(fusion_hidden_dims) - 1):
+                fuser_layers.append(nn.Linear(fusion_hidden_dims[i], fusion_hidden_dims[i + 1]))
                 fuser_layers.append(activation_fn)
             self.fuser = nn.Sequential(*fuser_layers)
-            mlp_input_dim_a = fuser_hidden_dims[-1]
-            mlp_input_dim_c = fuser_hidden_dims[-1]
+            mlp_input_dim_a = fusion_hidden_dims[-1]
+            mlp_input_dim_c = fusion_hidden_dims[-1]
         else:
             self.fuser = None
             mlp_input_dim_a = fusion_input_dim

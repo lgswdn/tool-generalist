@@ -19,6 +19,15 @@ from rsl_rl.modules import (
     ActorCriticRecurrent,
     ActorCriticPointNet,
     ActorCriticICP,
+    ActorCriticMultiICP,
+    ActorCriticMultiICP_HandState,
+    ActorCriticUnicorn,
+    ActorCriticMultiUnicorn,
+    ActorCriticToolUnicorn,
+    ActorCriticMomentum,
+    ActorCriticPTV3Momentum,
+    ActorCriticConcerto,
+    ActorCriticPoint2Vec,
     EmpiricalNormalization,
     StudentTeacher,
     StudentTeacherRecurrent,
@@ -71,7 +80,23 @@ class OnPolicyRunner:
 
         # evaluate the policy class
         policy_class = eval(self.policy_cfg.pop("class_name"))
-        policy: ActorCritic | ActorCriticRecurrent | ActorCriticICP | ActorCriticPointNet | StudentTeacher | StudentTeacherRecurrent = policy_class(
+        policy: (
+            ActorCritic
+            | ActorCriticRecurrent
+            | ActorCriticICP
+            | ActorCriticPointNet
+            | ActorCriticMultiICP
+            | ActorCriticMultiICP_HandState
+            | ActorCriticUnicorn
+            | ActorCriticMultiUnicorn
+            | ActorCriticToolUnicorn
+            | ActorCriticMomentum
+            | ActorCriticPTV3Momentum
+            | ActorCriticConcerto
+            | ActorCriticPoint2Vec
+            | StudentTeacher
+            | StudentTeacherRecurrent
+        ) = policy_class(
             num_obs, num_privileged_obs, self.env.num_actions, **self.policy_cfg
         ).to(self.device)
 
@@ -418,8 +443,17 @@ class OnPolicyRunner:
             saved_dict["obs_norm_state_dict"] = self.obs_normalizer.state_dict()
             saved_dict["privileged_obs_norm_state_dict"] = self.privileged_obs_normalizer.state_dict()
 
-        # save model
-        torch.save(saved_dict, path)
+        # save model — use temp file + rename to avoid AFS/NFS zip serialization bug
+        import tempfile, shutil
+        dir_name = os.path.dirname(path)
+        try:
+            with tempfile.NamedTemporaryFile(dir="/tmp", delete=False, suffix=".pt") as tmp:
+                torch.save(saved_dict, tmp.name)
+            shutil.move(tmp.name, path)
+        except Exception as e:
+            print(f"[WARNING] Failed to save checkpoint to {path}: {e}")
+            if os.path.exists(tmp.name):
+                os.remove(tmp.name)
 
         # upload model to external logging service
         if self.logger_type in ["neptune", "wandb"] and not self.disable_logs:

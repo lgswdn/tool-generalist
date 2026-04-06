@@ -155,14 +155,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     first_frame_diagnostic = True
     # simulate environment
     while simulation_app.is_running():
-        # if timestep%10 == 0:
-        #     scene = env.unwrapped.scene if hasattr(env, "unwrapped") else env.scene
-            
-        #     # Directly access the known assets
-        #     eef_physics_pos = env.unwrapped.scene["eef"].data.root_pos_w[0]
-        #     flange_physics_pos = env.unwrapped.scene["robot"].data.body_pos_w[0, 7] # Assuming link7 is index 7
-        #     print(f"[DIAGNOSTIC] - Physics Engine Tool Pos: {eef_physics_pos}")
-        #     print(f"[DIAGNOSTIC] - Physics Engine Flange Pos: {flange_physics_pos}")
             
 
         start_time = time.time()
@@ -172,8 +164,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             actions = policy(obs)
             # env stepping
             obs, _, _, _ = env.step(actions)
+
+            # --- Log ee-object distance (same as reward function) ---
+            from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.mdp.observations import get_head_area_pos_w
+            unwrapped_env = env.unwrapped
+            ee_pos = get_head_area_pos_w(unwrapped_env)
+            obj_pos_w = unwrapped_env.scene["object"].data.root_pos_w
+            ee_obj_dist = torch.norm(obj_pos_w - ee_pos, dim=1)
+            print(f"[Step {timestep:4d}] ee-obj dist: mean={ee_obj_dist.mean().item():.4f} | per-env={ee_obj_dist.cpu().numpy().round(4)}")
+
+        timestep += 1
         if args_cli.video:
-            timestep += 1
             # Exit the play loop after recording one video
             if timestep == args_cli.video_length:
                 break

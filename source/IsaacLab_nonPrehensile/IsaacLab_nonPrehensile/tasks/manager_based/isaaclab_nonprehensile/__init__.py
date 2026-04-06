@@ -25,3 +25,13 @@ gym.register(
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.config.rsl_rl_ppo_cfg:NonPrehensilePPORunnerCfg",
     },
 )
+
+gym.register(
+    id="tool-momentum-v0",
+    entry_point=f"{__name__}.env_tool_momentum:NonPrehensileEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.env_tool_momentum:NonPrehensileEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.config.rsl_rl_ppo_cfg:MomentumPPORunnerCfg",
+    },
+)

@@ -615,108 +615,67 @@ def get_object_pointcloud(
     env: ManagerBasedRLEnv,
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
 ) -> torch.Tensor:
-    """Get object point cloud transformed to world coordinates.
-    
-    The point cloud is computed in world coordinates by transforming the object's
-    canonical point cloud using the object's current pose (position + orientation).
-    
-    Args:
-        env: The RL environment
-        robot_cfg: Robot configuration (currently unused but kept for compatibility)
-        object_cfg: Object configuration
+    """Get object point cloud in world coordinates.
+
+    Uses per-env Cloud instances with baked-in scale and pose caching.
 
     Returns:
-        torch.Tensor: Point cloud in world coordinates, shape (num_envs, num_points*3)
-                     Each row contains flattened [x1,y1,z1, x2,y2,z2, ...] coordinates for observation concatenation
+        torch.Tensor: shape (num_envs, num_points*3) in world coordinates.
     """
     object: RigidObject = env.scene[object_cfg.name]
-    
-    # Get asset configuration - with random_choice=False, we cycle through assets deterministically
-    assets_cfg = object.cfg.spawn.assets_cfg
-    num_envs = object.data.root_pos_w.shape[0]
-    
-    # Optimized batch processing by asset type
-    from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env import get_cached_cloud
-    
-    # Group environments by asset type for batch processing
-    env_to_asset = {env_idx: env_idx % len(assets_cfg) for env_idx in range(num_envs)}
-    asset_to_envs = {}
-    for env_idx, asset_idx in env_to_asset.items():
-        if asset_idx not in asset_to_envs:
-            asset_to_envs[asset_idx] = []
-        asset_to_envs[asset_idx].append(env_idx)
-    
-    out_tensor = None
-    
-    # Optionally compile the inner transform function for speed (PyTorch 2.x)
-    compile_enabled = getattr(env.cfg, "use_torch_compile", False)
 
-    # Process each asset type in batch
-    device = object.data.root_pos_w.device
-    num_assets = len(assets_cfg)
-    for asset_idx in range(num_assets):
-        # Build env indices for this asset by stepping
-        if asset_idx >= num_envs:
-            env_indices_tensor = torch.tensor([], device=device, dtype=torch.long)
-        else:
-            env_indices_tensor = torch.arange(asset_idx, num_envs, num_assets, device=device, dtype=torch.long)
-        if env_indices_tensor.numel() == 0:
-            continue
-        obj_path = assets_cfg[asset_idx].obj_path
-        
-        # Get cached cloud object for this asset
-        object_cloud = get_cached_cloud(obj_path)
-        
-        # Get actual scales from USD objects for the environments using this asset
-        # Read cached scales if available; else fallback to API
-        if hasattr(env, "_object_scales"):
-            scales = env._object_scales[env_indices_tensor]
-        else:
-            scales = mdp.get_rigid_body_scale(env, SceneEntityCfg("object"), env_indices_tensor.tolist())
-        
-        # Batch gather poses for all environments using this asset
-        batch_pos_w = object.data.root_pos_w[env_indices_tensor, :3].contiguous()  # (batch,3)
-        batch_quat_w = object.data.root_quat_w[env_indices_tensor].contiguous()    # (batch,4)
-        
-        # Batch transform point clouds for all environments using this asset
-        if not compile_enabled:
-            batch_transformed = object_cloud.get_pointcloud(
-                translation=batch_pos_w, 
-                rotation=batch_quat_w,
-                scale=scales
+    # Initialize per-env Cloud instances on first call
+    if not hasattr(env, "_object_clouds"):
+        assets_cfg = object.cfg.spawn.assets_cfg
+        num_envs = object.data.root_pos_w.shape[0]
+        device = object.data.root_pos_w.device
+        scales = mdp.get_rigid_body_scale(
+            env, SceneEntityCfg("object"), list(range(num_envs))
+        )
+
+        env._object_clouds = []
+        for env_idx in range(num_envs):
+            asset_idx = env_idx % len(assets_cfg)
+            obj_path = assets_cfg[asset_idx].obj_path
+            initial_scale = scales[env_idx].detach().cpu().numpy()
+            cloud = Cloud(
+                obj_path,
+                target_num_points=512,
+                device=device,
+                dtype=torch.float16,
+                initial_scale=initial_scale,
+                trans_cache_threshold=0.01,
+                rot_cache_threshold=0.01,
             )
-        else:
-            # Prewarm point cache on this device to avoid CPU->GPU tensor construction inside compiled graph
-            if object_cloud._points_torch.get(device) is None:
-                object_cloud._points_torch[device] = torch.tensor(object_cloud.points, dtype=torch.float32, device=device)
-            # Compile and cache per-Cloud callable to avoid passing function objects as dynamic inputs
-            if not hasattr(object_cloud, "_compiled_get_pointcloud"):
-                def _call(t, r, s, self_ref=object_cloud):
-                    return self_ref.get_pointcloud(translation=t, rotation=r, scale=s)
-                object_cloud._compiled_get_pointcloud = torch.compile(
-                    _call,
-                    mode="reduce-overhead",
-                    fullgraph=False,
-                    dynamic=True,
-                )
-            batch_transformed = object_cloud._compiled_get_pointcloud(batch_pos_w, batch_quat_w, scales)
+            env._object_clouds.append(cloud)
 
-        # Allocate output tensor if not yet allocated
-        if out_tensor is None:
-            num_points = batch_transformed.shape[1]
-            out_tensor = torch.empty((num_envs, num_points, 3), device=batch_transformed.device, dtype=batch_transformed.dtype)
+        print(
+            f"[INFO] Initialized {num_envs} Cloud instances for objects on device: {device}"
+        )
 
-        # Write this batch back using tensor indexing on (N, M, 3)
-        out_tensor[env_indices_tensor] = batch_transformed
-    
-    # Result tensor: flatten to (N, M*3)
-    all_pointclouds = out_tensor.view(num_envs, -1)
-    
+    device = object.data.root_pos_w.device
+    num_envs = object.data.root_pos_w.shape[0]
+
+    # Process each environment using its own Cloud instance
+    pointclouds = []
+    for env_idx in range(num_envs):
+        cloud = env._object_clouds[env_idx]
+
+        # Get pose for this environment
+        pos_w = object.data.root_pos_w[env_idx : env_idx + 1, :3].contiguous()
+        quat_w = object.data.root_quat_w[env_idx : env_idx + 1].contiguous()
+
+        # Get pointcloud (will use cache if pose unchanged)
+        pc = cloud.get_pointcloud(translation=pos_w, rotation=quat_w, use_cache=True)
+        pointclouds.append(pc)
+
+    # Stack all pointclouds and flatten
+    all_pointclouds = torch.cat(pointclouds, dim=0).view(num_envs, -1)
+
     # Optional visualization for debugging
     if env.cfg.visualize_object_pointcloud:
-        # Visualization expects fp32; cast temporarily to float32
         visualize_object_pointcloud(env, all_pointclouds.float())
-    
+
     return all_pointclouds
 
 @profile_obs
@@ -907,3 +866,297 @@ def get_tool_pointcloud_in_env_frame(
         visualize_tool_pointcloud(env, out_tensor.reshape(num_envs, -1).float())
 
     return pointcloud_env_flat
+
+
+# ---------------------------------------------------------------------------
+# 7D point cloud observations: position + mass + velocity
+# ---------------------------------------------------------------------------
+
+def _check_object_robot_contact(
+    env: ManagerBasedRLEnv,
+    pointcloud_w: torch.Tensor,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 0.1,
+) -> torch.Tensor:
+    """Check if point cloud is in contact with robot (any body/link).
+
+    Returns:
+        torch.Tensor: (num_envs,) bool mask, True if any point is within threshold of any robot body.
+    """
+    robot = env.scene[robot_cfg.name]
+    body_positions = robot.data.body_state_w[:, :, :3]
+
+    pointcloud_expanded = pointcloud_w.unsqueeze(2)
+    body_positions_expanded = body_positions.unsqueeze(1)
+
+    distances = torch.norm(pointcloud_expanded - body_positions_expanded, dim=3)
+    min_distances_per_point = distances.min(dim=2)[0]
+    in_contact = (min_distances_per_point < contact_threshold).any(dim=1)
+
+    return in_contact
+
+
+def visualize_pointcloud_velocity_mass(
+    env: ManagerBasedRLEnv,
+    features_flat: torch.Tensor,
+    pointcloud_w_for_viz: torch.Tensor,
+    env_idx: int = 0,
+    subsample: int = 16,
+    velocity_scale: float = 0.1,
+    max_velocity: float = 1.0,
+    point_size: float = 0.003,
+    prefix: str = "object",
+) -> None:
+    """Visualize 7D point cloud features (position + mass + velocity).
+
+    Creates colored sphere markers for mass and arrow markers for velocity vectors.
+
+    Args:
+        env: The RL environment
+        features_flat: (num_envs, num_points * 7) flat features tensor
+        pointcloud_w_for_viz: (num_envs, num_points, 3) world-frame positions for visualization
+        env_idx: Which environment to visualize
+        subsample: Show every Nth point to reduce clutter
+        velocity_scale: Scale factor for velocity arrow length
+        max_velocity: Maximum velocity for color normalization
+        point_size: Radius of the point spheres
+        prefix: Marker namespace prefix (e.g., "object", "tool")
+    """
+    import isaaclab.sim as sim_utils
+    from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
+
+    num_envs = features_flat.shape[0]
+    num_points = features_flat.shape[1] // 7
+    feat = features_flat.view(num_envs, num_points, 7).float()
+
+    # Extract single env for visualization
+    sub_points = pointcloud_w_for_viz[env_idx, ::subsample, :].float()  # (K, 3)
+    velocities_viz = feat[env_idx, ::subsample, 4:7]  # (K, 3)
+    masses = feat[env_idx, ::subsample, 3]  # (K,)
+    num_viz = sub_points.shape[0]
+
+    # 1. Point cloud visualization (small green spheres)
+    marker_name = f"_{prefix}_pc_visualizer"
+    if not hasattr(env, marker_name):
+        marker_cfg = VisualizationMarkersCfg(
+            prim_path=f"/Visuals/{prefix.title()}PC7D",
+            markers={
+                "sphere": sim_utils.SphereCfg(
+                    radius=point_size,
+                    visual_material=sim_utils.PreviewSurfaceCfg(
+                        diffuse_color=(0.0, 1.0, 0.0)
+                    ),
+                ),
+            },
+        )
+        setattr(env, marker_name, VisualizationMarkers(marker_cfg))
+
+    orientations = torch.tensor(
+        [[1.0, 0.0, 0.0, 0.0]], device=sub_points.device
+    ).expand(num_viz, -1)
+    getattr(env, marker_name).visualize(sub_points, orientations)
+
+
+@profile_obs
+def get_object_pointcloud_with_mass_velocity(
+    env: ManagerBasedRLEnv,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+) -> torch.Tensor:
+    """Get object point cloud with mass and velocity (7D per point).
+
+    Each point is [x, y, z, mass_per_point, vx, vy, vz] in environment frame.
+    Velocity is gated by a contact check: only non-zero when the object is
+    in contact with the robot.
+
+    Returns:
+        torch.Tensor: shape (num_envs, 512*7) = (num_envs, 3584), dtype float16
+    """
+    object: RigidObject = env.scene[object_cfg.name]
+
+    pointcloud_flat = get_object_pointcloud(env, object_cfg)
+    num_envs, flat_dim = pointcloud_flat.shape
+    num_points = flat_dim // 3
+
+    pointcloud_w = pointcloud_flat.view(num_envs, num_points, 3)
+    pointcloud_env = pointcloud_w - env.scene.env_origins.unsqueeze(1)
+
+    # Contact-gated velocity: only compute when object touches robot
+    in_contact = _check_object_robot_contact(
+        env, pointcloud_w, robot_cfg=SceneEntityCfg("robot")
+    )
+    point_velocities = torch.zeros_like(pointcloud_env)
+
+    if in_contact.any():
+        contact_mask = in_contact.unsqueeze(1).unsqueeze(2)
+
+        root_pos = object.data.root_pos_w[:, :3].unsqueeze(1)
+        root_lin_vel = object.data.root_lin_vel_w[:, :3].unsqueeze(1)
+        root_ang_vel = object.data.root_ang_vel_w[:, :3].unsqueeze(1)
+
+        rel_positions = pointcloud_w - root_pos
+        point_velocities_computed = root_lin_vel + torch.cross(
+            root_ang_vel.expand_as(rel_positions), rel_positions, dim=-1
+        )
+
+        point_velocities = point_velocities_computed * contact_mask
+
+    # Mass feature: distribute total object mass evenly across points
+    masses = object.root_physx_view.get_masses().view(num_envs, -1)
+    object_mass = masses.sum(dim=1)
+    mass_per_point = (
+        (object_mass / float(num_points))
+        .view(num_envs, 1, 1)
+        .to(pointcloud_env.device, pointcloud_env.dtype)
+    )
+    mass_feature = mass_per_point.expand(-1, num_points, 1)
+
+    features = torch.cat(
+        [pointcloud_env, mass_feature, point_velocities], dim=-1
+    )  # (num_envs, num_points, 7)
+
+    # Optional visualization for debugging
+    if (
+        hasattr(env.cfg, "visualize_object_velocity_mass")
+        and env.cfg.visualize_object_velocity_mass
+    ):
+        pointcloud_w_for_viz = pointcloud_env + env.scene.env_origins.unsqueeze(1)
+        visualize_pointcloud_velocity_mass(
+            env,
+            features.reshape(num_envs, num_points * 7),
+            pointcloud_w_for_viz,
+            env_idx=0,
+            subsample=16,
+            velocity_scale=0.1,
+            max_velocity=1.0,
+            point_size=0.003,
+            prefix="object",
+        )
+
+    return features.reshape(num_envs, num_points * 7).to(torch.float16)
+
+
+@profile_obs
+def get_tool_pointcloud_with_mass_velocity(
+    env: ManagerBasedRLEnv,
+) -> torch.Tensor:
+    """Get tool point cloud with mass and velocity (7D per point).
+
+    Each point is [x, y, z, mass_per_point, vx, vy, vz] in environment frame.
+    Velocity is derived from the tool body's rigid body kinematics.
+    Preserves Z-shift behavior from get_tool_pointcloud_in_env_frame.
+
+    Returns:
+        torch.Tensor: shape (num_envs, 512*7) = (num_envs, 3584), dtype float16
+    """
+    from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
+        get_cached_cloud, TOOL_DATA, TOOL_SCALE,
+    )
+
+    num_envs = env.num_envs
+    device = env.device
+    num_tools = len(TOOL_DATA)
+
+    # Get tool body world pose from the robot articulation
+    robot = env.scene["robot"]
+    if not hasattr(env, "_tool_body_cfg_resolved"):
+        _cfg = SceneEntityCfg("robot", body_names=["link_coacd_convex_piece_0"])
+        _cfg.resolve(env.scene)
+        env._tool_body_cfg_resolved = _cfg
+    tool_body_idx = env._tool_body_cfg_resolved.body_ids[0]
+    tool_pos_w = robot.data.body_state_w[:, tool_body_idx, :3]    # (num_envs, 3)
+    tool_quat_w = robot.data.body_state_w[:, tool_body_idx, 3:7]  # (num_envs, 4)
+    tool_lin_vel_w = robot.data.body_lin_vel_w[:, tool_body_idx, :3]  # (num_envs, 3)
+    tool_ang_vel_w = robot.data.body_ang_vel_w[:, tool_body_idx, :3]  # (num_envs, 3)
+
+    out_world = None  # (num_envs, M, 3) in world frame
+
+    # Group envs by tool type for efficient batch processing
+    tool_to_envs: dict[int, list[int]] = {}
+    for env_id in range(num_envs):
+        tidx = env_id % num_tools
+        if tidx not in tool_to_envs:
+            tool_to_envs[tidx] = []
+        tool_to_envs[tidx].append(env_id)
+
+    for tidx, env_ids_list in tool_to_envs.items():
+        td = TOOL_DATA[tidx]
+        tool_cloud = get_cached_cloud(td["obj_path"])
+        base_pts = tool_cloud._get_points_torch(device).float()  # (M, 3)
+
+        # Scale canonical points
+        pts = base_pts * TOOL_SCALE  # (M, 3)
+
+        # Preserve Z-shift: shift so all Z >= 0 (visible tool region)
+        pts = pts.clone()
+        pts[:, 2] = pts[:, 2] - pts[:, 2].min()
+
+        env_indices = torch.tensor(env_ids_list, device=device, dtype=torch.long)
+
+        # Get per-env rotation matrices and positions
+        batch_quat = tool_quat_w[env_indices].contiguous()  # (B, 4)
+        batch_pos = tool_pos_w[env_indices].contiguous()     # (B, 3)
+        batch_rot = matrix_from_quat(batch_quat)             # (B, 3, 3)
+
+        # Rotate points by body orientation and translate to body position
+        pts_rotated = torch.bmm(
+            batch_rot,
+            pts.T.unsqueeze(0).expand(len(env_ids_list), -1, -1),
+        ).transpose(1, 2)  # (B, M, 3)
+        pts_world = pts_rotated + batch_pos.unsqueeze(1)
+
+        # Allocate output on first iteration
+        if out_world is None:
+            num_points = pts_world.shape[1]
+            out_world = torch.empty(
+                (num_envs, num_points, 3),
+                device=device,
+                dtype=pts_world.dtype,
+            )
+
+        out_world[env_indices] = pts_world
+
+    # Convert to env frame
+    pointcloud_env = out_world - env.scene.env_origins.unsqueeze(1)  # (B, M, 3)
+
+    # Velocity: v_point = v_lin + w x (p_world - p_link)
+    rel_pos = out_world - tool_pos_w.unsqueeze(1)  # (B, M, 3)
+    ang_vel_expanded = tool_ang_vel_w.unsqueeze(1).expand_as(rel_pos)
+    point_vels = tool_lin_vel_w.unsqueeze(1) + torch.cross(
+        ang_vel_expanded, rel_pos, dim=-1
+    )  # (B, M, 3)
+
+    # Mass feature: get tool mass from robot articulation PhysX view
+    if not hasattr(env, "_tool_body_idx"):
+        _tb_cfg = SceneEntityCfg("robot", body_names=["link_coacd_convex_piece_0"])
+        _tb_cfg.resolve(env.scene)
+        env._tool_body_idx = _tb_cfg.body_ids[0]
+    robot_masses = robot.root_physx_view.get_masses()  # (num_envs, num_bodies) on CPU
+    tool_mass = robot_masses[:, env._tool_body_idx].to(device=device, dtype=pointcloud_env.dtype)  # (num_envs,)
+    total_pts = pointcloud_env.shape[1]
+    mass_per_point = (tool_mass / float(total_pts)).view(num_envs, 1, 1)
+    mass_feature = mass_per_point.expand(-1, total_pts, 1)
+
+    features = torch.cat(
+        [pointcloud_env, mass_feature, point_vels], dim=-1
+    )  # (B, M, 7)
+
+    # Optional visualization
+    if (
+        hasattr(env.cfg, "visualize_tool_velocity_mass")
+        and env.cfg.visualize_tool_velocity_mass
+    ):
+        pts_w_for_viz = pointcloud_env + env.scene.env_origins.unsqueeze(1)
+        visualize_pointcloud_velocity_mass(
+            env,
+            features.reshape(num_envs, -1),
+            pts_w_for_viz,
+            env_idx=0,
+            subsample=4,
+            velocity_scale=0.1,
+            max_velocity=1.0,
+            point_size=0.003,
+            prefix="tool",
+        )
+
+    # Flatten and return
+    return features.reshape(num_envs, -1).to(torch.float16)
