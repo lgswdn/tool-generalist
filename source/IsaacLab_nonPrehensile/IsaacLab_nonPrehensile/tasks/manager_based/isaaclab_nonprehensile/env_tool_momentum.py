@@ -155,6 +155,12 @@ with open(_TOOLS_CFG["tools_json"], "r") as _htf:
     _tool_head_data = json.load(_htf)
 _tool_head_lookup = {t["name"]: t.get("head_area") for t in _tool_head_data}
 
+# Load the original tools.json (maps tool name → base_center) for body-frame offset
+_tools_json_path = os.path.join(os.path.dirname(_TOOLS_CFG["tools_json"]), "tools.json")
+with open(_tools_json_path, "r") as _btf:
+    _tool_base_data = json.load(_btf)
+_tool_base_lookup = {t["name"]: t.get("base_center") for t in _tool_base_data}
+
 # Build per-tool metadata list, one entry per USD, in the same order as TOOL_USD_PATHS
 TOOL_DATA: list[dict] = []
 for _usd_path in TOOL_USD_PATHS:
@@ -162,14 +168,18 @@ for _usd_path in TOOL_USD_PATHS:
     _tool_name = os.path.splitext(os.path.basename(_usd_path))[0].replace("panda_instanceable_", "")
     _obj_path = os.path.join(_TOOLS_CFG["obj_dir"], f"{_tool_name}.obj")
     _head_area = _tool_head_lookup.get(_tool_name)
+    _base_center = _tool_base_lookup.get(_tool_name)
     if _head_area is None:
         print(f"[WARNING] head_area not found for tool '{_tool_name}' in {_TOOLS_CFG['tools_json']}")
+    if _base_center is None:
+        print(f"[WARNING] base_center not found for tool '{_tool_name}' in {_tools_json_path}")
     if not os.path.isfile(_obj_path):
         print(f"[WARNING] OBJ mesh not found for tool '{_tool_name}': {_obj_path}")
     TOOL_DATA.append({
         "name": _tool_name,
         "obj_path": _obj_path,
         "head_area": _head_area,
+        "base_center": _base_center,
     })
 
 print(f"[INFO] Loaded {len(TOOL_DATA)} tool variants from {_TOOLS_CFG['robots_usd_dir']}")
@@ -331,8 +341,14 @@ class ObservationsCfg:
             noise=GaussianNoiseCfg(mean=0.0, std=0.005, operation="add"),
         )
 
-        # Tool Cloud (512*7=3584D: tool point cloud with mass+velocity in env frame)
-        tool_cloud_with_velocity_mass = ObsTerm(
+        # Tool Cloud as Obstacle (512*7=3584D: head area of tool in obstacle slot)
+        tool_cloud_obstacle = ObsTerm(
+            func=mdp.get_tool_head_area_pointcloud_with_mass_velocity,
+            noise=GaussianNoiseCfg(mean=0.0, std=0.002, operation="add"),
+        )
+
+        # Tool Cloud as EE (512*7=3584D: tool cloud in end-effector slot)
+        tool_cloud_ee = ObsTerm(
             func=mdp.get_tool_pointcloud_with_mass_velocity,
             noise=GaussianNoiseCfg(mean=0.0, std=0.002, operation="add"),
         )
@@ -389,7 +405,7 @@ class EventCfg:
         func=mdp.randomize_rigid_body_scale,
         mode="prestartup",
         params={
-            "scale_range": (0.15, 0.3),
+            "scale_range": (0.1, 0.2),
             "asset_cfg": SceneEntityCfg("object"),
         },
     )
@@ -474,7 +490,7 @@ class RewardsCfg:
         params={
             "std": 0.15,
         },
-        weight=1.0,
+        weight=0.5,
     )
 
     object_goal_tracking = RewTerm(
@@ -545,6 +561,7 @@ class NonPrehensileEnvCfg(ManagerBasedRLEnvCfg):
     visualize_eef_position: bool = False  # Enable eef tool position visualization
     visualize_object_velocity_mass: bool = False  # Enable 7D object velocity & mass visualization
     visualize_tool_velocity_mass: bool = False  # Enable 7D tool velocity & mass visualization
+    visualize_tool_head_area: bool = False  # Enable head-area obstacle cloud visualization (orange spheres)
 
     # Performance settings
     use_torch_compile: bool = True  # Enable torch.compile on hot paths

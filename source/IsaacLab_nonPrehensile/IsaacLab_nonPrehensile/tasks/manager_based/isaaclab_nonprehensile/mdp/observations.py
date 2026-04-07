@@ -596,16 +596,16 @@ def visualize_object_pointcloud(
     points_per_env = pointcloud_tensor.shape[1] // 3
     pointcloud_reshaped = pointcloud_tensor.view(num_envs, points_per_env, 3)
     
-    # For visualization, show points from the first environment only
-    first_env_points = pointcloud_reshaped[0]  # Shape: (num_points, 3)
+    # Flatten all envs into a single set of points for visualization
+    all_points = pointcloud_reshaped.reshape(-1, 3)  # Shape: (num_envs * num_points, 3)
     
     # Create identity quaternions for all points (spheres don't need rotation)
-    num_points = first_env_points.shape[0]
-    orientations = torch.tensor([[1.0, 0.0, 0.0, 0.0]] * num_points).to(first_env_points.device)
+    total_points = all_points.shape[0]
+    orientations = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=all_points.device).expand(total_points, -1)
     
     # Visualize the points in world coordinates
     env._pointcloud_visualizer.visualize(
-        translations=first_env_points,
+        translations=all_points,
         orientations=orientations
     )
 
@@ -733,16 +733,16 @@ def visualize_tool_pointcloud(
     points_per_env = pointcloud_tensor.shape[1] // 3
     pointcloud_reshaped = pointcloud_tensor.view(num_envs, points_per_env, 3)
 
-    # For visualization, show points from the first environment only
-    first_env_points = pointcloud_reshaped[0]  # Shape: (num_points, 3)
+    # Flatten all envs into a single set of points for visualization
+    all_points = pointcloud_reshaped.reshape(-1, 3)  # Shape: (num_envs * num_points, 3)
 
     # Create identity quaternions for all points (spheres don't need rotation)
-    num_points = first_env_points.shape[0]
-    orientations = torch.tensor([[1.0, 0.0, 0.0, 0.0]] * num_points).to(first_env_points.device)
+    total_points = all_points.shape[0]
+    orientations = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=all_points.device).expand(total_points, -1)
 
     # Visualize the points in world coordinates
     env._tool_pointcloud_visualizer.visualize(
-        translations=first_env_points,
+        translations=all_points,
         orientations=orientations
     )
 
@@ -800,12 +800,20 @@ def get_tool_pointcloud_in_env_frame(
         # Scale canonical points
         pts = base_pts * TOOL_SCALE  # (M, 3)
 
-        # The canonical mesh is symmetric around Z=0 (body origin = mesh center).
-        # In the USD, local +Z maps toward the tool tip (visible, away from link7),
-        # while local -Z maps INTO link7 (embedded, not visible).
-        # Shift Z so all points have Z >= 0, placing the full cloud in the visible region.
+        # Compute the body-frame offset from base_center.
+        # The USD body origin was placed at the base_center position (by adjust_meshes.py).
+        # We must shift the point cloud by the same amount so it aligns with the body frame.
         pts = pts.clone()
-        pts[:, 2] = pts[:, 2] - pts[:, 2].min()
+        base_center_norm = td.get("base_center")
+        if base_center_norm is not None:
+            bc = torch.tensor(base_center_norm, device=device, dtype=torch.float32)
+            bbox_min_raw = base_pts.min(dim=0).values
+            bbox_max_raw = base_pts.max(dim=0).values
+            body_origin = (bbox_min_raw + bc * (bbox_max_raw - bbox_min_raw)) * TOOL_SCALE
+            pts = pts - body_origin
+        else:
+            # Fallback: legacy Z-shift if base_center is not available
+            pts[:, 2] = pts[:, 2] - pts[:, 2].min()
 
         env_indices = torch.tensor(env_ids_list, device=device, dtype=torch.long)
 
@@ -929,10 +937,8 @@ def visualize_pointcloud_velocity_mass(
     num_points = features_flat.shape[1] // 7
     feat = features_flat.view(num_envs, num_points, 7).float()
 
-    # Extract single env for visualization
-    sub_points = pointcloud_w_for_viz[env_idx, ::subsample, :].float()  # (K, 3)
-    velocities_viz = feat[env_idx, ::subsample, 4:7]  # (K, 3)
-    masses = feat[env_idx, ::subsample, 3]  # (K,)
+    # Extract all envs, subsampled
+    sub_points = pointcloud_w_for_viz[:, ::subsample, :].reshape(-1, 3).float()  # (num_envs*K, 3)
     num_viz = sub_points.shape[0]
 
     # 1. Point cloud visualization (small green spheres)
@@ -1086,9 +1092,17 @@ def get_tool_pointcloud_with_mass_velocity(
         # Scale canonical points
         pts = base_pts * TOOL_SCALE  # (M, 3)
 
-        # Preserve Z-shift: shift so all Z >= 0 (visible tool region)
+        # Compute the body-frame offset from base_center
         pts = pts.clone()
-        pts[:, 2] = pts[:, 2] - pts[:, 2].min()
+        base_center_norm = td.get("base_center")
+        if base_center_norm is not None:
+            bc = torch.tensor(base_center_norm, device=device, dtype=torch.float32)
+            bbox_min_raw = base_pts.min(dim=0).values
+            bbox_max_raw = base_pts.max(dim=0).values
+            body_origin = (bbox_min_raw + bc * (bbox_max_raw - bbox_min_raw)) * TOOL_SCALE
+            pts = pts - body_origin
+        else:
+            pts[:, 2] = pts[:, 2] - pts[:, 2].min()
 
         env_indices = torch.tensor(env_ids_list, device=device, dtype=torch.long)
 
@@ -1140,11 +1154,12 @@ def get_tool_pointcloud_with_mass_velocity(
         [pointcloud_env, mass_feature, point_vels], dim=-1
     )  # (B, M, 7)
 
-    # Optional visualization
-    if (
-        hasattr(env.cfg, "visualize_tool_velocity_mass")
-        and env.cfg.visualize_tool_velocity_mass
-    ):
+    # Optional visualization: full tool cloud (blue spheres, position only)
+    if getattr(env.cfg, "visualize_tool_pointcloud", False):
+        visualize_tool_pointcloud(env, out_world.reshape(num_envs, -1).float())
+
+    # Optional visualization: 7D features (velocity + mass)
+    if getattr(env.cfg, "visualize_tool_velocity_mass", False):
         pts_w_for_viz = pointcloud_env + env.scene.env_origins.unsqueeze(1)
         visualize_pointcloud_velocity_mass(
             env,
@@ -1159,4 +1174,184 @@ def get_tool_pointcloud_with_mass_velocity(
         )
 
     # Flatten and return
+    return features.reshape(num_envs, -1).to(torch.float16)
+
+
+def get_tool_head_area_pointcloud_with_mass_velocity(
+    env: ManagerBasedRLEnv,
+    num_points: int = 512,
+) -> torch.Tensor:
+    """Get tool point cloud filtered to head area region, with mass and velocity (7D).
+
+    Only includes points within the tool's head_area bounding box (the functional
+    contact region of the tool). Points outside the head area are excluded.
+    The remaining points are subsampled or padded to ``num_points``.
+
+    Each point is [x, y, z, mass_per_point, vx, vy, vz] in environment frame.
+
+    Args:
+        env: The environment instance.
+        num_points: Target number of points in the output cloud (default: 512).
+
+    Returns:
+        torch.Tensor: shape (num_envs, num_points*7), dtype float16
+    """
+    from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
+        get_cached_cloud, TOOL_DATA, TOOL_SCALE,
+    )
+
+    num_envs = env.num_envs
+    device = env.device
+    num_tools = len(TOOL_DATA)
+
+    # Get tool body world pose from the robot articulation
+    robot = env.scene["robot"]
+    if not hasattr(env, "_tool_body_cfg_resolved"):
+        _cfg = SceneEntityCfg("robot", body_names=["link_coacd_convex_piece_0"])
+        _cfg.resolve(env.scene)
+        env._tool_body_cfg_resolved = _cfg
+    tool_body_idx = env._tool_body_cfg_resolved.body_ids[0]
+    tool_pos_w = robot.data.body_state_w[:, tool_body_idx, :3]    # (num_envs, 3)
+    tool_quat_w = robot.data.body_state_w[:, tool_body_idx, 3:7]  # (num_envs, 4)
+    tool_lin_vel_w = robot.data.body_lin_vel_w[:, tool_body_idx, :3]  # (num_envs, 3)
+    tool_ang_vel_w = robot.data.body_ang_vel_w[:, tool_body_idx, :3]  # (num_envs, 3)
+
+    # Precompute per-tool head area masks on canonical points (cached)
+    if not hasattr(env, "_tool_head_area_cache"):
+        env._tool_head_area_cache = {}
+
+    out_world = torch.empty((num_envs, num_points, 3), device=device, dtype=torch.float32)
+
+    # Group envs by tool type
+    tool_to_envs: dict[int, list[int]] = {}
+    for env_id in range(num_envs):
+        tidx = env_id % num_tools
+        if tidx not in tool_to_envs:
+            tool_to_envs[tidx] = []
+        tool_to_envs[tidx].append(env_id)
+
+    for tidx, env_ids_list in tool_to_envs.items():
+        td = TOOL_DATA[tidx]
+
+        # Get or compute the head-area filtered canonical points for this tool
+        if tidx not in env._tool_head_area_cache:
+            tool_cloud = get_cached_cloud(td["obj_path"])
+            base_pts = tool_cloud._get_points_torch(device).float()  # (M, 3)
+
+            # Scale canonical points
+            pts_canonical = base_pts * TOOL_SCALE  # (M, 3)
+
+            # Compute the body-frame offset from base_center
+            pts_canonical = pts_canonical.clone()
+            base_center_norm = td.get("base_center")
+            if base_center_norm is not None:
+                bc = torch.tensor(base_center_norm, device=device, dtype=torch.float32)
+                bbox_min_raw = base_pts.min(dim=0).values
+                bbox_max_raw = base_pts.max(dim=0).values
+                body_origin = (bbox_min_raw + bc * (bbox_max_raw - bbox_min_raw)) * TOOL_SCALE
+                pts_canonical = pts_canonical - body_origin
+            else:
+                pts_canonical[:, 2] = pts_canonical[:, 2] - pts_canonical[:, 2].min()
+
+            head_area_norm = td.get("head_area")
+            if head_area_norm is not None:
+                # head_area_norm is [[x_min, y_min, z_min], [x_max, y_max, z_max]] in [0,1] normalized coords
+                bbox_min = pts_canonical.min(dim=0).values
+                bbox_max = pts_canonical.max(dim=0).values
+                bbox_range = bbox_max - bbox_min
+
+                # Convert normalized head area to absolute coordinates
+                ha_min = bbox_min + torch.tensor(head_area_norm[0], device=device, dtype=torch.float32) * bbox_range
+                ha_max = bbox_min + torch.tensor(head_area_norm[1], device=device, dtype=torch.float32) * bbox_range
+
+                # Filter: keep points inside head area bounding box
+                mask = (
+                    (pts_canonical[:, 0] >= ha_min[0]) & (pts_canonical[:, 0] <= ha_max[0]) &
+                    (pts_canonical[:, 1] >= ha_min[1]) & (pts_canonical[:, 1] <= ha_max[1]) &
+                    (pts_canonical[:, 2] >= ha_min[2]) & (pts_canonical[:, 2] <= ha_max[2])
+                )
+                head_pts = pts_canonical[mask]
+
+                if head_pts.shape[0] == 0:
+                    # Fallback: if no points in head area, use all points
+                    print(f"[WARNING] No points in head area for tool '{td['name']}', using full cloud")
+                    head_pts = pts_canonical
+            else:
+                # No head_area defined, use all points
+                print(f"[WARNING] No head_area for tool '{td['name']}', using full cloud as obstacle")
+                head_pts = pts_canonical
+
+            # Subsample or pad to target num_points
+            n = head_pts.shape[0]
+            if n >= num_points:
+                # Uniform subsample
+                idx = torch.linspace(0, n - 1, num_points, device=device).round().long()
+                head_pts = head_pts[idx]
+            else:
+                # Repeat-pad
+                repeats = (num_points + n - 1) // n
+                head_pts = head_pts.repeat(repeats, 1)[:num_points]
+
+            env._tool_head_area_cache[tidx] = head_pts  # (num_points, 3) canonical
+
+        pts = env._tool_head_area_cache[tidx]  # (num_points, 3) canonical, already filtered
+
+        env_indices = torch.tensor(env_ids_list, device=device, dtype=torch.long)
+
+        # Transform to world frame
+        batch_quat = tool_quat_w[env_indices].contiguous()  # (B, 4)
+        batch_pos = tool_pos_w[env_indices].contiguous()     # (B, 3)
+        batch_rot = matrix_from_quat(batch_quat)             # (B, 3, 3)
+
+        pts_rotated = torch.bmm(
+            batch_rot,
+            pts.T.unsqueeze(0).expand(len(env_ids_list), -1, -1),
+        ).transpose(1, 2)  # (B, num_points, 3)
+        pts_world = pts_rotated + batch_pos.unsqueeze(1)
+
+        out_world[env_indices] = pts_world
+
+    # Convert to env frame
+    pointcloud_env = out_world - env.scene.env_origins.unsqueeze(1)  # (B, num_points, 3)
+
+    # Velocity: v_point = v_lin + w x (p_world - p_link)
+    rel_pos = out_world - tool_pos_w.unsqueeze(1)  # (B, num_points, 3)
+    ang_vel_expanded = tool_ang_vel_w.unsqueeze(1).expand_as(rel_pos)
+    point_vels = tool_lin_vel_w.unsqueeze(1) + torch.cross(
+        ang_vel_expanded, rel_pos, dim=-1
+    )  # (B, num_points, 3)
+
+    # Mass feature
+    if not hasattr(env, "_tool_body_idx"):
+        _tb_cfg = SceneEntityCfg("robot", body_names=["link_coacd_convex_piece_0"])
+        _tb_cfg.resolve(env.scene)
+        env._tool_body_idx = _tb_cfg.body_ids[0]
+    robot_masses = robot.root_physx_view.get_masses()  # (num_envs, num_bodies) on CPU
+    tool_mass = robot_masses[:, env._tool_body_idx].to(device=device, dtype=pointcloud_env.dtype)  # (num_envs,)
+    mass_per_point = (tool_mass / float(num_points)).view(num_envs, 1, 1)
+    mass_feature = mass_per_point.expand(-1, num_points, 1)
+
+    features = torch.cat(
+        [pointcloud_env, mass_feature, point_vels], dim=-1
+    )  # (B, num_points, 7)
+
+    # Optional visualization: head area cloud (blue spheres, position only)
+    if getattr(env.cfg, "visualize_tool_pointcloud", False):
+        visualize_tool_pointcloud(env, out_world.reshape(num_envs, -1).float())
+
+    # Optional visualization: head area 7D features (orange spheres)
+    if getattr(env.cfg, "visualize_tool_head_area", False):
+        pts_w_for_viz = pointcloud_env + env.scene.env_origins.unsqueeze(1)
+        visualize_pointcloud_velocity_mass(
+            env,
+            features.reshape(num_envs, -1),
+            pts_w_for_viz,
+            env_idx=0,
+            subsample=4,
+            velocity_scale=0.1,
+            max_velocity=1.0,
+            point_size=0.004,
+            prefix="tool_head_area",
+        )
+
     return features.reshape(num_envs, -1).to(torch.float16)

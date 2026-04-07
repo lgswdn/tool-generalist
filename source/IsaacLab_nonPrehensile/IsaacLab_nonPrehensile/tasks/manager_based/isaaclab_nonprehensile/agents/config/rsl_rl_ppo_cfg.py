@@ -100,8 +100,8 @@ class MomentumActorCriticCfg:
     """Config for ActorCriticMomentum with 7D point clouds (xyz + mass + velocity).
 
     Observation layout (env_tool_momentum):
-        object_cloud (512*7=3584) + tool_cloud_as_ee (512*7=3584) + extra_state (46)
-    The tool cloud is treated as EE (end-effector) in the Momentum encoder.
+        object_cloud (512*7=3584) + tool_obstacle (512*7=3584) + tool_ee (512*7=3584) + extra_state (46)
+    The tool cloud appears in both the obstacle and EE slots.
     """
 
     class_name: str = "ActorCriticMomentum"
@@ -109,14 +109,14 @@ class MomentumActorCriticCfg:
     # Point cloud / state layout
     point_dim: int = 7
     num_points: int = 512
-    num_obstacles: int = 0        # no obstacles
-    num_ee_points: int = 512      # tool cloud treated as EE
+    num_obstacles: int = 1        # tool cloud in obstacle slot
+    num_ee_points: int = 512      # tool cloud also as EE
     robot_state_dim: int = 14
 
     # Momentum encoder settings — propagate layout to encoder internals
     momentum_cfg: dict = field(default_factory=lambda: {
         "num_points_per_object": 512,
-        "num_obstacles": 0,
+        "num_obstacles": 1,
         "num_ee_points": 512,
     })
     momentum_ckpt: str | None = '/mnt/afs/zhuwenxuan/project/inp/checkpoints/point_encoder_action_global_step_044950.pt'
@@ -140,10 +140,10 @@ class MomentumActorCriticCfg:
     cross_attn_ff_dim: int | None = None
     cross_attn_dropout: float = 0.0
 
-    # Actor / Critic heads (matches reference)
+    # Actor / Critic heads
     fusion_hidden_dims: list[int] = field(default_factory=lambda: [512, 256, 128])
     actor_hidden_dims: list[int] = field(default_factory=lambda: [64])
-    critic_hidden_dims: list[int] = field(default_factory=lambda: [64])
+    critic_hidden_dims: list[int] = field(default_factory=lambda: [128])
 
     # Activation / noise
     activation: str = "gelu"

@@ -344,9 +344,18 @@ def compute_head_area_offsets_from_usd(env) -> "torch.Tensor":
 
         scale_t = torch.tensor([TOOL_SCALE] * 3, dtype=torch.float32, device=env.device)
 
-        head_area_from_attachment = head_area_unscaled.clone()
-        head_area_from_attachment[2] = head_area_unscaled[2] - bbox_min[2]
-        head_area_local = head_area_from_attachment * scale_t
+        # Compute the body origin in OBJ space from base_center, then express
+        # the head area center relative to that origin.
+        base_center_norm = td.get("base_center")
+        if base_center_norm is not None:
+            bc = torch.tensor(base_center_norm, dtype=torch.float32, device=env.device)
+            body_origin = bbox_min + bc * (bbox_max - bbox_min)
+            head_area_local = (head_area_unscaled - body_origin) * scale_t
+        else:
+            # Fallback: legacy Z-shift only
+            head_area_from_attachment = head_area_unscaled.clone()
+            head_area_from_attachment[2] = head_area_unscaled[2] - bbox_min[2]
+            head_area_local = head_area_from_attachment * scale_t
 
         _per_tool_offset_cache[tool_idx] = head_area_local
         head_area_offsets[env_id] = head_area_local

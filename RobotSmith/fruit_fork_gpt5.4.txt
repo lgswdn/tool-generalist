@@ -1,0 +1,126 @@
+{
+  "name": "fruit_fork_end_effector",
+  "parts": [
+    {
+      "geom": "cylinder",
+      "base_parameters": [1.1, 7.0],
+      "scale_variance_range": [0.7, 1.8],
+      "semantic_group": "handle",
+      "is_head": false
+    },
+    {
+      "geom": "cube",
+      "base_parameters": [2.4, 1.6, 0.9],
+      "scale_variance_range": [0.6, 2.2],
+      "semantic_group": "head",
+      "is_head": true
+    },
+    {
+      "geom": "cylinder",
+      "base_parameters": [0.22, 3.2],
+      "scale_variance_range": [0.7, 2.5],
+      "semantic_group": "head",
+      "is_head": true
+    },
+    {
+      "geom": "cylinder",
+      "base_parameters": [0.22, 3.0],
+      "scale_variance_range": [0.7, 2.5],
+      "semantic_group": "head",
+      "is_head": true
+    },
+    {
+      "geom": "cylinder",
+      "base_parameters": [0.22, 3.2],
+      "scale_variance_range": [0.7, 2.5],
+      "semantic_group": "head",
+      "is_head": true
+    },
+    {
+      "geom": "cone",
+      "base_parameters": [0.28, 0.9],
+      "scale_variance_range": [0.7, 2.0],
+      "semantic_group": "head",
+      "is_head": true
+    },
+    {
+      "geom": "cone",
+      "base_parameters": [0.28, 0.9],
+      "scale_variance_range": [0.7, 2.0],
+      "semantic_group": "head",
+      "is_head": true
+    },
+    {
+      "geom": "cone",
+      "base_parameters": [0.28, 0.9],
+      "scale_variance_range": [0.7, 2.0],
+      "semantic_group": "head",
+      "is_head": true
+    }
+  ],
+  "operations": [
+    {
+      "op": "union_attach",
+      "target": 2,
+      "source": 5,
+      "target_point": [0.5, 0.5, 1.0],
+      "source_point": [0.5, 0.5, 0.0],
+      "rotation": [0, 0, 0],
+      "rotation_variance": [8, 0, 8]
+    },
+    {
+      "op": "union_attach",
+      "target": 3,
+      "source": 6,
+      "target_point": [0.5, 0.5, 1.0],
+      "source_point": [0.5, 0.5, 0.0],
+      "rotation": [0, 0, 0],
+      "rotation_variance": [8, 0, 8]
+    },
+    {
+      "op": "union_attach",
+      "target": 4,
+      "source": 7,
+      "target_point": [0.5, 0.5, 1.0],
+      "source_point": [0.5, 0.5, 0.0],
+      "rotation": [0, 0, 0],
+      "rotation_variance": [8, 0, 8]
+    },
+    {
+      "op": "union_attach",
+      "target": 1,
+      "source": 2,
+      "target_point": [0.55, 0.20, 1.0],
+      "source_point": [0.5, 0.5, 0.0],
+      "rotation": [-78, 0, 0],
+      "rotation_variance": [10, 6, 6]
+    },
+    {
+      "op": "union_attach",
+      "target": 1,
+      "source": 3,
+      "target_point": [0.62, 0.50, 1.0],
+      "source_point": [0.5, 0.5, 0.0],
+      "rotation": [-72, 0, 0],
+      "rotation_variance": [8, 4, 4]
+    },
+    {
+      "op": "union_attach",
+      "target": 1,
+      "source": 4,
+      "target_point": [0.55, 0.80, 1.0],
+      "source_point": [0.5, 0.5, 0.0],
+      "rotation": [-78, 0, 0],
+      "rotation_variance": [10, 6, 6]
+    },
+    {
+      "op": "union_attach",
+      "target": 0,
+      "source": 1,
+      "target_point": [0.5, 0.5, 1.0],
+      "source_point": [0.18, 0.5, 0.0],
+      "rotation": [0, 0, 0],
+      "rotation_variance": [0, 0, 20]
+    }
+  ]
+}
