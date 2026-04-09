@@ -35,7 +35,6 @@ from isaaclab_assets.robots.franka import FRANKA_PANDA_HIGH_PD_CFG, FRANKA_PANDA
 from IsaacLab_nonPrehensile.robots.franka import (
     FRANKA_PANDA_TOOL_HIGH_PD_CFG,
     build_multi_tool_robot_cfg,
-    collect_robot_usd_paths,
 )
 from isaaclab.envs.mdp.actions.actions_cfg import JointPositionActionCfg, RelativeJointPositionActionCfg, JointVelocityActionCfg, JointEffortActionCfg, DifferentialInverseKinematicsActionCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdFileCfg
@@ -141,40 +140,47 @@ def get_cached_cloud(obj_path):
 
 # ---------------------------------------------------------------------------
 # Multi-tool data: each robot USD has a different welded tool. We build a
-# list of per-tool metadata (obj_path, head_area, name) that is indexed
-# at runtime via  env_id % len(TOOL_DATA).
+# list of per-tool metadata (obj_path, head_area, base_center, name) that is
+# indexed at runtime via  env_id % len(TOOL_DATA).
+#
+# Tool selection is driven by tools_selected.json (a list of tool names).
+# All metadata (head_area, base_center) comes from a single tools.json.
 # ---------------------------------------------------------------------------
 TOOL_SCALE: float = float(_PATHS.get("tools", _PATHS.get("tool_mesh", {})).get("scale", 0.1))
 
-# Collect all robot USD paths (deterministic sorted order)
 _TOOLS_CFG = _PATHS["tools"]
-TOOL_USD_PATHS: list[str] = collect_robot_usd_paths(_TOOLS_CFG["robots_usd_dir"])
 
-# Load the tools_adjusted.json (maps tool name → head_area)
-with open(_TOOLS_CFG["tools_json"], "r") as _htf:
-    _tool_head_data = json.load(_htf)
-_tool_head_lookup = {t["name"]: t.get("head_area") for t in _tool_head_data}
+# Load the single metadata file: tools.json (has head_area + base_center)
+with open(_TOOLS_CFG["tools_json"], "r") as _tf:
+    _tool_meta_list = json.load(_tf)
+_tool_meta_lookup = {t["name"]: t for t in _tool_meta_list}
 
-# Load the original tools.json (maps tool name → base_center) for body-frame offset
-_tools_json_path = os.path.join(os.path.dirname(_TOOLS_CFG["tools_json"]), "tools.json")
-with open(_tools_json_path, "r") as _btf:
-    _tool_base_data = json.load(_btf)
-_tool_base_lookup = {t["name"]: t.get("base_center") for t in _tool_base_data}
+# Load the tool selection manifest: a list of tool names to include
+with open(_TOOLS_CFG["tools_selected_json"], "r") as _sf:
+    _selected_tool_names: list[str] = json.load(_sf)
 
-# Build per-tool metadata list, one entry per USD, in the same order as TOOL_USD_PATHS
+# Build per-tool metadata + USD paths, filtered by the manifest
+TOOL_USD_PATHS: list[str] = []
 TOOL_DATA: list[dict] = []
-for _usd_path in TOOL_USD_PATHS:
-    # Extract tool name from USD filename: panda_instanceable_<tool_name>.usd
-    _tool_name = os.path.splitext(os.path.basename(_usd_path))[0].replace("panda_instanceable_", "")
+for _tool_name in _selected_tool_names:
+    _usd_path = os.path.join(_TOOLS_CFG["robots_usd_dir"], f"panda_instanceable_{_tool_name}.usd")
     _obj_path = os.path.join(_TOOLS_CFG["obj_dir"], f"{_tool_name}.obj")
-    _head_area = _tool_head_lookup.get(_tool_name)
-    _base_center = _tool_base_lookup.get(_tool_name)
+
+    if not os.path.isfile(_usd_path):
+        print(f"[WARNING] Robot USD not found for tool '{_tool_name}': {_usd_path}, skipping")
+        continue
+
+    _meta = _tool_meta_lookup.get(_tool_name, {})
+    _head_area = _meta.get("head_area")
+    _base_center = _meta.get("base_center")
     if _head_area is None:
         print(f"[WARNING] head_area not found for tool '{_tool_name}' in {_TOOLS_CFG['tools_json']}")
     if _base_center is None:
-        print(f"[WARNING] base_center not found for tool '{_tool_name}' in {_tools_json_path}")
+        print(f"[WARNING] base_center not found for tool '{_tool_name}' in {_TOOLS_CFG['tools_json']}")
     if not os.path.isfile(_obj_path):
         print(f"[WARNING] OBJ mesh not found for tool '{_tool_name}': {_obj_path}")
+
+    TOOL_USD_PATHS.append(_usd_path)
     TOOL_DATA.append({
         "name": _tool_name,
         "obj_path": _obj_path,
