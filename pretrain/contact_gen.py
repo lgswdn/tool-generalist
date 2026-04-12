@@ -58,10 +58,10 @@ class Config:
     device: str = "cuda:0"
 
     # ----- Optimisation -----
-    opt_steps: int = 80
+    opt_steps: int = 300
     lr: float = 5e-3
     # Loss weights
-    w_pen: float = 800.0            # penetration penalty
+    w_pen: float = 500.0            # penetration penalty
     w_contact: float = 1.0          # attraction loss
     w_floor: float = 20.0           # below-floor penalty
     k_closest: int = 24             # how many closest points for attraction
@@ -737,16 +737,16 @@ def parse_args() -> Config:
                    help="Uniform surface cloud points (all losses)")
     p.add_argument("--contact-mode-prob", type=float, default=0.7,
                    help="Fraction of batch targeting head vs body for init")
-    p.add_argument("--opt-steps", type=int, default=120)
+    p.add_argument("--opt-steps", type=int, default=200)
     p.add_argument("--lr", type=float, default=5e-3)
     p.add_argument("--device", type=str, default="cuda:0")
     # Loss weights
-    p.add_argument("--w-pen", type=float, default=50.0)
+    p.add_argument("--w-pen", type=float, default=100.0)
     p.add_argument("--w-contact", type=float, default=1.0)
     p.add_argument("--w-floor", type=float, default=20.0)
-    p.add_argument("--k-closest", type=int, default=32)
+    p.add_argument("--k-closest", type=int, default=24)
     # Thresholds
-    p.add_argument("--pen-eps", type=float, default=1e-3)
+    p.add_argument("--pen-eps", type=float, default=3e-4)
     p.add_argument("--contact-eps", type=float, default=5e-3)
 
     args = p.parse_args()

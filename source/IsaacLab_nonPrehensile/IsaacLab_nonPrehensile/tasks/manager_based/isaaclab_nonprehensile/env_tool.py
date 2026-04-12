@@ -490,7 +490,7 @@ class RewardsCfg:
         params={
             "std": 0.15,
         },
-        weight=0.8,
+        weight=0.6,
     )
 
     object_goal_tracking = RewTerm(
@@ -557,7 +557,7 @@ class NonPrehensileEnvCfg(ManagerBasedRLEnvCfg):
     # Visualization settings
     visualize_current_object_pose: bool = True  # Enable current object pose visualization
     visualize_object_pointcloud: bool = False  # Enable object point cloud visualization for debug in first env
-    visualize_tool_pointcloud: bool = False  # Enable tool point cloud visualization (blue spheres) in first env
+    visualize_tool_pointcloud: bool = True # Enable tool point cloud visualization (blue spheres) in first env
     visualize_eef_position: bool = False  # Enable eef tool position visualization
     visualize_object_velocity_mass: bool = False  # Enable 7D object velocity & mass visualization
     visualize_tool_velocity_mass: bool = False  # Enable 7D tool velocity & mass visualization

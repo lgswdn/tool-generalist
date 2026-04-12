@@ -251,19 +251,26 @@ def main():
         api_key = os.getenv("OPENAI_API_KEY")
         client = OpenAI(
             api_key=api_key,
-            base_url="http://43.106.115.130:8080/v1",
+            base_url="http://43.106.115.130:8080",
             http_client=httpx.Client(trust_env=False)
         )
-        response_j = client.responses.create(
+        
+        chunks = []
+        with client.responses.stream(
             model="gpt-5.4",
-            input=[
-                {"role": "user", "content": prompt}
-            ]
-        )
-        if isinstance(response_j, str):
-            response = response_j
-        else:
-            response = response_j.output_text
+            input=[{"role": "user", "content": prompt}],
+            reasoning={"effort": "medium"}
+        ) as stream:
+            for event in stream:
+                if getattr(event, "type", None) == "response.output_text.delta":
+                    chunks.append(event.delta)
+                    print(event.delta, end="", flush=True)
+
+            final_response = stream.get_final_response()
+
+        print("\n--- done ---")
+        print("joined_text:", "".join(chunks))
+        response = "".join(chunks)
 
     # Save response
     response_file = os.path.join(log_dir, 'claude_response.txt')

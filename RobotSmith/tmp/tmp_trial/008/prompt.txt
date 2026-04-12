@@ -1,0 +1,165 @@
+You have to design a complex robotic arm end effector that looks like a a small garbage collector, using no less than 4 pieces of primitives.
+
+You have 1 API to generate 3D meshes:
+
+    def primitive(primitive_name, primitive_scale, contact_point=None)
+        """
+        Create a 3D primitive mesh, centered at the origin with NO rotation.
+        Args:
+            primitive_name (str): One of {'cube', 'ball', 'cylinder', 'cone', 'bowl', 'arc'}.
+            primitive_scale (list of float):
+                - If cube, [sx, sy, sz]
+                - If ball, [radius]
+                - If cylinder, [radius, height] (height along Z-axis)
+                - If cone, [radius, height] (height along Z-axis, tip at +Z)
+                - If bowl, [width, depth, thickness]
+                  (width = opening diameter, depth = cavity depth, thickness = wall thickness.
+                   The bowl opening faces +Z (upward), convex bottom faces -Z (downward).
+                   The bowl is centered at the origin. It creates a watertight curved surface
+                   like a bowl, spoon head, or scoop. To make a spoon, attach the bowl to a
+                   handle and rotate it so the opening faces the desired direction.)
+                 - If arc, [curvature_radius, cross_section_width, cross_section_height, arc_angle]
+                   (curvature_radius = radius of the arc centerline path,
+                    cross_section_width = thickness of the bar in the radial direction,
+                    cross_section_height = thickness of the bar perpendicular to the arc plane (Y direction by default),
+                    arc_angle = sweep angle in degrees.
+                    DEFAULT orientation (no arc_plane field): the arc body TRAVELS in the +X direction
+                    at its start, then curves downward so after 90deg it is going in -Z:
+                      Start arm at z_max (+Z face of bbox). Outer curve at x_max (+X face). End arm at z_min.
+                    CUSTOM orientation: use the optional `arc_plane` field to freely choose which
+                    direction the arc TRAVELS at its start and after 90 degrees of sweep.)
+            contact_point (str or None): Optional contact point in LOCAL coordinates.
+                - 'front-bottom-left': (max_x, min_y, min_z)
+                - 'front-bottom-right': (max_x, max_y, min_z)
+                - 'front-top-left': (max_x, min_y, max_z)
+                - 'front-top-right': (max_x, max_y, max_z)
+                - 'max': (max_x, max_y, max_z)
+                - 'min': (min_x, min_y, min_z)
+        Returns:
+            VoxelObject: The resulting voxel object with optional tracked contact point.
+        """
+
+You have APIs for 3D attachment operations:
+
+    def union_attach(obj_target, obj_source, target_point, source_point, rotation, rotation_variance):
+        """
+        Attach source object to target object via union operation.
+        Args:
+            obj_target: VoxelObject - the target object (base or accumulated result)
+            obj_source: VoxelObject - the source object to attach
+            target_point: [pa, qa, ra] - normalized coordinates [0,1] on target bounding box
+                IMPORTANT: This refers to the bounding box of the ORIGINAL target primitive,
+                NOT the accumulated result after previous operations.
+            source_point: [pb, qb, rb] - normalized coordinates [0,1] on source bounding box
+                IMPORTANT: This refers to the bounding box of the ORIGINAL source primitive.
+            rotation: [rx, ry, rz] - euler angles in degrees. IMPORTANT: Rotations are applied using the `source_point` as the pivot/hinge.
+            rotation_variance: [vx, vy, vz] - variance in degrees for each axis
+        Returns:
+            VoxelObject: The combined object
+        """
+
+    def subtract_attach(obj_target, obj_source, target_point, source_point, rotation, rotation_variance):
+        """
+        Attach and subtract source object from target object.
+        Args: Same as union_attach
+        Returns:
+            VoxelObject: The target object with source subtracted
+        """
+
+To describe a generated tool, you will use a json format. Here is an example:
+```json
+{
+    "name": "tool_name",
+    "parts": [
+        {
+            "geom": "cylinder",
+            "base_parameters": [1.0, 3.0],
+            "scale_variance_range": [0.8, 1.2],
+            "semantic_group": "handle",
+            "is_head": false,
+            "purpose": "main handle grip for robot attachment"
+        },
+        {
+            "geom": "cube",
+            "base_parameters": [2.0, 2.0, 0.5],
+            "scale_variance_range": [0.7, 1.5],
+            "semantic_group": "head",
+            "is_head": true,
+            "purpose": "flat blade for scraping"
+        },
+        {
+            "geom": "arc",
+            "base_parameters": [2.0, 0.3, 0.3, 180],
+            "arc_plane": "+Z+X",
+            "scale_variance_range": [0.7, 1.5],
+            "semantic_group": "head",
+            "is_head": true,
+            "purpose": "curved hook arm starting at +Z sweeping toward +X (default XZ plane)"
+        }
+    ],
+    "operations": [
+        {
+            "op": "union_attach",
+            "target": 0,
+            "source": 1,
+            "target_point": [0.5, 0.5, 1.0],
+            "source_point": [0.5, 0.5, 0.0],
+            "rotation": [0, 0, 0],
+            "rotation_variance": [0, 0, 30]
+        }
+    ]
+}
+
+You should make sure:
+
+Part index 0 is ALWAYS the base primitive (handle/grip). It should be a cylinder or similar shape oriented along Z-axis.
+
+Any part can be a target, allowing for complex tree structures, but Index 0 must remain the root.
+
+All primitives are created with NO rotation initially. Rotation happens during attach operations.
+
+ROTATION GUIDANCE: The rotation in union_attach rotates the SOURCE part around its attachment point BEFORE placing it on the target. Think carefully about rotations:
+  - Every primitive has a DEFAULT functional orientation:
+      * Cylinders/cones: axis along Z (tip at +Z for cones)
+      * Bowls: opening faces UP (+Z), convex bottom faces DOWN (-Z)
+      * Cubes: faces aligned with X, Y, Z axes
+      * Arcs (default, no arc_plane): body travels in +X at start, then -Z after 90deg sweep.
+        Start arm is at the +Z face of bbox (z_max). Outer curve is at +X face (x_max).
+  - ARC PLANE: Use the optional `arc_plane` field to freely choose the arc's travel direction.
+    Format: two signed-axis tokens. Token 1 = direction arc BODY TRAVELS at start (alpha=0).
+    Token 2 = direction arc travels after 90 degrees of sweep.
+    Common presets (for 180-degree arc):
+      | arc_plane | Travels at start | After 90deg | Start arm face | Outer curve face |
+      |-----------|------------------|-------------|----------------|------------------|
+      | (omit)    | +X               | -Z          | z_max (top)    | x_max (right)    |  <- default
+      | "+X-Z"   | +X               | -Z          | z_max (top)    | x_max (right)    |  <- same as default
+      | "+Z+X"   | +Z (up)          | +X          | x_min (left)   | z_max (top)      |
+      | "+Z-X"   | +Z (up)          | -X          | x_max (right)  | z_max (top)      |
+      | "-Z+X"   | -Z (down)        | +X          | x_min (left)   | z_min (bottom)   |
+      | "+X+Z"   | +X               | +Z          | z_min (bottom) | x_max (right)    |
+
+Coordinate System: The Z-axis is height (up/down). The X-axis represents depth (front/back, where max_x is front). The Y-axis represents width (left/right, where min_y is left).
+
+IMPORTANT: Order operations from leaf to root. If you have a tree structure (e.g., base-0 connects to part-1, part-1 connects to part-2), define operations as: first attach 2 to 1, then attach 1 to 0. This is because target bounding boxes refer to original primitives. For instance, if having handle-neck-finger, never union head to handle. Instead, union head to neck before union neck to handle.
+
+Use normalized coordinates [0,1] for attachment points: [0,0,0] is min corner, [1,1,1] is max corner, [0.5,0.5,0.5] is center.
+
+For union_attach: typically attach source bottom to target top, e.g., target_point=[0.5,0.5,1.0], source_point=[0.5,0.5,0.0]
+
+For subtract_attach: ensure both objects are in the same semantic_group for proper scaling.
+
+Use is_head=true to mark ALL primitives that form the tool's working/functional parts. This includes the entire working end, not just the tips. For example, in a hand: mark all fingers, thumb, and palm as head.
+
+Include a "purpose" field for each part describing its functional role (e.g., "curved hook tip for pulling", "flat blade for pushing"). This helps document the design intent.
+
+scale_variance_range should be AGGRESSIVE (e.g., [0.5, 3.0]) to create diverse variations.
+
+rotation_variance creates diversity - use values like [0,0,30] for 30° variance around Z-axis.
+
+The whole object should be smaller than 20^3 units.
+
+After scaling, minimum dimension must be >= 0.1 units.
+
+Make sure that the base object is always the bottom object and never has anything below it! That is, the base object should ALWAYS be the lowest object in the bounding box. This is because, the base object act as a link between the tool and the arm, thus the whole object will be upside down when assembled on the arm.
+
+At least one primitive must have is_head=true to define the working end of the tool.

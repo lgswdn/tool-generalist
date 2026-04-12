@@ -1,0 +1,102 @@
+```json
+{
+  "name": "mini_garbage_collector_end_effector",
+  "parts": [
+    {
+      "geom": "cylinder",
+      "base_parameters": [0.7, 4.0],
+      "scale_variance_range": [0.6, 1.8],
+      "semantic_group": "handle",
+      "is_head": false,
+      "purpose": "main robotic mounting handle and structural root, kept as the lowest part"
+    },
+    {
+      "geom": "cube",
+      "base_parameters": [1.0, 1.0, 1.2],
+      "scale_variance_range": [0.6, 1.8],
+      "semantic_group": "neck",
+      "is_head": false,
+      "purpose": "transition block between the vertical handle and the garbage collecting scoop"
+    },
+    {
+      "geom": "bowl",
+      "base_parameters": [4.2, 1.6, 0.22],
+      "scale_variance_range": [0.7, 1.9],
+      "semantic_group": "head",
+      "is_head": true,
+      "purpose": "main scoop body that acts like a tiny dustpan for collecting debris"
+    },
+    {
+      "geom": "cube",
+      "base_parameters": [2.8, 0.28, 0.9],
+      "scale_variance_range": [0.6, 2.0],
+      "semantic_group": "head",
+      "is_head": true,
+      "purpose": "left retaining wall to keep collected trash from spilling sideways"
+    },
+    {
+      "geom": "cube",
+      "base_parameters": [2.8, 0.28, 0.9],
+      "scale_variance_range": [0.6, 2.0],
+      "semantic_group": "head",
+      "is_head": true,
+      "purpose": "right retaining wall to keep collected trash from spilling sideways"
+    },
+    {
+      "geom": "cube",
+      "base_parameters": [1.2, 4.0, 0.18],
+      "scale_variance_range": [0.6, 1.8],
+      "semantic_group": "head",
+      "is_head": true,
+      "purpose": "thin front scraping lip to help slide under small garbage and sweep it into the scoop"
+    }
+  ],
+  "operations": [
+    {
+      "op": "union_attach",
+      "target": 2,
+      "source": 3,
+      "target_point": [0.58, 0.12, 0.72],
+      "source_point": [0.5, 0.5, 0.0],
+      "rotation": [0, 0, 0],
+      "rotation_variance": [0, 0, 8]
+    },
+    {
+      "op": "union_attach",
+      "target": 2,
+      "source": 4,
+      "target_point": [0.58, 0.88, 0.72],
+      "source_point": [0.5, 0.5, 0.0],
+      "rotation": [0, 0, 0],
+      "rotation_variance": [0, 0, 8]
+    },
+    {
+      "op": "union_attach",
+      "target": 2,
+      "source": 5,
+      "target_point": [0.96, 0.5, 0.58],
+      "source_point": [0.0, 0.5, 0.5],
+      "rotation": [0, 12, 0],
+      "rotation_variance": [0, 8, 5]
+    },
+    {
+      "op": "union_attach",
+      "target": 1,
+      "source": 2,
+      "target_point": [0.5, 0.5, 1.0],
+      "source_point": [0.28, 0.5, 0.08],
+      "rotation": [-18, 0, 0],
+      "rotation_variance": [8, 0, 10]
+    },
+    {
+      "op": "union_attach",
+      "target": 0,
+      "source": 1,
+      "target_point": [0.5, 0.5, 1.0],
+      "source_point": [0.5, 0.5, 0.0],
+      "rotation": [0, 0, 0],
+      "rotation_variance": [0, 0, 12]
+    }
+  ]
+}
+```
