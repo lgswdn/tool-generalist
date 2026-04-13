@@ -741,12 +741,12 @@ def parse_args() -> Config:
     p.add_argument("--lr", type=float, default=5e-3)
     p.add_argument("--device", type=str, default="cuda:0")
     # Loss weights
-    p.add_argument("--w-pen", type=float, default=100.0)
+    p.add_argument("--w-pen", type=float, default=300.0)
     p.add_argument("--w-contact", type=float, default=1.0)
     p.add_argument("--w-floor", type=float, default=20.0)
-    p.add_argument("--k-closest", type=int, default=24)
+    p.add_argument("--k-closest", type=int, default=20)
     # Thresholds
-    p.add_argument("--pen-eps", type=float, default=3e-4)
+    p.add_argument("--pen-eps", type=float, default=1e-4)
     p.add_argument("--contact-eps", type=float, default=5e-3)
 
     args = p.parse_args()

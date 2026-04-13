@@ -17,7 +17,7 @@ python contact_gen.py \
     --object /mnt/afs/zhuwenxuan/DGN/coacd_normalized/core-pistol-5a2bb05af1dedd91e641b9ab504917bf.obj \
     --tool /mnt/afs/zhuwenxuan/project/inp/tool-generalist/RobotSmith/eef/normalized_models/006_claw_gripper_end_effector_var_001.obj \
     --tools-json /mnt/afs/zhuwenxuan/project/inp/tool-generalist/RobotSmith/eef/tools_adjusted.json \
-    --device cuda:4 \
+    --device cuda:0 \
     --save-init init.pt
 ```
 
@@ -100,3 +100,55 @@ Output `.pt` file contains:
 | `--w-pen` | `50` | Penetration loss weight |
 | `--w-contact` | `1` | Contact (attraction) loss weight |
 | `--w-floor` | `20` | Floor penalty weight |
+
+---
+
+## Export to OBJ (Debug)
+
+`export_contacts_obj.py` merges the object + tool poses into a single `.obj` (+ `.mtl`) file,
+viewable in MeshLab, Blender, VS Code .obj preview, or any 3D viewer.
+
+```bash
+# Default: writes <input_stem>_scene.obj next to the .pt file
+python export_contacts_obj.py --input contact_configs.pt --num-tools 8
+
+# Custom output path
+python export_contacts_obj.py --input contact_configs.pt --num-tools 4 -o debug_scene.obj
+```
+
+---
+
+## Isaac Sim Gallery Viewer
+
+`view_contacts_isaac.py` spawns batch-generated contact configs in a tiled Isaac Sim
+stage for visual inspection. Each `.pt` file gets its own grid cell.
+
+Must be run inside the Isaac Lab Python environment:
+
+```bash
+# Interactive viewport — view multiple config files
+isaaclab -p pretrain/view_contacts_isaac.py \
+    --inputs results/config_001.pt results/config_002.pt results/config_003.pt \
+    --num-tools-per-cell 4 \
+    --spacing 3.0
+
+# Glob all .pt files from a directory
+isaaclab -p pretrain/view_contacts_isaac.py \
+    --input-dir results/ \
+    --num-tools-per-cell 4
+
+# Headless screenshot
+isaaclab -p pretrain/view_contacts_isaac.py \
+    --inputs results/*.pt \
+    --save gallery.png
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--inputs` | `[]` | One or more `.pt` files to visualise |
+| `--input-dir` | `""` | Directory to glob for `*.pt` files |
+| `--num-tools-per-cell` | `4` | Max tool poses per grid cell |
+| `--spacing` | `3.0` | Grid cell spacing in metres |
+| `--cols` | `0` | Grid columns (0 = auto √N) |
+| `--save` | `""` | Screenshot output path (enables headless) |
+| `--settle-steps` | `20` | Render steps before screenshot |
