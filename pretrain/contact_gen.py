@@ -61,13 +61,13 @@ class Config:
     opt_steps: int = 300
     lr: float = 5e-3
     # Loss weights
-    w_pen: float = 500.0            # penetration penalty
+    w_pen: float = 10.0             # penetration penalty
     w_contact: float = 1.0          # attraction loss
     w_floor: float = 20.0           # below-floor penalty
-    k_closest: int = 24             # how many closest points for attraction
+    k_closest: int = 8              # how many closest points for attraction
 
     # ----- Convergence thresholds -----
-    pen_eps: float = 1e-4           # max allowed penetration loss
+    pen_max_eps: float = 1e-3       # max allowed single-point penetration depth
     contact_eps: float = 3e-3        # max avg distance for "in contact"
 
 
@@ -461,7 +461,6 @@ def compute_losses(
 
     L_pen:     penalises points INSIDE the object.
     L_contact: attracts the K-closest OUTSIDE points toward the surface.
-               Inside points get 0 contact loss (handled by L_pen).
     L_floor:   penalises points below z=0.
     """
     B, P, _ = pts_world.shape
@@ -469,15 +468,28 @@ def compute_losses(
     dist = compute_unsigned_distance(pts_world, obj_verts, obj_faces)  # (B, P)
     inside = compute_sign(pts_world, obj_verts, obj_faces)             # (B, P)
 
-    # ====== L_pen ======
+    # ====== L_pen (Top-K worst penetrators) ======
+    # Hard max only provides gradient through 1 point per sample, causing
+    # Adam to plateau when cycling between worst-offenders.  Averaging the
+    # K_pen deepest penetrating points routes gradients through multiple
+    # near-worst points simultaneously while avoiding the zero-bias floor
+    # that LogSumExp suffers from (≈ log(N)/α even at zero penetration).
     pen_dist = torch.where(inside, dist, torch.zeros_like(dist))
-    L_pen_per_sample = pen_dist.mean(dim=1)
-    L_pen = L_pen_per_sample.mean()
+    K_pen = min(8, P)
+    topk_pen, _ = torch.topk(pen_dist, K_pen, dim=1, largest=True)
+    L_pen = topk_pen.mean()
+    # Keep hard max for filtering (no gradient needed)
+    L_pen_max_per_sample = pen_dist.max(dim=1).values
 
-    # ====== L_contact (outside-only) ======
-    outside_dist = torch.where(~inside, dist, torch.zeros_like(dist))
+    # ====== L_contact (Inf-Masked Attraction) ======
+    # Mask inside points with +inf so topk(largest=False) ignores them.
+    # Without this, zeroed inside-point distances get selected first by TopK,
+    # reporting fake-perfect contact and killing the attraction gradient.
+    masked_dist = torch.where(~inside, dist, torch.full_like(dist, float("inf")))
     K = min(cfg.k_closest, P)
-    topk_dist, _ = torch.topk(outside_dist, K, dim=1, largest=False)
+    topk_dist, _ = torch.topk(masked_dist, K, dim=1, largest=False)
+    # Clamp surviving infs to 0 (when fewer than K points are outside)
+    topk_dist = torch.where(topk_dist.isinf(), torch.zeros_like(topk_dist), topk_dist)
     L_contact_per_sample = topk_dist.mean(dim=1)
     L_contact = L_contact_per_sample.mean()
 
@@ -499,7 +511,7 @@ def compute_losses(
         "pen": L_pen,
         "contact": L_contact,
         "floor": L_floor,
-        "pen_ps": L_pen_per_sample.detach(),
+        "pen_max_ps": L_pen_max_per_sample.detach(),
         "contact_ps": L_contact_per_sample.detach(),
     }
 
@@ -556,6 +568,9 @@ def optimise(
     trans_opt = trans.clone().detach().requires_grad_(True)
     rot6d_opt = rot6d.clone().detach().requires_grad_(True)
     optimiser = torch.optim.Adam([trans_opt, rot6d_opt], lr=cfg.lr)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimiser, T_max=cfg.opt_steps, eta_min=cfg.lr * 0.01
+    )
 
     for step in range(cfg.opt_steps):
         optimiser.zero_grad()
@@ -564,6 +579,7 @@ def optimise(
         losses = compute_losses(pts_world, obj_verts, obj_faces, R, cfg)
         losses["total"].backward()
         optimiser.step()
+        scheduler.step()
         _log_step(step, losses)
 
     with torch.no_grad():
@@ -575,6 +591,179 @@ def optimise(
 
 
 # ==============================================================================
+#                     CONTACT INFO EXTRACTION
+# ==============================================================================
+
+@torch.no_grad()
+def compute_contact_info(
+    P_uniform: torch.Tensor,   # (P, 3)  canonical tool cloud
+    trans: torch.Tensor,       # (N, 3)  tool translations (valid subset)
+    rot6d: torch.Tensor,       # (N, 6)  tool rotations   (valid subset)
+    obj_verts: torch.Tensor,   # (V, 3)
+    obj_faces: torch.Tensor,   # (F, 3)
+    cfg: Config,
+    n_contact: int = 5,
+    sdf_threshold: float = 5e-3,
+) -> dict:
+    """Sample contact points from tool surface points with SDF < sdf_threshold.
+
+    For each converged configuration:
+      1. Transforms the full tool surface cloud to world frame.
+      2. Computes unsigned SDF (distance to object surface) for all exterior points.
+      3. Keeps only points where SDF < sdf_threshold  (the contact band).
+      4. Randomly samples n_contact points from that band; if fewer than n_contact
+         points pass the threshold, all passing points are used and the rest are
+         filled by the closest exterior point (repeated) to keep a fixed shape.
+      5. For each kept point, looks up the nearest object face and returns its
+         outward unit normal.
+
+    Args:
+        n_contact:     number of contact points per config to keep (default 5).
+        sdf_threshold: max distance to object surface to be considered in contact
+                       (default 5e-3, same scale as contact_eps).
+
+    Returns dict with keys:
+        contact_pts_obj_frame  : (N, n_contact, 3)  – points in object frame
+        contact_pts_tool_frame : (N, n_contact, 3)  – same points in tool frame
+        contact_normals        : (N, n_contact, 3)  – outward face normals
+        contact_sdfs           : (N, n_contact)     – SDF (distance) at each point
+    """
+    N = trans.shape[0]
+    P = P_uniform.shape[0]
+    device = cfg.device
+
+    # ---- 1. Transform tool cloud to world frame ----
+    R = rot6d_to_matrix(rot6d)                                              # (N, 3, 3)
+    pts_world = torch.einsum("pi, bji -> bpj", P_uniform, R) + trans.unsqueeze(1)  # (N, P, 3)
+
+    # ---- 2. SDF: unsigned distance, masked to exterior only ----
+    dist   = compute_unsigned_distance(pts_world, obj_verts, obj_faces)  # (N, P)
+    inside = compute_sign(pts_world, obj_verts, obj_faces)               # (N, P) bool
+    # Inside points get inf so they are never selected
+    sdf = torch.where(~inside, dist, torch.full_like(dist, float("inf")))  # (N, P)
+
+    # ---- 3 & 4. Per-config: sample n_contact from sdf < threshold ----
+    sel_pts_world = torch.zeros(N, n_contact, 3, device=device)
+    sel_sdf       = torch.zeros(N, n_contact,    device=device)
+
+    for b in range(N):
+        sdf_b     = sdf[b]                         # (P,)
+        in_band   = (sdf_b < sdf_threshold).nonzero(as_tuple=False).squeeze(1)  # (M,)
+
+        if in_band.numel() == 0:
+            # Fallback: use the single closest exterior point, repeated
+            closest = sdf_b.argmin().unsqueeze(0).expand(n_contact)
+            sel_pts_world[b] = pts_world[b][closest]
+            sel_sdf[b]       = sdf_b[closest]
+        elif in_band.numel() <= n_contact:
+            # Fewer candidates than requested – use all, pad with closest
+            chosen = in_band
+            pad    = in_band[0:1].expand(n_contact - in_band.numel())
+            chosen = torch.cat([chosen, pad], dim=0)
+            sel_pts_world[b] = pts_world[b][chosen]
+            sel_sdf[b]       = sdf_b[chosen]
+        else:
+            # Random subsample without replacement
+            perm   = torch.randperm(in_band.numel(), device=device)[:n_contact]
+            chosen = in_band[perm]
+            sel_pts_world[b] = pts_world[b][chosen]
+            sel_sdf[b]       = sdf_b[chosen]
+
+    # ---- 5a. Map back to tool canonical frame: p_tool = R^T @ (p_world - t) ----
+    p_centered       = sel_pts_world - trans.unsqueeze(1)          # (N, n_contact, 3)
+    R_T              = R.permute(0, 2, 1)                          # (N, 3, 3)
+    sel_pts_tool     = torch.einsum("bij, bkj -> bki", R_T, p_centered)  # (N, n_contact, 3)
+
+    # ---- 5b. Nearest object face & outward face normal ----
+    face_verts = kaolin.ops.mesh.index_vertices_by_faces(
+        obj_verts.unsqueeze(0), obj_faces
+    ).expand(N, -1, -1, -1)   # (N, F, 3, 3)
+
+    _sq_dist, face_idx, _dist_type = kaolin.metrics.trianglemesh.point_to_mesh_distance(
+        sel_pts_world.contiguous(), face_verts
+    )  # face_idx: (N, n_contact)
+
+    v0 = obj_verts[obj_faces[:, 0]]
+    v1 = obj_verts[obj_faces[:, 1]]
+    v2 = obj_verts[obj_faces[:, 2]]
+    face_normals = F.normalize(torch.cross(v1 - v0, v2 - v0, dim=-1), dim=-1)  # (F, 3)
+    contact_normals = face_normals[face_idx]   # (N, n_contact, 3)
+
+    return {
+        "contact_pts_obj_frame":  sel_pts_world.cpu(),   # (N, n_contact, 3)
+        "contact_pts_tool_frame": sel_pts_tool.cpu(),    # (N, n_contact, 3)
+        "contact_normals":        contact_normals.cpu(), # (N, n_contact, 3)
+    }
+
+
+@torch.no_grad()
+def compute_tool_surface_sdf(
+    P_uniform: torch.Tensor,          # (P, 3)  canonical tool cloud
+    trans: torch.Tensor,              # (N, 3)  tool translations (valid subset)
+    rot6d: torch.Tensor,              # (N, 6)  tool rotations   (valid subset)
+    obj_verts: torch.Tensor,          # (V, 3)
+    obj_faces: torch.Tensor,          # (F, 3)
+    near_contact_threshold: float = 3e-2,
+    max_pts: int = 64,
+) -> dict:
+    """Sample tool surface points in a near-contact band and record their SDF.
+
+    Separate from the sparse contact_info (5 pts + normals).  Captures exterior
+    tool surface points within a wider 'near-contact' radius of the object,
+    giving richer proximity information per config.
+
+    Args:
+        near_contact_threshold: exterior points with SDF < this value are
+            included (should be larger than sdf_threshold in compute_contact_info,
+            e.g. 3e-2 vs 5e-3).
+        max_pts: max points to randomly sample per config (default 64).
+
+    Returns dict with keys:
+        near_contact_pts       : (N, max_pts, 3)  – canonical tool frame positions
+        near_contact_sdf       : (N, max_pts)     – unsigned SDF at each point
+        near_contact_threshold : float            – threshold used (for reference)
+    """
+    N = trans.shape[0]
+    device = trans.device
+
+    R = rot6d_to_matrix(rot6d)
+    pts_world = torch.einsum("pi, bji -> bpj", P_uniform, R) + trans.unsqueeze(1)  # (N, P, 3)
+
+    dist   = compute_unsigned_distance(pts_world, obj_verts, obj_faces)   # (N, P)
+    inside = compute_sign(pts_world, obj_verts, obj_faces)                # (N, P) bool
+
+    # Mask interior points with inf so they are never selected
+    sdf = torch.where(~inside, dist, torch.full_like(dist, float("inf")))  # (N, P)
+
+    sel_pts = torch.zeros(N, max_pts, 3, device=device)
+    sel_sdf = torch.zeros(N, max_pts,    device=device)
+
+    for b in range(N):
+        sdf_b   = sdf[b]
+        in_band = (sdf_b < near_contact_threshold).nonzero(as_tuple=False).squeeze(1)
+
+        if in_band.numel() == 0:
+            # Fallback: repeat the closest exterior point
+            closest = sdf_b.argmin().unsqueeze(0).expand(max_pts)
+            chosen  = closest
+        elif in_band.numel() <= max_pts:
+            pad    = in_band[0:1].expand(max_pts - in_band.numel())
+            chosen = torch.cat([in_band, pad], dim=0)
+        else:
+            perm   = torch.randperm(in_band.numel(), device=device)[:max_pts]
+            chosen = in_band[perm]
+
+        sel_pts[b] = P_uniform[chosen]   # canonical frame — pose-invariant
+        sel_sdf[b] = sdf_b[chosen]
+
+    return {
+        "near_contact_pts":       sel_pts.cpu(),
+        "near_contact_sdf":       sel_sdf.cpu(),
+        "near_contact_threshold": near_contact_threshold,
+    }
+
+
+# ==============================================================================
 #                          FILTERING & SAVING
 # ==============================================================================
 
@@ -583,25 +772,37 @@ def filter_and_save(
     rot6d: torch.Tensor,
     R_obj: torch.Tensor,
     obj_verts: torch.Tensor,
+    obj_faces: torch.Tensor,
+    P_uniform: torch.Tensor,
     losses: dict,
     cfg: Config,
 ) -> int:
     """Keep only converged configurations and save to disk.
 
     Convergence criteria:
-      • per-sample penetration loss  < pen_eps
-      • per-sample contact loss      < contact_eps
+      • per-sample MAX penetration depth  < pen_max_eps
+      • per-sample contact loss           < contact_eps
+
+    The saved .pt file includes, per valid config:
+      - tool_translations / tool_rotations  : rigid pose
+      - pen_loss / contact_loss             : per-sample loss scalars
+      - contact_pts_obj_frame  (N, C, 3)   : C contact points in object frame
+      - contact_pts_tool_frame (N, C, 3)   : same C points in canonical tool frame
+      - contact_normals        (N, C, 3)   : outward unit normal of nearest object face
+      - near_contact_pts       (N, M, 3)   : up to 64 near-contact tool pts (canonical frame)
+      - near_contact_sdf       (N, M)      : unsigned SDF for each near-contact point
+      - near_contact_threshold : float     : threshold used for near-contact sampling
 
     Returns:
         n_saved: int
     """
-    pen_ok = losses["pen_ps"] < cfg.pen_eps
+    pen_ok = losses["pen_max_ps"] < cfg.pen_max_eps
     contact_ok = losses["contact_ps"] < cfg.contact_eps
     valid = pen_ok & contact_ok
     n_valid = valid.sum().item()
 
     print(f"\n✓ Converged: {n_valid} / {cfg.batch_size}")
-    print(f"  Penetration pass: {pen_ok.sum().item()}")
+    print(f"  Penetration pass (max < {cfg.pen_max_eps}): {pen_ok.sum().item()}")
     print(f"  Contact pass:     {contact_ok.sum().item()}")
 
     if n_valid == 0:
@@ -611,6 +812,22 @@ def filter_and_save(
     # Reconstruct rotation matrices
     R_tool = rot6d_to_matrix(rot6d[valid])
 
+    # ---- Compute contact info (5 pts + normals) ----
+    print("  Computing contact info …")
+    contact_info = compute_contact_info(
+        P_uniform, trans[valid], rot6d[valid], obj_verts, obj_faces, cfg,
+    )
+    C = contact_info["contact_pts_obj_frame"].shape[1]
+    print(f"  Contact info: {C} pts/config (with face normals)")
+
+    # ---- Compute dense tool surface SDF ----
+    print("  Computing tool surface SDF …")
+    sdf_info = compute_tool_surface_sdf(
+        P_uniform, trans[valid], rot6d[valid], obj_verts, obj_faces,
+    )
+    M = sdf_info["near_contact_pts"].shape[1]
+    print(f"  Near-contact SDF: up to {M} pts/config (threshold={sdf_info['near_contact_threshold']:.1e})")
+
     result = {
         "object_mesh_path": str(Path(cfg.object_mesh_path).resolve()),
         "tool_mesh_path": str(Path(cfg.tool_mesh_path).resolve()),
@@ -618,8 +835,16 @@ def filter_and_save(
         "object_vertices_grounded": obj_verts.cpu(),
         "tool_translations": trans[valid].cpu(),
         "tool_rotations": R_tool.cpu(),
-        "pen_loss": losses["pen_ps"][valid].cpu(),
+        "pen_loss": losses["pen_max_ps"][valid].cpu(),
         "contact_loss": losses["contact_ps"][valid].cpu(),
+        # ---- Contact metadata (sparse: 5 pts + normals) ----
+        "contact_pts_obj_frame":  contact_info["contact_pts_obj_frame"],   # (N, C, 3)
+        "contact_pts_tool_frame": contact_info["contact_pts_tool_frame"],  # (N, C, 3)
+        "contact_normals":        contact_info["contact_normals"],         # (N, C, 3)
+        # ---- Near-contact SDF (wider band, canonical frame) ----
+        "near_contact_pts":       sdf_info["near_contact_pts"],       # (N, M, 3)
+        "near_contact_sdf":       sdf_info["near_contact_sdf"],       # (N, M)
+        "near_contact_threshold": sdf_info["near_contact_threshold"],  # float
     }
 
     os.makedirs(os.path.dirname(cfg.output_path) or ".", exist_ok=True)
@@ -712,7 +937,7 @@ def main(cfg: Config) -> None:
 
     # ---- 8. Filter & save ----
     n_saved = filter_and_save(
-        trans_opt, rot6d_opt, R_obj, obj_verts, final_losses, cfg,
+        trans_opt, rot6d_opt, R_obj, obj_verts, obj_faces, P_uniform, final_losses, cfg,
     )
     print(f"\nDone.  {n_saved} valid contact configurations saved.")
 
@@ -737,17 +962,17 @@ def parse_args() -> Config:
                    help="Uniform surface cloud points (all losses)")
     p.add_argument("--contact-mode-prob", type=float, default=0.7,
                    help="Fraction of batch targeting head vs body for init")
-    p.add_argument("--opt-steps", type=int, default=200)
+    p.add_argument("--opt-steps", type=int, default=300)
     p.add_argument("--lr", type=float, default=5e-3)
     p.add_argument("--device", type=str, default="cuda:0")
     # Loss weights
-    p.add_argument("--w-pen", type=float, default=300.0)
+    p.add_argument("--w-pen", type=float, default=30.0)
     p.add_argument("--w-contact", type=float, default=1.0)
     p.add_argument("--w-floor", type=float, default=20.0)
-    p.add_argument("--k-closest", type=int, default=20)
     # Thresholds
-    p.add_argument("--pen-eps", type=float, default=1e-4)
-    p.add_argument("--contact-eps", type=float, default=5e-3)
+
+    p.add_argument("--pen-max-eps", type=float, default=3e-4)
+    p.add_argument("--contact-eps", type=float, default=8e-3)
 
     args = p.parse_args()
     return Config(
@@ -765,8 +990,8 @@ def parse_args() -> Config:
         w_pen=args.w_pen,
         w_contact=args.w_contact,
         w_floor=args.w_floor,
-        k_closest=args.k_closest,
-        pen_eps=args.pen_eps,
+
+        pen_max_eps=args.pen_max_eps,
         contact_eps=args.contact_eps,
     )
 

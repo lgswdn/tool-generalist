@@ -4,12 +4,20 @@ visualize_contacts.py  –  Render the object + multiple tool poses in one figur
 
 Loads a `.pt` file produced by contact_gen.py, re-loads the original meshes
 (paths stored inside the .pt), transforms tools to their optimised poses,
-and renders everything in a single 3D plot using matplotlib (or Open3D if
-available for higher quality).
+and renders everything in a single 3D plot using matplotlib.
+
+Contact overlays (--show-contacts / --no-contacts):
+  When the .pt file contains contact metadata (from the enriched contact_gen.py),
+  the visualiser draws:
+    • Small scatter dots  – the contact points on the tool surface (in object frame),
+      colour-coded by their SDF distance to the object surface.
+    • Quiver arrows       – the outward face normal at each contact point, showing
+      which direction the object surface is facing at the point of contact.
 
 Usage:
     python visualize_contacts.py --input contact_configs.pt --num-tools 8
     python visualize_contacts.py --input contact_configs.pt --num-tools 8 --save viz.png
+    python visualize_contacts.py --input contact_configs.pt --no-contacts
 """
 
 from __future__ import annotations
@@ -24,7 +32,6 @@ import trimesh
 # =============================================================================
 #                            COLOUR PALETTE
 # =============================================================================
-# A curated set of visually distinct colours for tool instances.
 TOOL_COLOURS = [
     (0.90, 0.30, 0.30, 0.15),  # red
     (0.30, 0.70, 0.90, 0.15),  # sky blue
@@ -38,8 +45,7 @@ TOOL_COLOURS = [
     (0.60, 0.80, 0.30, 0.15),  # lime
 ]
 
-OBJECT_COLOUR = (0.65, 0.65, 0.70, 1.0)   # neutral steel
-GROUND_COLOUR = (0.92, 0.92, 0.90, 0.30)  # faint ground plane
+OBJECT_COLOUR = (0.65, 0.65, 0.70, 1.0)
 
 
 # =============================================================================
@@ -47,45 +53,36 @@ GROUND_COLOUR = (0.92, 0.92, 0.90, 0.30)  # faint ground plane
 # =============================================================================
 
 def load_data(pt_path: str) -> dict:
-    """Load the .pt file and convert tensors to numpy."""
+    """Load the .pt file; tensors → numpy, list-of-tensors → list-of-numpy."""
     import torch
-    data = torch.load(pt_path, map_location="cpu")
+    data = torch.load(pt_path, map_location="cpu", weights_only=False)
 
     out = {}
     for k, v in data.items():
         if isinstance(v, torch.Tensor):
             out[k] = v.numpy()
+        elif isinstance(v, list) and len(v) > 0 and hasattr(v[0], "numpy"):
+            out[k] = [t.numpy() for t in v]
         else:
-            out[k] = v  # strings (paths)
+            out[k] = v
     return out
 
 
 def load_mesh_trimesh(path: str) -> trimesh.Trimesh:
-    """Load mesh via trimesh."""
-    mesh = trimesh.load(path, force="mesh", process=False)
-    return mesh
+    return trimesh.load(path, force="mesh", process=False)
 
 
 # =============================================================================
 #                       TRANSFORM HELPERS
 # =============================================================================
 
-def transform_mesh(
-    mesh: trimesh.Trimesh,
-    R: np.ndarray,
-    t: np.ndarray,
-) -> trimesh.Trimesh:
-    """Apply rotation R (3,3) and translation t (3,) to a mesh copy."""
+def transform_mesh(mesh: trimesh.Trimesh, R: np.ndarray, t: np.ndarray) -> trimesh.Trimesh:
     m = mesh.copy()
     m.vertices = m.vertices @ R.T + t
     return m
 
 
-def transform_object_mesh(
-    mesh: trimesh.Trimesh,
-    R_obj: np.ndarray,
-) -> trimesh.Trimesh:
-    """Rotate the object by R_obj and ground it (z_min = 0)."""
+def transform_object_mesh(mesh: trimesh.Trimesh, R_obj: np.ndarray) -> trimesh.Trimesh:
     m = mesh.copy()
     m.vertices = m.vertices @ R_obj.T
     m.vertices[:, 2] -= m.vertices[:, 2].min()
@@ -97,47 +94,29 @@ def transform_object_mesh(
 # =============================================================================
 
 def _plot_mesh_on_ax(ax, mesh: trimesh.Trimesh, colour, alpha=1.0, label=None):
-    """Add a triangulated mesh surface to a 3D matplotlib axis."""
     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-
-    verts = mesh.vertices
-    faces = mesh.faces
-
-    # Build polygon list
-    polys = verts[faces]
-
+    polys = mesh.vertices[mesh.faces]
     pc = Poly3DCollection(
-        polys,
-        alpha=alpha,
+        polys, alpha=alpha,
         facecolor=colour[:3] if len(colour) == 4 else colour,
-        edgecolor=(0.2, 0.2, 0.2, 0.15),
-        linewidth=0.1,
+        edgecolor=(0.2, 0.2, 0.2, 0.15), linewidth=0.1,
     )
     ax.add_collection3d(pc)
-
     if label:
-        # Invisible scatter for legend
         ax.scatter([], [], [], color=colour[:3], label=label, s=30)
 
 
 def _add_ground_plane(ax, extent: float):
-    """Draw a faint ground plane at z=0."""
     g = extent * 1.2
-    xx, yy = np.meshgrid(
-        np.linspace(-g, g, 2),
-        np.linspace(-g, g, 2),
-    )
-    zz = np.zeros_like(xx)
-    ax.plot_surface(xx, yy, zz, alpha=0.08, color="grey")
+    xx, yy = np.meshgrid(np.linspace(-g, g, 2), np.linspace(-g, g, 2))
+    ax.plot_surface(xx, yy, np.zeros_like(xx), alpha=0.08, color="grey")
 
 
 def _set_equal_aspect(ax, all_verts: np.ndarray):
-    """Equalise axis scales for a 3-D plot."""
     mins = all_verts.min(axis=0)
     maxs = all_verts.max(axis=0)
     centres = (mins + maxs) / 2
     span = (maxs - mins).max() / 2 * 1.15
-
     ax.set_xlim(centres[0] - span, centres[0] + span)
     ax.set_ylim(centres[1] - span, centres[1] + span)
     ax.set_zlim(max(0, centres[2] - span), centres[2] + span)
@@ -150,29 +129,35 @@ def visualize_matplotlib(
     contact_losses: np.ndarray | None = None,
     save_path: str | None = None,
     title: str = "Contact Configurations",
+    # Contact overlays (optional – silently skipped if None)
+    contact_pts: list[np.ndarray] | None = None,      # list[C×3]  contact points
+    contact_normals: list[np.ndarray] | None = None,  # list[C×3]  face normals
+    contact_sdfs: list[np.ndarray] | None = None,     # list[C]    SDF at each point
 ):
-    """Render object + tool poses in a single matplotlib 3D figure."""
+    """Render object + tool poses in a single matplotlib 3D figure.
+
+    Contact overlays:
+      contact_pts     – (C, 3) contact points; scatter-plotted and colour-coded
+                        by SDF value (if contact_sdfs provided) or tool colour.
+      contact_normals – (C, 3) outward face normals; drawn as quiver arrows.
+      contact_sdfs    – (C,)   SDF distance values; used for colour-mapping dots.
+    """
     import matplotlib
     if save_path:
         matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    import matplotlib.cm as cm
 
     fig = plt.figure(figsize=(14, 10), dpi=150)
     ax = fig.add_subplot(111, projection="3d")
 
-    # Ground plane
-    obj_extent = np.linalg.norm(
-        obj_mesh.vertices.max(axis=0) - obj_mesh.vertices.min(axis=0)
-    )
+    obj_extent = np.linalg.norm(obj_mesh.vertices.max(axis=0) - obj_mesh.vertices.min(axis=0))
     _add_ground_plane(ax, obj_extent)
-
-    # Object
     _plot_mesh_on_ax(ax, obj_mesh, OBJECT_COLOUR, alpha=0.85, label="Object")
 
-    # Collect all vertices for axis scaling
     all_verts = [obj_mesh.vertices]
+    arrow_len = obj_extent * 0.08
 
-    # Tools
     for i, tm in enumerate(tool_meshes):
         c = TOOL_COLOURS[i % len(TOOL_COLOURS)]
         lbl = f"Tool #{i}"
@@ -180,6 +165,35 @@ def visualize_matplotlib(
             lbl += f"  (pen={pen_losses[i]:.4f}, cont={contact_losses[i]:.4f})"
         _plot_mesh_on_ax(ax, tm, c, alpha=c[3], label=lbl)
         all_verts.append(tm.vertices)
+
+        if contact_pts is not None and i < len(contact_pts):
+            pts = contact_pts[i]   # (C, 3)
+
+            # Colour by SDF if available, else use tool colour
+            if contact_sdfs is not None and i < len(contact_sdfs):
+                sdf = contact_sdfs[i]              # (C,)
+                sdf_norm = (sdf - sdf.min()) / (sdf.max() - sdf.min() + 1e-9)
+                dot_colors = cm.plasma(sdf_norm)[:, :3]  # plasma: yellow=far, purple=close
+            else:
+                dot_colors = [c[:3]] * len(pts)
+
+            ax.scatter(
+                pts[:, 0], pts[:, 1], pts[:, 2],
+                c=dot_colors, s=30, zorder=5,
+                depthshade=False, alpha=0.95,
+                label="Contact pts (coloured by SDF)" if i == 0 else None,
+            )
+
+            # Face normal arrows
+            if contact_normals is not None and i < len(contact_normals):
+                n = contact_normals[i]   # (C, 3) unit normals
+                ax.quiver(
+                    pts[:, 0], pts[:, 1], pts[:, 2],
+                    n[:, 0] * arrow_len, n[:, 1] * arrow_len, n[:, 2] * arrow_len,
+                    color=c[:3], alpha=0.85, linewidth=1.5,
+                    arrow_length_ratio=0.3,
+                    label="Contact normals" if i == 0 else None,
+                )
 
     all_verts = np.concatenate(all_verts, axis=0)
     _set_equal_aspect(ax, all_verts)
@@ -189,92 +203,63 @@ def visualize_matplotlib(
     ax.set_zlabel("Z")
     ax.set_title(title, fontsize=14, fontweight="bold", pad=15)
     ax.legend(loc="upper left", fontsize=7, framealpha=0.8)
-
-    # Nice viewing angle
     ax.view_init(elev=25, azim=-55)
 
     plt.tight_layout()
-
     if save_path:
         fig.savefig(save_path, dpi=200, bbox_inches="tight")
         print(f"Saved figure to {save_path}")
     else:
         plt.show()
-
     plt.close(fig)
-
-
-# =============================================================================
-#               OPEN3D VISUALISATION  (optional, higher quality)
-# =============================================================================
-
-def _try_open3d_visualize(
-    obj_mesh: trimesh.Trimesh,
-    tool_meshes: list[trimesh.Trimesh],
-    save_path: str | None = None,
-) -> bool:
-    """Attempt Open3D visualisation.  Returns True if successful."""
-    try:
-        import open3d as o3d
-    except ImportError:
-        return False
-
-    geometries = []
-
-    # Object
-    o_mesh = o3d.geometry.TriangleMesh(
-        vertices=o3d.utility.Vector3dVector(obj_mesh.vertices),
-        triangles=o3d.utility.Vector3iVector(obj_mesh.faces),
-    )
-    o_mesh.compute_vertex_normals()
-    o_mesh.paint_uniform_color(OBJECT_COLOUR[:3])
-    geometries.append(o_mesh)
-
-    # Tools
-    for i, tm in enumerate(tool_meshes):
-        c = TOOL_COLOURS[i % len(TOOL_COLOURS)]
-        t_mesh = o3d.geometry.TriangleMesh(
-            vertices=o3d.utility.Vector3dVector(tm.vertices),
-            triangles=o3d.utility.Vector3iVector(tm.faces),
-        )
-        t_mesh.compute_vertex_normals()
-        t_mesh.paint_uniform_color(c[:3])
-        geometries.append(t_mesh)
-
-    # Ground plane
-    ground = o3d.geometry.TriangleMesh.create_box(width=2.0, height=2.0, depth=0.001)
-    ground.translate([-1.0, -1.0, -0.001])
-    ground.paint_uniform_color([0.9, 0.9, 0.88])
-    geometries.append(ground)
-
-    # Coordinate frame
-    coord = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
-    geometries.append(coord)
-
-    if save_path:
-        vis = o3d.visualization.Visualizer()
-        vis.create_window(visible=False, width=1920, height=1080)
-        for g in geometries:
-            vis.add_geometry(g)
-        vis.poll_events()
-        vis.update_renderer()
-        vis.capture_screen_image(save_path)
-        vis.destroy_window()
-        print(f"Saved Open3D render to {save_path}")
-    else:
-        o3d.visualization.draw_geometries(
-            geometries,
-            window_name="Contact Configurations",
-            width=1400,
-            height=900,
-        )
-
-    return True
 
 
 # =============================================================================
 #                               MAIN
 # =============================================================================
+
+def _extract_contact_overlays(
+    data: dict,
+    indices: np.ndarray,
+) -> tuple[list[np.ndarray] | None, list[np.ndarray] | None, list[np.ndarray] | None]:
+    """Pull per-config contact overlays out of the data dict.
+
+    Returns:
+        contact_pts     – list of (C, 3) arrays (object frame)
+        contact_normals – list of (C, 3) unit normal arrays
+        contact_sdfs    – list of (C,)   SDF distance arrays  (None if absent)
+        All lists are None if the .pt file predates the contact metadata.
+    """
+    has_pts     = "contact_pts_obj_frame" in data
+    has_normals = "contact_normals"       in data
+    has_sdfs    = "contact_sdfs"          in data
+
+    if not has_pts and not has_normals:
+        return None, None, None
+
+    pts_arr = data.get("contact_pts_obj_frame")   # (N, C, 3)
+    nor_arr = data.get("contact_normals")          # (N, C, 3)
+    sdf_arr = data.get("contact_sdfs")             # (N, C)
+
+    contact_pts_list     = []
+    contact_normals_list = []
+    contact_sdfs_list    = []
+
+    for idx in indices:
+        idx = int(idx)
+        if has_pts:
+            contact_pts_list.append(pts_arr[idx])
+        if has_normals:
+            contact_normals_list.append(nor_arr[idx])
+        if has_sdfs:
+            contact_sdfs_list.append(sdf_arr[idx])
+
+    return (
+        contact_pts_list     if has_pts     else None,
+        contact_normals_list if has_normals else None,
+        contact_sdfs_list    if has_sdfs    else None,
+    )
+
 
 def main():
     p = argparse.ArgumentParser(
@@ -282,101 +267,85 @@ def main():
     )
     p.add_argument("--input", type=str, required=True, help="Path to contact_configs.pt")
     p.add_argument("--num-tools", type=int, default=4,
-                   help="Max number of tool poses to display (default: 8)")
+                   help="Max number of tool poses to display (default: 4)")
     p.add_argument("--save", type=str, default=None,
                    help="If set, save the figure to this path instead of showing interactively")
-    p.add_argument("--backend", type=str, choices=["matplotlib", "open3d", "auto"],
-                   default="auto",
-                   help="Render backend (default: auto – tries Open3D first)")
-    # Allow overriding mesh paths (in case files were moved)
     p.add_argument("--object", type=str, default=None,
                    help="Override object mesh path (else uses path from .pt)")
     p.add_argument("--tool", type=str, default=None,
                    help="Override tool mesh path (else uses path from .pt)")
+    contact_grp = p.add_mutually_exclusive_group()
+    contact_grp.add_argument("--show-contacts", dest="show_contacts", action="store_true",
+                             default=True, help="Overlay contact points and normals (default: on)")
+    contact_grp.add_argument("--no-contacts", dest="show_contacts", action="store_false",
+                             help="Disable contact overlays")
     args = p.parse_args()
 
-    # ---- Load saved data ----
     print(f"Loading {args.input} …")
     data = load_data(args.input)
 
     n_total = data["tool_translations"].shape[0]
-    n_show = min(args.num_tools, n_total)
+    n_show  = min(args.num_tools, n_total)
     print(f"  {n_total} valid configs found, showing {n_show}")
 
-    # ---- Resolve mesh paths ----
-    obj_path = args.object or data.get("object_mesh_path")
-    tool_path = args.tool or data.get("tool_mesh_path")
+    obj_path  = args.object or data.get("object_mesh_path")
+    tool_path = args.tool   or data.get("tool_mesh_path")
 
-    if obj_path is None or tool_path is None:
-        print("ERROR: Mesh paths not found in .pt file and not provided via --object / --tool.")
-        sys.exit(1)
-
-    if not Path(obj_path).exists():
-        print(f"ERROR: Object mesh not found: {obj_path}")
-        sys.exit(1)
-    if not Path(tool_path).exists():
-        print(f"ERROR: Tool mesh not found: {tool_path}")
-        sys.exit(1)
+    for label, path in [("Object", obj_path), ("Tool", tool_path)]:
+        if path is None:
+            print(f"ERROR: {label} mesh path missing. Pass --object / --tool.")
+            sys.exit(1)
+        if not Path(path).exists():
+            print(f"ERROR: {label} mesh not found: {path}")
+            sys.exit(1)
 
     print(f"  Object mesh: {obj_path}")
     print(f"  Tool mesh:   {tool_path}")
 
-    # ---- Load meshes ----
-    obj_mesh_raw = load_mesh_trimesh(obj_path)
+    obj_mesh_raw  = load_mesh_trimesh(obj_path)
     tool_mesh_raw = load_mesh_trimesh(tool_path)
 
-    # ---- Apply tool scale (contact_gen auto-scales tool to match object) ----
     tool_scale = data.get("tool_scale", 1.0)
-    tool_mesh_raw.vertices = tool_mesh_raw.vertices * tool_scale
+    tool_mesh_raw.vertices *= tool_scale
     print(f"  Tool scale:  {tool_scale:.4f}")
 
-    # ---- Transform object (same rotation + grounding as generation) ----
-    R_obj = data["object_rotation"]  # (3, 3)
+    R_obj    = data["object_rotation"]
     obj_mesh = transform_object_mesh(obj_mesh_raw, R_obj)
 
-    # ---- Transform selected tool poses ----
-    # Pick a diverse subset: evenly spaced indices sorted by contact_loss
-    if "contact_loss" in data:
-        order = np.argsort(data["contact_loss"])
-    else:
-        order = np.arange(n_total)
-
-    # Take evenly spaced samples from the sorted list to show diversity
+    # Diverse subset: evenly spaced along contact_loss ranking
+    order   = np.argsort(data["contact_loss"]) if "contact_loss" in data else np.arange(n_total)
     indices = order[np.linspace(0, len(order) - 1, n_show, dtype=int)]
 
     tool_meshes = []
     for idx in indices:
-        R_tool = data["tool_rotations"][idx]      # (3, 3)
-        t_tool = data["tool_translations"][idx]    # (3,)
-        tm = transform_mesh(tool_mesh_raw, R_tool, t_tool)
+        tm = transform_mesh(tool_mesh_raw, data["tool_rotations"][idx], data["tool_translations"][idx])
         tool_meshes.append(tm)
 
-    pen_losses = data["pen_loss"][indices] if "pen_loss" in data else None
+    pen_losses     = data["pen_loss"][indices]     if "pen_loss"     in data else None
     contact_losses = data["contact_loss"][indices] if "contact_loss" in data else None
 
-    # ---- Render ----
+    contact_pts = contact_normals = contact_sdfs = None
+    if args.show_contacts:
+        contact_pts, contact_normals, contact_sdfs = _extract_contact_overlays(data, indices)
+        if contact_pts is not None:
+            C = contact_pts[0].shape[0]
+            sdf_note = " (with SDF colour-coding)" if contact_sdfs is not None else ""
+            print(f"  Showing {C} contact pts/config{sdf_note} + normals")
+        else:
+            print("  ⚠ No contact metadata in .pt file (pre-dates enrichment).")
+
     title = (
         f"Contact Configurations  ({n_show}/{n_total} shown)\n"
         f"Object: {Path(obj_path).name}   Tool: {Path(tool_path).name}"
     )
 
-    backend = args.backend
-    if backend == "auto":
-        if not _try_open3d_visualize(obj_mesh, tool_meshes, args.save):
-            print("Open3D not available, falling back to matplotlib")
-            visualize_matplotlib(
-                obj_mesh, tool_meshes, pen_losses, contact_losses,
-                save_path=args.save, title=title,
-            )
-    elif backend == "open3d":
-        if not _try_open3d_visualize(obj_mesh, tool_meshes, args.save):
-            print("ERROR: Open3D not installed.  pip install open3d")
-            sys.exit(1)
-    else:
-        visualize_matplotlib(
-            obj_mesh, tool_meshes, pen_losses, contact_losses,
-            save_path=args.save, title=title,
-        )
+    visualize_matplotlib(
+        obj_mesh, tool_meshes, pen_losses, contact_losses,
+        save_path=args.save, title=title,
+        contact_pts=contact_pts,
+        contact_normals=contact_normals,
+        contact_sdfs=contact_sdfs,
+    )
 
 
 if __name__ == "__main__":

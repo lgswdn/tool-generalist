@@ -23,19 +23,7 @@ python contact_gen.py \
 
 **Visualize results:**
 ```bash
-# Initial poses (before optimisation)
-python visualize_contacts.py \
-    --input init.pt \
-    --num-tools 4 \
-    --save viz_init.png \
-    --backend matplotlib
-
-# Final converged poses
-python visualize_contacts.py \
-    --input contact_configs.pt \
-    --num-tools 4 \
-    --save viz.png \
-    --backend matplotlib
+python visualize_contacts.py --input contact_configs.pt --num-tools 4 --save viz.png
 ```
 
 ---
@@ -65,7 +53,7 @@ Run `opt_steps` iterations of Adam on the 6-DoF pose parameters `(trans, rot6d)`
 
 | Loss | Description | Weight |
 |------|-------------|--------|
-| **L_pen** (penetration) | Mean unsigned distance of tool points that are **inside** the object mesh (via Kaolin `check_sign`) | `w_pen = 50` |
+| **L_pen** (penetration) | Max unsigned distance of tool points that are **inside** the object mesh (per-sample max, via Kaolin `check_sign`) | `w_pen = 50` |
 | **L_contact** (attraction) | Mean distance of the `k`-closest tool points to the object surface (via Kaolin `point_to_mesh_distance`) | `w_contact = 1` |
 | **L_floor** (floor guard) | Mean `ReLU(-z)` for all tool points — penalises anything below `z = 0` | `w_floor = 20` |
 
@@ -80,9 +68,14 @@ Output `.pt` file contains:
 - `object_mesh_path`, `tool_mesh_path` — absolute paths for downstream use
 - `object_rotation` — `(3, 3)` rotation applied to the object
 - `object_vertices_grounded` — `(V, 3)` object vertices after rotation & grounding
-- `tool_translations` — `(N_valid, 3)` optimised translations
-- `tool_rotations` — `(N_valid, 3, 3)` optimised rotation matrices
+- `tool_translations` — `(N, 3)` optimised translations
+- `tool_rotations` — `(N, 3, 3)` optimised rotation matrices
 - `pen_loss`, `contact_loss` — per-sample loss values
+- `contact_pts_obj_frame` — `(N, 5, 3)` representative contact points in world frame
+- `contact_pts_tool_frame` — `(N, 5, 3)` same points in canonical tool frame
+- `contact_normals` — `(N, 5, 3)` outward object face normal at each contact point
+- `near_contact_pts` — `(N, 64, 3)` near-contact tool surface points (canonical frame, SDF < `3e-2`)
+- `near_contact_sdf` — `(N, 64)` unsigned SDF distance for each near-contact point
 
 ---
 
