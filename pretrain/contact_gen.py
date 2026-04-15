@@ -58,7 +58,7 @@ class Config:
     device: str = "cuda:0"
 
     # ----- Optimisation -----
-    opt_steps: int = 300
+    opt_steps: int = 200
     lr: float = 5e-3
     # Loss weights
     w_pen: float = 10.0             # penetration penalty
@@ -469,11 +469,6 @@ def compute_losses(
     inside = compute_sign(pts_world, obj_verts, obj_faces)             # (B, P)
 
     # ====== L_pen (Top-K worst penetrators) ======
-    # Hard max only provides gradient through 1 point per sample, causing
-    # Adam to plateau when cycling between worst-offenders.  Averaging the
-    # K_pen deepest penetrating points routes gradients through multiple
-    # near-worst points simultaneously while avoiding the zero-bias floor
-    # that LogSumExp suffers from (≈ log(N)/α even at zero penetration).
     pen_dist = torch.where(inside, dist, torch.zeros_like(dist))
     K_pen = min(8, P)
     topk_pen, _ = torch.topk(pen_dist, K_pen, dim=1, largest=True)
@@ -482,9 +477,6 @@ def compute_losses(
     L_pen_max_per_sample = pen_dist.max(dim=1).values
 
     # ====== L_contact (Inf-Masked Attraction) ======
-    # Mask inside points with +inf so topk(largest=False) ignores them.
-    # Without this, zeroed inside-point distances get selected first by TopK,
-    # reporting fake-perfect contact and killing the attraction gradient.
     masked_dist = torch.where(~inside, dist, torch.full_like(dist, float("inf")))
     K = min(cfg.k_closest, P)
     topk_dist, _ = torch.topk(masked_dist, K, dim=1, largest=False)
@@ -832,7 +824,6 @@ def filter_and_save(
         "object_mesh_path": str(Path(cfg.object_mesh_path).resolve()),
         "tool_mesh_path": str(Path(cfg.tool_mesh_path).resolve()),
         "object_rotation": R_obj.cpu(),
-        "object_vertices_grounded": obj_verts.cpu(),
         "tool_translations": trans[valid].cpu(),
         "tool_rotations": R_tool.cpu(),
         "pen_loss": losses["pen_max_ps"][valid].cpu(),

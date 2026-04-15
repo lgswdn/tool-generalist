@@ -41,52 +41,43 @@ python visualize_contacts.py \
 
 ## Algorithm
 
-### 1. Mesh Loading & Object Grounding
-- Load the **object** and **tool** meshes (watertight `.obj`).
-- Apply a random SO(3) rotation to the object and shift it so that its lowest vertex sits at `z = 0` (ground plane).
+### 1. Initialisation
+- Sample independent random SO(3) rotations for both the **object** and the **tool**.
+- Ground the object: shift it along Z so that its lowest point sits at $z = 0$.
 
-### 2. Head-Area Biased Surface Sampling
-- Look up the tool's **head area** from `tools_adjusted.json`. The head area is a cuboid defined in normalised bbox coordinates `[lo, hi]` — e.g. `z ∈ [0.5, 1.0]` means the top half of the tool's bounding box along Z.
-- Sample `num_pts` points on the tool surface with a **70/30 bias**: 70% from the head area, 30% from the rest of the body. This ensures the loss focuses on the contact-relevant part of the tool.
+### 2. Biased Tool-Surface Sampling
+Sample surface points on the tool with a **70 / 30 head-area bias**:
+- **70 %** of points are drawn from the **head area** (the contact-relevant region defined in `tools_adjusted.json`).
+- **30 %** are drawn from the rest of the handle / body.
 
-### 3. Head → Surface Initialisation
-For each of the `N` (batch_size) tool poses:
-1. Draw a random rotation `R` and project it so the tool's +Z axis points downward (`z ≤ 0`).
-2. Compute the **rotated head centroid**: `c_rot = R @ head_centroid`.
-3. Sample a random target point on the **object surface** and offset it slightly (0–5 cm) along the outward normal.
-4. Set translation `t = target - c_rot`, placing the head's centre directly at the object surface.
-5. **Floor guard**: lift the tool if any point dips below `z = 0`.
+### 3. Placement & Floor Guard
+1. Pick a random object surface point $o$ and a random (biased) tool point $t$.
+2. Translate the tool so that $t$ lands at distance $d \in [0,\, 0.02]$ m outside $o$ along the object surface normal.
+3. **Floor guard**: if any tool point has $z < 0$ after placement, lift the entire tool until all points are at or above $z = 0$.
 
-This produces much better initial poses than random placement — the head area starts right at the object surface, so contact loss begins near zero.
+### 4. Energy Minimisation ($K = 8$)
+Run **200 steps** of Adam ($lr = 5 \times 10^{-3}$) on the 6-DoF tool pose $(\mathbf{t},\, R_{6D})$ to minimise a weighted sum of three terms:
 
-### 4. Differentiable Test-Time Optimisation (Adam)
-Run `opt_steps` iterations of Adam on the 6-DoF pose parameters `(trans, rot6d)` to minimise:
+| Term | Definition | Weight |
+|------|-----------|--------|
+| $\ell_{\text{pen}}$ | Sample $K$ points with $\text{SDF} < 0$ (inside the object); minimise their mean $|\text{SDF}|$ | **30** |
+| $\ell_{\text{contact}}$ | Sample $K$ points with $\text{SDF} \ge 0$ (outside); minimise their mean SDF (attraction toward surface) | **1** |
+| $\ell_{\text{floor}}$ | Sample $K$ points with $z < 0$; minimise their mean $|z|$ (keep tool above ground) | **20** |
 
-| Loss | Description | Weight |
-|------|-------------|--------|
-| **L_pen** (penetration) | Max unsigned distance of tool points that are **inside** the object mesh (per-sample max, via Kaolin `check_sign`) | `w_pen = 50` |
-| **L_contact** (attraction) | Mean distance of the `k`-closest tool points to the object surface (via Kaolin `point_to_mesh_distance`) | `w_contact = 1` |
-| **L_floor** (floor guard) | Mean `ReLU(-z)` for all tool points — penalises anything below `z = 0` | `w_floor = 20` |
-
-**Rotation representation**: 6-D continuous representation (Zhou et al., 2019) to avoid gimbal lock and singularities during gradient descent.
+**Rotation parameterisation**: 6-D continuous representation
 
 ### 5. Filtering & Output
-A pose is accepted if:
-- Per-sample penetration loss < `pen_eps` (default `1e-3`)
-- Per-sample contact loss < `contact_eps` (default `5e-3`)
 
-Output `.pt` file contains:
-- `object_mesh_path`, `tool_mesh_path` — absolute paths for downstream use
-- `object_rotation` — `(3, 3)` rotation applied to the object
-- `object_vertices_grounded` — `(V, 3)` object vertices after rotation & grounding
-- `tool_translations` — `(N, 3)` optimised translations
-- `tool_rotations` — `(N, 3, 3)` optimised rotation matrices
-- `pen_loss`, `contact_loss` — per-sample loss values
-- `contact_pts_obj_frame` — `(N, 5, 3)` representative contact points in world frame
-- `contact_pts_tool_frame` — `(N, 5, 3)` same points in canonical tool frame
-- `contact_normals` — `(N, 5, 3)` outward object face normal at each contact point
-- `near_contact_pts` — `(N, 64, 3)` near-contact tool surface points (canonical frame, SDF < `3e-2`)
-- `near_contact_sdf` — `(N, 64)` unsigned SDF distance for each near-contact point
+#### Accepted configurations
+A configuration is kept when **both** criteria are met:
+- $\min_i \text{SDF}_i < 3 \times 10^{-4}$ (tool reaches the surface)
+- $\ell_{\text{contact}} < 8 \times 10^{-3}$ (good surface contact)
+
+#### Output `.pt` file contains:
+- **Object pose** — the random rotation applied to the object.
+- **Tool pose** — optimised translation and rotation for each accepted configuration.
+- **Contact geometry** — for each accepted pose, sample 5 points from those with $\text{SDF} < 5 \times 10^{-3}$ and record their object-face normals.
+- **Near-contact cloud** — randomly sample points with $\text{SDF} < 0.03$; record each point and its signed distance value.
 
 ---
 
@@ -156,3 +147,23 @@ isaaclab -p pretrain/view_contacts_isaac.py \
 | `--cols` | `0` | Grid columns (0 = auto √N) |
 | `--save` | `""` | Screenshot output path (enables headless) |
 | `--settle-steps` | `20` | Render steps before screenshot |
+
+---
+
+## Pretraining the Geometry Encoder
+
+The `.pt` files are used to pretrain a dual-encoder + diffusion model:
+
+- **Encoder**: shared `ICPNet` applied separately to the tool point cloud (canonical frame)
+  and the object point cloud (loaded from mesh, rotated by `object_rotation`).
+- **Diffusion head**: small DDPM MLP conditioned on fused tool+object features.
+- **Target (39D)**: contact points `(5×3)` + contact normals `(5×3)` + tool pose `(6D rot + 3D trans)`.
+- **Loss**: noise prediction MSE + Chamfer distance on contact points.
+
+```bash
+# Generate data first
+python gen_dataset.py --num-pairs 200 --gpus 2 3
+
+# Then train (TBD — train.py is the planned entry point)
+# python train.py --data-dir tmp_data/ --gpus 2 3
+```
