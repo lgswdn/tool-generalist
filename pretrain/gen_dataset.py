@@ -32,33 +32,44 @@ import subprocess
 import sys
 from pathlib import Path
 
+try:
+    import yaml
+except ImportError:
+    sys.exit("PyYAML is required:  pip install pyyaml")
+
 # ---------------------------------------------------------------------------
-# Defaults
+# Config loader
 # ---------------------------------------------------------------------------
-PRETRAIN_DIR  = Path(__file__).resolve().parent
-REPO_ROOT     = PRETRAIN_DIR.parent
+PRETRAIN_DIR = Path(__file__).resolve().parent
+PATHS_YAML   = PRETRAIN_DIR.parent / "paths.yaml"
 
-DEFAULT_OBJECTS_JSON = "/mnt/afs/zhuwenxuan/DGN/yes.json"
-DEFAULT_TOOLS_JSON   = str(REPO_ROOT / "RobotSmith/eef/tools_selected.json")
-DEFAULT_TOOLS_META   = str(REPO_ROOT / "RobotSmith/eef/tools_adjusted.json")
-DEFAULT_OUT_DIR      = str(PRETRAIN_DIR / "tmp_data")
-DEFAULT_VIZ_DIR      = str(PRETRAIN_DIR / "tmp_data/viz")
 
-OBJ_MESH_DIR  = "/mnt/afs/zhuwenxuan/DGN/coacd_normalized"
-TOOL_MESH_DIR = str(REPO_ROOT / "RobotSmith/eef/normalized_models")
+def load_paths(yaml_path: Path = PATHS_YAML) -> dict:
+    """Load paths.yaml and return a flat dict of the keys gen_dataset needs."""
+    with open(yaml_path) as f:
+        cfg = yaml.safe_load(f)
+    return {
+        "objects_json": cfg["dgn"]["candidates_json"],
+        "obj_mesh_dir": cfg["dgn"]["obj_dir"],
+        "tools_json":   cfg["tools"]["tools_selected_json"],
+        "tool_mesh_dir": cfg["tools"]["obj_dir"],
+        "tools_meta":   cfg["tools"]["tools_json"],
+    }
 
-CONTACT_GEN    = str(PRETRAIN_DIR / "contact_gen.py")
-VISUALIZE      = str(PRETRAIN_DIR / "visualize_contacts.py")
+
+CONTACT_GEN = str(PRETRAIN_DIR / "contact_gen.py")
+VISUALIZE   = str(PRETRAIN_DIR / "visualize_contacts.py")
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def build_pairs(objects: list[str], tools: list[str]) -> list[tuple]:
+def build_pairs(objects: list[str], tools: list[str],
+                obj_mesh_dir: str, tool_mesh_dir: str) -> list[tuple]:
     """Return all valid (tool_path, obj_path, tool_name, obj_name) pairs.
 
-    Object names in yes.json have a trailing scale suffix, e.g.:
+    Object names in the candidates json have a trailing scale suffix, e.g.:
         core-bottle-44dcea00fb1923051a4cb1c0c7bb0654-0.100
     The actual mesh file drops that suffix:
         core-bottle-44dcea00fb1923051a4cb1c0c7bb0654.obj
@@ -66,7 +77,7 @@ def build_pairs(objects: list[str], tools: list[str]) -> list[tuple]:
     pairs = []
     missing_obj, missing_tool = 0, 0
     for tool in tools:
-        tool_path = Path(TOOL_MESH_DIR) / f"{tool}.obj"
+        tool_path = Path(tool_mesh_dir) / f"{tool}.obj"
         if not tool_path.exists():
             print(f"  [WARN] tool mesh not found, skipping: {tool_path}")
             missing_tool += 1
@@ -74,7 +85,7 @@ def build_pairs(objects: list[str], tools: list[str]) -> list[tuple]:
         for obj_name in objects:
             # Strip trailing scale token (e.g. "-0.100")
             mesh_stem = obj_name.rsplit("-", 1)[0]
-            obj_path = Path(OBJ_MESH_DIR) / f"{mesh_stem}.obj"
+            obj_path = Path(obj_mesh_dir) / f"{mesh_stem}.obj"
             if not obj_path.exists():
                 missing_obj += 1
                 continue
@@ -180,36 +191,41 @@ def worker(pairs_subset, out_dir, viz_dir, tools_meta, gpu,
 # ---------------------------------------------------------------------------
 
 def main():
+    p = load_paths()
+    default_out_dir = str(PRETRAIN_DIR / "tmp_data")
+
     parser = argparse.ArgumentParser(description="Batch contact dataset generator")
-    parser.add_argument("--objects-json",  default=DEFAULT_OBJECTS_JSON)
-    parser.add_argument("--tools-json",    default=DEFAULT_TOOLS_JSON)
-    parser.add_argument("--tools-meta",    default=DEFAULT_TOOLS_META)
-    parser.add_argument("--out-dir",       default=DEFAULT_OUT_DIR)
-    parser.add_argument("--gpus",          nargs="+", type=int, default=[0])
-    parser.add_argument("--num-pairs",     type=int, default=200,
+    parser.add_argument("--config",      default=str(PATHS_YAML),
+                        help="Path to paths.yaml (default: ../paths.yaml)")
+    parser.add_argument("--out-dir",     default=default_out_dir)
+    parser.add_argument("--gpus",        nargs="+", type=int, default=[0])
+    parser.add_argument("--num-pairs",   type=int, default=200,
                         help="Number of pairs to randomly sample (0 = all)")
-    parser.add_argument("--seed",          type=int, default=42,
+    parser.add_argument("--seed",        type=int, default=42,
                         help="Random seed for pair sampling")
-    parser.add_argument("--skip-existing", action="store_true", default=True)
-    parser.add_argument("--no-skip",       action="store_true")
-    parser.add_argument("--viz",           action="store_true")
-    parser.add_argument("--viz-dir",       default=DEFAULT_VIZ_DIR)
-    parser.add_argument("--batch-size",    type=int, default=512)
-    parser.add_argument("--opt-steps",     type=int, default=300)
+    parser.add_argument("--no-skip",     action="store_true",
+                        help="Re-run even if .pt already exists")
+    parser.add_argument("--viz",         action="store_true")
+    parser.add_argument("--viz-dir",     default=str(PRETRAIN_DIR / "tmp_data/viz"))
+    parser.add_argument("--batch-size",  type=int, default=512)
+    parser.add_argument("--opt-steps",   type=int, default=300)
     args = parser.parse_args()
 
-    skip_existing = args.skip_existing and not args.no_skip
+    # Reload paths if a custom config was given
+    p = load_paths(Path(args.config))
+    skip_existing = not args.no_skip
 
-    # Load lists
-    with open(args.objects_json) as f:
+    # Load lists from paths resolved via yaml
+    with open(p["objects_json"]) as f:
         objects = json.load(f)
-    with open(args.tools_json) as f:
+    with open(p["tools_json"]) as f:
         tools = json.load(f)
 
-    print(f"Objects : {len(objects)}")
-    print(f"Tools   : {len(tools)}")
+    print(f"Config      : {args.config}")
+    print(f"Objects     : {len(objects)}  ({p['objects_json']})")
+    print(f"Tools       : {len(tools)}  ({p['tools_json']})")
 
-    all_pairs = build_pairs(objects, tools)
+    all_pairs = build_pairs(objects, tools, p["obj_mesh_dir"], p["tool_mesh_dir"])
     pairs = sample_pairs(all_pairs, args.num_pairs, args.seed)
 
     print(f"Valid pairs : {len(all_pairs)}  →  sampling {len(pairs)}  (seed={args.seed})")
@@ -230,7 +246,7 @@ def main():
     if n_gpus == 1:
         # Single GPU: run inline
         ok, fail, skip = worker(
-            subsets[0], args.out_dir, args.viz_dir, args.tools_meta,
+            subsets[0], args.out_dir, args.viz_dir, p["tools_meta"],
             args.gpus[0], args.batch_size, args.opt_steps,
             args.viz, skip_existing,
         )
@@ -240,7 +256,7 @@ def main():
         mp.set_start_method("spawn", force=True)
         with mp.Pool(n_gpus) as pool:
             results = pool.starmap(worker, [
-                (subsets[i], args.out_dir, args.viz_dir, args.tools_meta,
+                (subsets[i], args.out_dir, args.viz_dir, p["tools_meta"],
                  args.gpus[i], args.batch_size, args.opt_steps,
                  args.viz, skip_existing)
                 for i in range(n_gpus)
