@@ -23,7 +23,18 @@ python contact_gen.py \
 
 **Visualize results:**
 ```bash
-python visualize_contacts.py --input contact_configs.pt --num-tools 4 --save viz.png
+python visualize_contacts.py \
+    --input init.pt \
+    --num-tools 1 \
+    --save viz_init.png
+
+python visualize_contacts.py --input contact_configs.pt --num-tools 1 --save viz.png
+
+# Final converged poses
+python visualize_contacts.py \
+    --input contact_configs.pt \
+    --num-tools 4 \
+    --save viz.png
 ```
 
 ---
