@@ -257,9 +257,13 @@ def main():
             lr = scheduler.get_last_lr()[0]
             print(
                 f"Epoch {epoch+1:04d}/{args.epochs}  "
-                f"train={train_loss:.5f}  val={val_loss:.5f}  "
-                f"tool_sdf={val_m.get('tool_sdf_loss', float('nan')):.5f}  "
-                f"obj_sdf={val_m.get('obj_sdf_loss', float('nan')):.5f}  "
+                f"train={train_loss:.4f}  val={val_loss:.4f}  "
+                f"tool_sdf={val_m.get('tool_sdf_loss', float('nan')):.4f} "
+                f"(raw={val_m.get('tool_sdf_loss_raw', float('nan')):.5f} "
+                f"scale={val_m.get('tool_scale', float('nan')):.4f})  "
+                f"obj_sdf={val_m.get('obj_sdf_loss', float('nan')):.4f} "
+                f"(raw={val_m.get('obj_sdf_loss_raw', float('nan')):.5f} "
+                f"scale={val_m.get('obj_scale', float('nan')):.4f})  "
                 f"lr={lr:.2e}  t={dt:.1f}s"
             )
 
