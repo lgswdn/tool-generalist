@@ -218,17 +218,18 @@ def main():
     if is_main():
         total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"Model: SDFSegmentor  head={args.head_mode}  "
-        weight_decay=1e-4,
-    )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
               f"vit_depth={args.vit_depth}  vit_heads={args.vit_heads}  "
               f"trainable params: {total_params:,}")
 
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
         lr=args.lr,
+        weight_decay=1e-4,
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.epochs
     )
+
 
     # ---- Resume --------------------------------------------------------------
     start_epoch = 0
