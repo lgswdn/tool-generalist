@@ -53,7 +53,7 @@ class Config:
 
     # ----- Batch & sampling -----
     batch_size: int = 512           # number of random tool poses
-    num_tool_surface_pts: int = 2048  # uniform surface cloud (all losses)
+    num_tool_surface_pts: int = 512   # uniform surface cloud (all losses)
     contact_mode_prob: float = 0.7   # prob of targeting head (vs handle/body)
     device: str = "cuda:0"
 
@@ -64,7 +64,7 @@ class Config:
     w_pen: float = 10.0             # penetration penalty
     w_contact: float = 1.0          # attraction loss
     w_floor: float = 20.0           # below-floor penalty
-    k_closest: int = 8              # how many closest points for attraction
+    k_closest: int = 4              # how many closest points for attraction
 
     # ----- Convergence thresholds -----
     pen_max_eps: float = 1e-3       # max allowed single-point penetration depth
@@ -278,22 +278,23 @@ def sample_region_surface_points(
 def randomise_object_pose(
     verts: torch.Tensor,
     faces: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Apply a random SO(3) rotation and ground the object (z_min = 0).
 
     Returns:
-        new_verts: (V, 3)  on same device
-        R_obj: (3, 3)      the rotation applied
+        new_verts : (V, 3)  rotated + grounded vertices
+        R_obj     : (3, 3)  rotation matrix applied
+        z_shift   : scalar tensor  z-translation applied for grounding
     """
     device = verts.device
     R_obj = random_rotation_matrices(1, device).squeeze(0)  # (3, 3)
     rotated = verts @ R_obj.T  # (V, 3)
 
     # Ground: shift so z_min = 0
-    z_min = rotated[:, 2].min()
-    rotated[:, 2] -= z_min
+    z_shift = rotated[:, 2].min()
+    rotated[:, 2] -= z_shift
 
-    return rotated, R_obj
+    return rotated, R_obj, z_shift
 
 
 # ==============================================================================
@@ -470,7 +471,7 @@ def compute_losses(
 
     # ====== L_pen (Top-K worst penetrators) ======
     pen_dist = torch.where(inside, dist, torch.zeros_like(dist))
-    K_pen = min(8, P)
+    K_pen = min(4, P)
     topk_pen, _ = torch.topk(pen_dist, K_pen, dim=1, largest=True)
     L_pen = topk_pen.mean()
     # Keep hard max for filtering (no gradient needed)
@@ -688,71 +689,82 @@ def compute_contact_info(
     }
 
 
+# ==============================================================================
+#          SIGNED SDF  —  tool canonical pts → object,  object canonical pts → tool
+# ==============================================================================
+
 @torch.no_grad()
-def compute_tool_surface_sdf(
-    P_uniform: torch.Tensor,          # (P, 3)  canonical tool cloud
-    trans: torch.Tensor,              # (N, 3)  tool translations (valid subset)
-    rot6d: torch.Tensor,              # (N, 6)  tool rotations   (valid subset)
-    obj_verts: torch.Tensor,          # (V, 3)
-    obj_faces: torch.Tensor,          # (F, 3)
-    near_contact_threshold: float = 3e-2,
-    max_pts: int = 64,
-) -> dict:
-    """Sample tool surface points in a near-contact band and record their SDF.
+def compute_tool_pts_sdf(
+    P_tool: torch.Tensor,      # (P, 3)  canonical tool cloud
+    trans: torch.Tensor,       # (N, 3)  tool translations
+    rot6d: torch.Tensor,       # (N, 6)  tool rotations
+    obj_verts: torch.Tensor,   # (V, 3)  grounded world frame
+    obj_faces: torch.Tensor,   # (F, 3)
+) -> torch.Tensor:             # (N, P)  signed SDF
+    """Compute signed SDF from canonical tool points to the object, for each config.
 
-    Separate from the sparse contact_info (5 pts + normals).  Captures exterior
-    tool surface points within a wider 'near-contact' radius of the object,
-    giving richer proximity information per config.
+    For each config n, transforms P_tool to world frame and queries the object mesh.
+    SDF convention: positive = outside object, negative = inside object.
 
-    Args:
-        near_contact_threshold: exterior points with SDF < this value are
-            included (should be larger than sdf_threshold in compute_contact_info,
-            e.g. 3e-2 vs 5e-3).
-        max_pts: max points to randomly sample per config (default 64).
-
-    Returns dict with keys:
-        near_contact_pts       : (N, max_pts, 3)  – canonical tool frame positions
-        near_contact_sdf       : (N, max_pts)     – unsigned SDF at each point
-        near_contact_threshold : float            – threshold used (for reference)
+    Returns:
+        sdf : (N, P)  signed distances
     """
-    N = trans.shape[0]
+    R = rot6d_to_matrix(rot6d)                                             # (N, 3, 3)
+    pts_world = torch.einsum("pi, bji -> bpj", P_tool, R) + trans.unsqueeze(1)  # (N, P, 3)
+    dist   = compute_unsigned_distance(pts_world, obj_verts, obj_faces)   # (N, P)
+    inside = compute_sign(pts_world, obj_verts, obj_faces)                 # (N, P) bool
+    sdf = torch.where(inside, -dist, dist)
+    return sdf.cpu()                                                       # (N, P)
+
+
+@torch.no_grad()
+def compute_obj_pts_sdf(
+    P_obj: torch.Tensor,       # (Q, 3)  canonical object pts (before R_obj)
+    R_obj: torch.Tensor,       # (3, 3)
+    z_shift: torch.Tensor,     # scalar  grounding z-offset
+    tool_verts: torch.Tensor,  # (T, 3)  canonical tool frame
+    tool_faces: torch.Tensor,  # (G, 3)
+    trans: torch.Tensor,       # (N, 3)  tool translations
+    rot6d: torch.Tensor,       # (N, 6)  tool rotations
+) -> torch.Tensor:             # (N, Q)  signed SDF
+    """Compute signed SDF from canonical object points to the tool, for each config.
+
+    Applies R_obj + z_shift to get world-frame object points, then transforms them
+    into each config's tool canonical frame and queries the canonical tool mesh.
+    SDF convention: positive = outside tool, negative = inside tool.
+
+    Returns:
+        sdf : (N, Q)  signed distances
+    """
     device = trans.device
 
-    R = rot6d_to_matrix(rot6d)
-    pts_world = torch.einsum("pi, bji -> bpj", P_uniform, R) + trans.unsqueeze(1)  # (N, P, 3)
+    # Object canonical → world frame  (same for all configs)
+    p_world = P_obj @ R_obj.T                          # (Q, 3)
+    p_world = p_world.clone()
+    p_world[:, 2] -= z_shift                           # apply grounding
 
-    dist   = compute_unsigned_distance(pts_world, obj_verts, obj_faces)   # (N, P)
-    inside = compute_sign(pts_world, obj_verts, obj_faces)                # (N, P) bool
+    # World → tool canonical frame per config:  p_tool = R^T @ (p_world - t)
+    R   = rot6d_to_matrix(rot6d)                       # (N, 3, 3)
+    R_T = R.permute(0, 2, 1)                           # (N, 3, 3)
+    p_centered     = p_world.unsqueeze(0) - trans.unsqueeze(1)          # (N, Q, 3)
+    pts_tool_frame = torch.einsum("nij, nkj -> nki", R_T, p_centered)  # (N, Q, 3)
 
-    # Mask interior points with inf so they are never selected
-    sdf = torch.where(~inside, dist, torch.full_like(dist, float("inf")))  # (N, P)
+    N = trans.shape[0]
+    face_verts = kaolin.ops.mesh.index_vertices_by_faces(
+        tool_verts.unsqueeze(0), tool_faces
+    ).expand(N, -1, -1, -1)                                            # (N, G, 3, 3)
 
-    sel_pts = torch.zeros(N, max_pts, 3, device=device)
-    sel_sdf = torch.zeros(N, max_pts,    device=device)
+    sq_dist, _, _ = kaolin.metrics.trianglemesh.point_to_mesh_distance(
+        pts_tool_frame.contiguous(), face_verts
+    )
+    dist = torch.sqrt(sq_dist.clamp(min=1e-12))                        # (N, Q)
 
-    for b in range(N):
-        sdf_b   = sdf[b]
-        in_band = (sdf_b < near_contact_threshold).nonzero(as_tuple=False).squeeze(1)
-
-        if in_band.numel() == 0:
-            # Fallback: repeat the closest exterior point
-            closest = sdf_b.argmin().unsqueeze(0).expand(max_pts)
-            chosen  = closest
-        elif in_band.numel() <= max_pts:
-            pad    = in_band[0:1].expand(max_pts - in_band.numel())
-            chosen = torch.cat([in_band, pad], dim=0)
-        else:
-            perm   = torch.randperm(in_band.numel(), device=device)[:max_pts]
-            chosen = in_band[perm]
-
-        sel_pts[b] = P_uniform[chosen]   # canonical frame — pose-invariant
-        sel_sdf[b] = sdf_b[chosen]
-
-    return {
-        "near_contact_pts":       sel_pts.cpu(),
-        "near_contact_sdf":       sel_sdf.cpu(),
-        "near_contact_threshold": near_contact_threshold,
-    }
+    tool_verts_batch = tool_verts.unsqueeze(0).expand(N, -1, -1)
+    inside = kaolin.ops.mesh.check_sign(
+        tool_verts_batch, tool_faces, pts_tool_frame
+    )                                                                  # (N, Q) bool
+    sdf = torch.where(inside, -dist, dist)
+    return sdf.cpu()                                                   # (N, Q)
 
 
 # ==============================================================================
@@ -763,9 +775,13 @@ def filter_and_save(
     trans: torch.Tensor,
     rot6d: torch.Tensor,
     R_obj: torch.Tensor,
+    z_shift: torch.Tensor,
     obj_verts: torch.Tensor,
     obj_faces: torch.Tensor,
-    P_uniform: torch.Tensor,
+    tool_verts: torch.Tensor,
+    tool_faces: torch.Tensor,
+    P_uniform: torch.Tensor,      # (P, 3)  canonical tool pts  (sampled once)
+    P_obj_canonical: torch.Tensor,  # (Q, 3)  canonical object pts (sampled once)
     losses: dict,
     cfg: Config,
 ) -> int:
@@ -775,15 +791,26 @@ def filter_and_save(
       • per-sample MAX penetration depth  < pen_max_eps
       • per-sample contact loss           < contact_eps
 
-    The saved .pt file includes, per valid config:
-      - tool_translations / tool_rotations  : rigid pose
-      - pen_loss / contact_loss             : per-sample loss scalars
-      - contact_pts_obj_frame  (N, C, 3)   : C contact points in object frame
-      - contact_pts_tool_frame (N, C, 3)   : same C points in canonical tool frame
-      - contact_normals        (N, C, 3)   : outward unit normal of nearest object face
-      - near_contact_pts       (N, M, 3)   : up to 64 near-contact tool pts (canonical frame)
-      - near_contact_sdf       (N, M)      : unsigned SDF for each near-contact point
-      - near_contact_threshold : float     : threshold used for near-contact sampling
+    Saved .pt layout
+    ----------------
+    Stored ONCE per file (shared across all configs):
+      - tool_pts_canonical  (P, 3)  : canonical tool surface points
+      - obj_pts_canonical   (Q, 3)  : canonical object surface points (before R_obj)
+      - object_rotation     (3, 3)  : R_obj applied to object
+      - obj_z_shift         scalar  : z grounding offset applied to object
+
+    Stored PER CONFIG (N entries):
+      - tool_translations   (N, 3)
+      - tool_rotations      (N, 3, 3)
+      - pen_loss            (N,)
+      - contact_loss        (N,)
+      - tool_pts_sdf        (N, P)  : signed SDF tool canonical pts → object
+      - obj_pts_sdf         (N, Q)  : signed SDF object canonical pts → tool
+      - contact_pts_obj_frame   (N, 5, 3)
+      - contact_pts_tool_frame  (N, 5, 3)
+      - contact_normals         (N, 5, 3)
+
+    SDF sign convention: positive = outside, negative = inside.
 
     Returns:
         n_saved: int
@@ -804,7 +831,7 @@ def filter_and_save(
     # Reconstruct rotation matrices
     R_tool = rot6d_to_matrix(rot6d[valid])
 
-    # ---- Compute contact info (5 pts + normals) ----
+    # ---- Contact info (5 pts + normals) ----
     print("  Computing contact info …")
     contact_info = compute_contact_info(
         P_uniform, trans[valid], rot6d[valid], obj_verts, obj_faces, cfg,
@@ -812,30 +839,41 @@ def filter_and_save(
     C = contact_info["contact_pts_obj_frame"].shape[1]
     print(f"  Contact info: {C} pts/config (with face normals)")
 
-    # ---- Compute dense tool surface SDF ----
-    print("  Computing tool surface SDF …")
-    sdf_info = compute_tool_surface_sdf(
+    # ---- Tool canonical pts → object SDF ----
+    print(f"  Computing tool-side SDF ({P_uniform.shape[0]} pts × {n_valid} configs) …")
+    tool_pts_sdf = compute_tool_pts_sdf(
         P_uniform, trans[valid], rot6d[valid], obj_verts, obj_faces,
-    )
-    M = sdf_info["near_contact_pts"].shape[1]
-    print(f"  Near-contact SDF: up to {M} pts/config (threshold={sdf_info['near_contact_threshold']:.1e})")
+    )  # (N, P)
+
+    # ---- Object canonical pts → tool SDF ----
+    print(f"  Computing object-side SDF ({P_obj_canonical.shape[0]} pts × {n_valid} configs) …")
+    obj_pts_sdf = compute_obj_pts_sdf(
+        P_obj_canonical, R_obj, z_shift, tool_verts, tool_faces,
+        trans[valid], rot6d[valid],
+    )  # (N, Q)
+    print(f"  Done.")
 
     result = {
         "object_mesh_path": str(Path(cfg.object_mesh_path).resolve()),
-        "tool_mesh_path": str(Path(cfg.tool_mesh_path).resolve()),
-        "object_rotation": R_obj.cpu(),
-        "tool_translations": trans[valid].cpu(),
-        "tool_rotations": R_tool.cpu(),
-        "pen_loss": losses["pen_max_ps"][valid].cpu(),
-        "contact_loss": losses["contact_ps"][valid].cpu(),
-        # ---- Contact metadata (sparse: 5 pts + normals) ----
-        "contact_pts_obj_frame":  contact_info["contact_pts_obj_frame"],   # (N, C, 3)
-        "contact_pts_tool_frame": contact_info["contact_pts_tool_frame"],  # (N, C, 3)
-        "contact_normals":        contact_info["contact_normals"],         # (N, C, 3)
-        # ---- Near-contact SDF (wider band, canonical frame) ----
-        "near_contact_pts":       sdf_info["near_contact_pts"],       # (N, M, 3)
-        "near_contact_sdf":       sdf_info["near_contact_sdf"],       # (N, M)
-        "near_contact_threshold": sdf_info["near_contact_threshold"],  # float
+        "tool_mesh_path":   str(Path(cfg.tool_mesh_path).resolve()),
+        # ---- Canonical clouds (stored ONCE, shared across all configs) ----
+        "tool_pts_canonical": P_uniform.cpu(),          # (P, 3)
+        "obj_pts_canonical":  P_obj_canonical.cpu(),    # (Q, 3)
+        # ---- Object pose (same for all configs in this file) ----
+        "object_rotation":    R_obj.cpu(),              # (3, 3)
+        "obj_z_shift":        z_shift.cpu(),            # scalar
+        # ---- Per-config poses ----
+        "tool_translations":  trans[valid].cpu(),       # (N, 3)
+        "tool_rotations":     R_tool.cpu(),             # (N, 3, 3)
+        "pen_loss":           losses["pen_max_ps"][valid].cpu(),
+        "contact_loss":       losses["contact_ps"][valid].cpu(),
+        # ---- Per-config SDF (same point order as canonical clouds above) ----
+        "tool_pts_sdf":       tool_pts_sdf,             # (N, P)  signed
+        "obj_pts_sdf":        obj_pts_sdf,              # (N, Q)  signed
+        # ---- Sparse contact geometry ----
+        "contact_pts_obj_frame":  contact_info["contact_pts_obj_frame"],   # (N, 5, 3)
+        "contact_pts_tool_frame": contact_info["contact_pts_tool_frame"],  # (N, 5, 3)
+        "contact_normals":        contact_info["contact_normals"],         # (N, 5, 3)
     }
 
     os.makedirs(os.path.dirname(cfg.output_path) or ".", exist_ok=True)
@@ -859,17 +897,23 @@ def main(cfg: Config) -> None:
     print(f"Loading tool mesh:   {cfg.tool_mesh_path}")
     tool_verts, tool_faces = load_mesh(cfg.tool_mesh_path, device)
 
-    # ---- 2. Randomise object pose & ground ----
-    print("Randomising object pose & grounding …")
-    obj_verts, R_obj = randomise_object_pose(obj_verts, obj_faces)
+    # ---- 2. Sample canonical object cloud (before pose randomisation) ----
+    P_obj_canonical = sample_surface_points(
+        obj_verts, obj_faces, cfg.num_tool_surface_pts
+    )
+    print(f"  P_obj_canonical: {P_obj_canonical.shape[0]} points (canonical object frame)")
 
-    # ---- 3. Sample uniform cloud (used for ALL losses) ----
+    # ---- 3. Randomise object pose & ground ----
+    print("Randomising object pose & grounding …")
+    obj_verts, R_obj, z_shift = randomise_object_pose(obj_verts, obj_faces)
+
+    # ---- 4. Sample canonical tool cloud (used for ALL losses + SDF output) ----
     P_uniform = sample_surface_points(
         tool_verts, tool_faces, cfg.num_tool_surface_pts
     )
-    print(f"  P_uniform: {P_uniform.shape[0]} points")
+    print(f"  P_uniform (tool canonical): {P_uniform.shape[0]} points")
 
-    # ---- 4. Compute head/body subsets for init anchor selection ----
+    # ---- 5. Compute head/body subsets for init anchor selection ----
     head_area = load_tool_head_area(cfg.tools_json_path, cfg.tool_mesh_path)
     bounds = compute_region_bounds(tool_verts, head_area)
     if bounds is not None:
@@ -894,19 +938,19 @@ def main(cfg: Config) -> None:
         P_body = P_uniform
     print(f"  Init anchors: {P_head.shape[0]} head / {P_body.shape[0]} body")
 
-    # ---- 5. Compute intent split ----
+    # ---- 6. Compute intent split ----
     n_head_batch = int(cfg.batch_size * cfg.contact_mode_prob)
     n_body_batch = cfg.batch_size - n_head_batch
     print(f"  Batch split: {n_head_batch} head / {n_body_batch} body")
 
-    # ---- 6. Initialise tool poses (anchor → surface) ----
+    # ---- 7. Initialise tool poses (anchor → surface) ----
     print(f"Initialising {cfg.batch_size} tool poses …")
     trans_init, rot6d_init = initialise_tool_poses(
         P_uniform, P_head, P_body, n_head_batch,
         obj_verts, obj_faces, cfg,
     )
 
-    # ---- 6b. Optionally save initial poses for debugging ----
+    # ---- 7b. Optionally save initial poses for debugging ----
     if cfg.save_init_path:
         R_init = rot6d_to_matrix(rot6d_init)
         init_result = {
@@ -920,15 +964,17 @@ def main(cfg: Config) -> None:
         torch.save(init_result, cfg.save_init_path)
         print(f"  ✓ Initial poses saved to {cfg.save_init_path}")
 
-    # ---- 7. Optimise ----
+    # ---- 8. Optimise ----
     print(f"Running {cfg.opt_steps} Adam steps …")
     trans_opt, rot6d_opt, final_losses = optimise(
         P_uniform, obj_verts, obj_faces, trans_init, rot6d_init, cfg,
     )
 
-    # ---- 8. Filter & save ----
+    # ---- 9. Filter & save ----
     n_saved = filter_and_save(
-        trans_opt, rot6d_opt, R_obj, obj_verts, obj_faces, P_uniform, final_losses, cfg,
+        trans_opt, rot6d_opt, R_obj, z_shift,
+        obj_verts, obj_faces, tool_verts, tool_faces,
+        P_uniform, P_obj_canonical, final_losses, cfg,
     )
     print(f"\nDone.  {n_saved} valid contact configurations saved.")
 
@@ -949,7 +995,7 @@ def parse_args() -> Config:
     p.add_argument("--tools-json", type=str, default="",
                    help="Path to tools_adjusted.json for head_area lookup")
     p.add_argument("--batch-size", type=int, default=512)
-    p.add_argument("--num-pts", type=int, default=1024,
+    p.add_argument("--num-pts", type=int, default=512,
                    help="Uniform surface cloud points (all losses)")
     p.add_argument("--contact-mode-prob", type=float, default=0.7,
                    help="Fraction of batch targeting head vs body for init")

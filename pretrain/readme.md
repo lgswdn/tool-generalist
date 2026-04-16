@@ -74,10 +74,52 @@ A configuration is kept when **both** criteria are met:
 - $\ell_{\text{contact}} < 8 \times 10^{-3}$ (good surface contact)
 
 #### Output `.pt` file contains:
-- **Object pose** — the random rotation applied to the object.
-- **Tool pose** — optimised translation and rotation for each accepted configuration.
-- **Contact geometry** — for each accepted pose, sample 5 points from those with $\text{SDF} < 5 \times 10^{-3}$ and record their object-face normals.
-- **Near-contact cloud** — randomly sample points with $\text{SDF} < 0.03$; record each point and its signed distance value.
+
+| Field | Shape | Description |
+|-------|-------|-------------|
+| `object_rotation` | `(3,3)` | Rotation applied to the object |
+| `tool_translations` | `(N,3)` | Optimised tool translations |
+| `tool_rotations` | `(N,3,3)` | Optimised tool rotations |
+| `pen_loss` / `contact_loss` | `(N,)` | Per-config quality metrics |
+| `contact_pts_obj_frame` | `(N,5,3)` | 5 contact points in world/object frame |
+| `contact_pts_tool_frame` | `(N,5,3)` | Same points in canonical tool frame |
+| `contact_normals` | `(N,5,3)` | Outward object face normal at each contact point |
+| `near_contact_pts` | `(N,64,3)` | Near-contact tool pts in canonical frame ($\text{SDF} < 0.03$) |
+| `near_contact_sdf` | `(N,64)` | Unsigned SDF for each near-contact point |
+| `all_pts_canonical` | `(N,P,3)` | **All** $P$ tool surface points in canonical frame |
+| `all_pts_sdf` | `(N,P)` | Signed SDF of each tool point to object (+outside / −inside) |
+| `obj_pts_world` | `(Q,3)` | $Q$ object surface points in world frame *(fixed across configs)* |
+| `obj_pts_sdf` | `(N,Q)` | Signed SDF of each object point to tool (+outside / −inside) |
+
+The last two pairs enable **mutual SDF supervision**: both the tool and the object can act as the query side, allowing an encoder to learn geometry from either perspective.
+
+---
+
+## Geometry Learning: SDFSegmentor
+
+We use a joint-ViT architecture (`SDFSegmentor`) that processes concatenated tool and object point clouds to predict contact probability and surface alignment.
+
+### Usage
+```bash
+# Train the model
+python train_sdf_segmentor.py \
+    --data-dir ./results \
+    --batch-size 64 \
+    --epochs 50 \
+    --lr 1e-4
+
+# Inference
+python infer_sdf_segmentor.py --input scene.pt --model checkpoints/best.pth
+```
+
+### CLI Flags
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--embed-dim` | `256` | ViT hidden dimension |
+| `--depth` | `6` | Number of transformer blocks |
+| `--num-heads` | `8` | Attention heads |
+| `--use-sdf` | `True` | Include SDF values as input features |
+| `--loss-weight-contact` | `1.0` | Weight for contact classification loss |
 
 ---
 
@@ -86,15 +128,16 @@ A configuration is kept when **both** criteria are met:
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--tools-json` | `""` | Path to `tools_adjusted.json` for head area lookup |
-| `--head-ratio` | `0.7` | Fraction of surface points sampled from the head area |
 | `--save-init` | `""` | Save initial poses (pre-opt) as `.pt` for debugging |
 | `--batch-size` | `512` | Number of random tool poses to optimise in parallel |
-| `--opt-steps` | `80` | Number of Adam steps |
+| `--num-pts` | `512` | Uniform surface cloud size (tool) |
+| `--opt-steps` | `200` | Number of Adam steps |
 | `--lr` | `5e-3` | Learning rate |
-| `--k-closest` | `32` | Number of closest points for the contact loss |
-| `--w-pen` | `50` | Penetration loss weight |
+| `--w-pen` | `30` | Penetration loss weight |
 | `--w-contact` | `1` | Contact (attraction) loss weight |
 | `--w-floor` | `20` | Floor penalty weight |
+| `--pen-max-eps` | `3e-4` | Max per-config penetration depth to accept |
+| `--contact-eps` | `8e-3` | Max contact loss to accept |
 
 ---
 
@@ -150,20 +193,82 @@ isaaclab -p pretrain/view_contacts_isaac.py \
 
 ---
 
-## Pretraining the Geometry Encoder
+## Pretraining the Geometry Encoder (`SDFSegmentor`)
 
-The `.pt` files are used to pretrain a dual-encoder + diffusion model:
+The `.pt` files are used to pretrain `SDFSegmentor`—a joint-ViT encoder that predicts
+**mutual signed SDF values** (tool→object and object→tool) from 3-D surface clouds.
 
-- **Encoder**: shared `ICPNet` applied separately to the tool point cloud (canonical frame)
-  and the object point cloud (loaded from mesh, rotated by `object_rotation`).
-- **Diffusion head**: small DDPM MLP conditioned on fused tool+object features.
-- **Target (39D)**: contact points `(5×3)` + contact normals `(5×3)` + tool pose `(6D rot + 3D trans)`.
-- **Loss**: noise prediction MSE + Chamfer distance on contact points.
+### Architecture
+
+```
+tool_pc  [B, N, 3] ──┐
+                      ├─ cat → [B, 2N, 3]
+obj_pc   [B, N, 3] ──┘
+         │
+         ▼  per-group FPS+KNN  (N points per stream, K points per patch)
+         │
+         ▼  patches  [B, 2P, K, 3]
+         │
+         ▼  PointNetPatchEncoder  (shared, permutation-invariant)
+            per-point MLP → max-pool + mean-pool → projection
+         │
+         ▼  patch tokens  [B, 2P, D]
+         │
+         ├─ + positional embedding  (patch centre → D, sinusoidal MLP)
+         ├─ + type embedding        (tool=0 / object=1, learnable)
+         ├─ + CLS token prepended
+         │
+         ▼  joint ViT  (depth L, H heads)
+            ← cross-stream attention between tool & object patches
+         │
+         ├─ global_feat  = CLS output      [B, D]
+         ├─ tool_tokens  = first P tokens  [B, P, D]
+         └─ obj_tokens   = last  P tokens  [B, P, D]
+                 │
+          ┌──────┴──────┐
+          ▼             ▼
+    tool SDF head   obj SDF head   (independent MLP heads)
+    [B, N] or [B, P]
+```
+
+**Key design decisions:**
+- **PointNet patch encoder** (max+mean pool): permutation-invariant, captures
+  local geometry extrema better than a plain MLP applied to flattened coords.
+- **Joint ViT**: tool and object patches attend to each other implicitly—patch
+  tokens already encode cross-stream proximity before the SDF heads fire.
+- **Type embeddings** (tool=0 / object=1): additive learnable tokens, following
+  the `ActorCriticMultiICP` pattern.
+- **Loss**: Huber (smooth-L1) on predicted vs. GT SDF for both streams.
+
+### Quick Start
 
 ```bash
-# Generate data first
+# Step 1: generate data
 python gen_dataset.py --num-pairs 200 --gpus 2 3
 
-# Then train (TBD — train.py is the planned entry point)
-# python train.py --data-dir tmp_data/ --gpus 2 3
+# Step 2: train (point-level SDF, defaults)
+python train.py --data-dir tmp_data/
+
+# Patch-level SDF with a deeper ViT
+python train.py --data-dir tmp_data/ --head-mode patch --patch-agg mean \
+    --vit-depth 6 --vit-heads 8 --encoder-channel 256
+
+# Multi-GPU
+torchrun --nproc_per_node=2 train.py --data-dir tmp_data/
+
+# Resume
+python train.py --data-dir tmp_data/ --resume checkpoints/last.pt
 ```
+
+### Encoder CLI Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--num-pts` | `512` | Points per cloud (N) |
+| `--patch-size` | `32` | Points per FPS patch (K) |
+| `--encoder-channel` | `128` | Patch token dimension (D) |
+| `--vit-depth` | `4` | Number of ViT transformer layers |
+| `--vit-heads` | `4` | Number of ViT attention heads |
+| `--freeze-encoder` | `False` | Freeze encoder; train SDF heads only |
+| `--head-mode` | `point` | `point` = per-point SDF \| `patch` = per-patch SDF |
+| `--patch-agg` | `mean` | GT aggregation for patch mode (`mean`/`min`/`max`) |

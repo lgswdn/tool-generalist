@@ -1,15 +1,24 @@
 """dataset.py — ContactDataset for geometry encoder pretraining.
 
-Each sample = one converged contact config from a .pt file:
-  - tool_pc   : (512, 3) tool point cloud in WORLD frame (posed)
-  - object_pc : (512, 3) object point cloud in WORLD frame
-  - contact_pts: (5, 3)  ground-truth contact points in world/object frame
+Each .pt file stores:
+  Shared (once per file):
+    tool_pts_canonical  (P, 3)  surface points in canonical tool frame
+    obj_pts_canonical   (Q, 3)  surface points in canonical object frame (before R_obj)
+    object_rotation     (3, 3)  R_obj
+    obj_z_shift         scalar  grounding offset
 
-The tool cloud is constructed by loading the canonical tool OBJ, sampling
-NUM_TOOL_PTS surface points, then applying tool_rotations[i] + tool_translations[i].
+  Per contact config:
+    tool_translations  (N, 3)
+    tool_rotations     (N, 3, 3)
+    tool_pts_sdf       (N, P)  signed SDF: tool canonical pts → object  (+out/-in)
+    obj_pts_sdf        (N, Q)  signed SDF: object canonical pts → tool  (+out/-in)
+    contact_pts_obj_frame   (N, 5, 3)
+    contact_pts_tool_frame  (N, 5, 3)
+    contact_normals         (N, 5, 3)
 
-The object cloud is constructed by loading the object OBJ, applying
-object_rotation, then sampling NUM_OBJ_PTS surface points.
+Each dataset item corresponds to one config index i from one .pt file.
+The canonical clouds serve as the geometry input; the SDF arrays provide
+the dense supervision signal for mutual tool↔object encoder training.
 """
 
 from __future__ import annotations
@@ -29,142 +38,89 @@ NUM_OBJ_PTS  = 512
 
 
 # --------------------------------------------------------------------------- #
-# Mesh sampling utilities
-# --------------------------------------------------------------------------- #
-
-def _triangle_areas(verts: torch.Tensor, faces: torch.Tensor) -> torch.Tensor:
-    """Return area of each triangle face. verts: (V,3), faces: (F,3) → (F,)."""
-    v0 = verts[faces[:, 0]]
-    v1 = verts[faces[:, 1]]
-    v2 = verts[faces[:, 2]]
-    cross = torch.linalg.cross(v1 - v0, v2 - v0)
-    return 0.5 * cross.norm(dim=-1)
-
-
-def sample_mesh_surface(verts: torch.Tensor, faces: torch.Tensor,
-                         n: int, seed: int | None = None) -> torch.Tensor:
-    """Uniformly sample n surface points via area-weighted barycentric sampling."""
-    areas = _triangle_areas(verts, faces)
-    probs = areas / areas.sum()
-    if seed is not None:
-        gen = torch.Generator()
-        gen.manual_seed(seed)
-    else:
-        gen = None
-    face_idx = torch.multinomial(probs, n, replacement=True, generator=gen)
-    selected_faces = faces[face_idx]  # (n, 3)
-    v0 = verts[selected_faces[:, 0]]
-    v1 = verts[selected_faces[:, 1]]
-    v2 = verts[selected_faces[:, 2]]
-    # Random barycentric coords
-    r1 = torch.rand(n, 1, generator=gen)
-    r2 = torch.rand(n, 1, generator=gen)
-    mask = (r1 + r2) > 1.0
-    r1[mask] = 1.0 - r1[mask]
-    r2[mask] = 1.0 - r2[mask]
-    pts = (1 - r1 - r2) * v0 + r1 * v1 + r2 * v2
-    return pts  # (n, 3)
-
-
-def _load_obj_verts_faces(path: str) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Minimal .obj loader — returns (V,3) verts and (F,3) tri faces."""
-    verts, faces = [], []
-    with open(path) as f:
-        for line in f:
-            if line.startswith("v "):
-                verts.append(list(map(float, line.split()[1:4])))
-            elif line.startswith("f "):
-                tokens = line.split()[1:]
-                ids = [int(t.split("/")[0]) - 1 for t in tokens]
-                # Fan triangulation for quads/polygons
-                for i in range(1, len(ids) - 1):
-                    faces.append([ids[0], ids[i], ids[i + 1]])
-    return (torch.tensor(verts, dtype=torch.float32),
-            torch.tensor(faces, dtype=torch.long))
-
-
-# --------------------------------------------------------------------------- #
 # Dataset
 # --------------------------------------------------------------------------- #
 
 class ContactDataset(Dataset):
-    """Each item is one (tool_pc, object_pc, contact_pts) triple."""
+    """Each item is one (tool_pc, object_pc, contact_pts, sdf, …) bundle.
+
+    Geometry:
+        tool_pc  — canonical tool cloud applied with tool rotation + translation
+        obj_pc   — canonical object cloud applied with R_obj + z_shift
+
+    SDF supervision (per-config, same point ordering as the clouds above):
+        tool_pts_sdf  — signed SDF of tool canonical pts to object
+        obj_pts_sdf   — signed SDF of object canonical pts to tool
+    """
 
     def __init__(
         self,
         pt_files: List[str],
-        num_tool_pts: int = NUM_TOOL_PTS,
-        num_obj_pts:  int = NUM_OBJ_PTS,
         augment: bool = True,
     ):
-        self.num_tool_pts = num_tool_pts
-        self.num_obj_pts  = num_obj_pts
-        self.augment      = augment
+        self.augment = augment
 
         # Expand: (pt_file, config_index) pairs
         self._index: List[Tuple[str, int]] = []
-        # Cache: mesh data per path to avoid re-loading
-        self._mesh_cache: dict = {}
+        self._pt_cache: dict = {}
 
         for path in pt_files:
             data = torch.load(path, map_location="cpu", weights_only=False)
             n = data["tool_translations"].shape[0]
             for i in range(n):
                 self._index.append((path, i))
-
-        # Pre-load all .pt metadata (not the meshes)
-        self._pt_cache: dict = {}
-        for path in pt_files:
-            self._pt_cache[path] = torch.load(
-                path, map_location="cpu", weights_only=False
-            )
+            self._pt_cache[path] = data
 
     def __len__(self) -> int:
         return len(self._index)
-
-    def _get_mesh(self, mesh_path: str) -> Tuple[torch.Tensor, torch.Tensor]:
-        if mesh_path not in self._mesh_cache:
-            v, f = _load_obj_verts_faces(mesh_path)
-            self._mesh_cache[mesh_path] = (v, f)
-        return self._mesh_cache[mesh_path]
 
     def __getitem__(self, idx: int):
         pt_path, cfg_i = self._index[idx]
         data = self._pt_cache[pt_path]
 
-        # ---- Tool point cloud (world frame) --------------------------------
-        tool_v, tool_f = self._get_mesh(data["tool_mesh_path"])
-        tool_pts_canonical = sample_mesh_surface(tool_v, tool_f, self.num_tool_pts)
+        # ---- Canonical clouds (stored once per file) -------------------------
+        P_tool = data["tool_pts_canonical"]  # (P, 3)
+        P_obj  = data["obj_pts_canonical"]   # (Q, 3)
+
+        # ---- Reconstruct world-frame clouds ----------------------------------
+        # Tool: apply rotation + translation for this config
         R_tool = data["tool_rotations"][cfg_i]      # (3, 3)
         t_tool = data["tool_translations"][cfg_i]   # (3,)
-        tool_pc = tool_pts_canonical @ R_tool.T + t_tool  # (N, 3)
+        tool_pc = P_tool @ R_tool.T + t_tool         # (P, 3)
 
-        # ---- Object point cloud (world frame) ------------------------------
-        obj_v, obj_f = self._get_mesh(data["object_mesh_path"])
-        R_obj = data["object_rotation"]              # (3, 3)
-        obj_pts = obj_v @ R_obj.T                   # apply rotation
-        # Ground: shift so lowest z = 0
-        obj_pts[:, 2] -= obj_pts[:, 2].min()
-        obj_pc = sample_mesh_surface(
-            obj_pts,
-            obj_f,
-            self.num_obj_pts,
-        )
+        # Object: apply R_obj + z_shift (same for all configs in this file)
+        R_obj   = data["object_rotation"]            # (3, 3)
+        z_shift = data["obj_z_shift"]               # scalar
+        obj_pc  = P_obj @ R_obj.T                    # (Q, 3)
+        obj_pc  = obj_pc.clone()
+        obj_pc[:, 2] -= z_shift
 
-        # ---- Contact points + normals (world ≈ object frame) ----------------
+        # ---- SDF arrays (per-config) -----------------------------------------
+        tool_pts_sdf = data["tool_pts_sdf"][cfg_i]  # (P,)  signed
+        obj_pts_sdf  = data["obj_pts_sdf"][cfg_i]   # (Q,)  signed
+
+        # ---- Contact geometry (sparse) ---------------------------------------
         contact_pts     = data["contact_pts_obj_frame"][cfg_i]  # (5, 3)
         contact_normals = data["contact_normals"][cfg_i]        # (5, 3)
 
-        # ---- Optional augmentation: small Gaussian jitter on both clouds ---
+        # ---- Optional augmentation: small Gaussian jitter on point clouds ---
         if self.augment:
             tool_pc = tool_pc + torch.randn_like(tool_pc) * 1e-3
             obj_pc  = obj_pc  + torch.randn_like(obj_pc)  * 1e-3
 
         return {
-            "tool_pc":          tool_pc.float(),       # (N_tool, 3)
-            "object_pc":        obj_pc.float(),        # (N_obj, 3)
-            "contact_pts":      contact_pts.float(),   # (5, 3)
-            "contact_normals":  contact_normals.float(),  # (5, 3)
+            # World-frame clouds (for encoder input)
+            "tool_pc":             tool_pc.float(),          # (P, 3)
+            "obj_pc":              obj_pc.float(),           # (Q, 3)
+            # Canonical clouds (pose-invariant geometry)
+            "tool_pts_canonical":  P_tool.float(),           # (P, 3)
+            "obj_pts_canonical":   P_obj.float(),            # (Q, 3)
+            # Dense SDF supervision
+            "tool_pts_sdf":        tool_pts_sdf.float(),     # (P,)
+            "obj_pts_sdf":         obj_pts_sdf.float(),      # (Q,)
+            # Sparse contact geometry
+            "contact_pts":         contact_pts.float(),      # (5, 3)
+            "contact_normals":     contact_normals.float(),  # (5, 3)
         }
 
 
@@ -181,7 +137,7 @@ def make_split(
     data_dir: str,
     val_ratio: float = 0.1,
     seed: int = 42,
-    **dataset_kwargs,
+    augment: bool = True,
 ) -> Tuple[ContactDataset, ContactDataset]:
     """Return (train_dataset, val_dataset) split by file."""
     files = collect_pt_files(data_dir)
@@ -193,6 +149,6 @@ def make_split(
     val_files   = files[:n_val]
     train_files = files[n_val:]
     return (
-        ContactDataset(train_files, **dataset_kwargs),
-        ContactDataset(val_files,   augment=False, **dataset_kwargs),
+        ContactDataset(train_files, augment=augment),
+        ContactDataset(val_files,   augment=False),
     )

@@ -1,11 +1,19 @@
-"""train.py — Training script for the geometry encoder (ContactPredictor).
+"""train.py — Training script for SDFSegmentor geometry encoder pretraining.
+
+SDFSegmentor uses a joint ViT encoder (PointNet patch encoder + joint ViT
+transformer) that processes tool and object clouds together, enabling
+implicit cross-stream attention before SDF prediction.
 
 Usage:
-    # Single GPU
+    # Point-level SDF (default)
     python train.py --data-dir tmp_data/
 
+    # Patch-level SDF with larger ViT
+    python train.py --data-dir tmp_data/ --head-mode patch --patch-agg mean \\
+        --vit-depth 6 --vit-heads 8
+
     # Multi-GPU (DDP)
-    torchrun --nproc_per_node=2 train.py --data-dir tmp_data/ --gpus 2 3
+    torchrun --nproc_per_node=2 train.py --data-dir tmp_data/
 
     # Resume
     python train.py --data-dir tmp_data/ --resume checkpoints/last.pt
@@ -25,14 +33,13 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
-# Allow running from the pretrain/ directory directly
 _PRETRAIN_DIR = Path(__file__).resolve().parent
-_REPO_ROOT = _PRETRAIN_DIR.parent
+_REPO_ROOT    = _PRETRAIN_DIR.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from dataset import make_split, ContactDataset, collect_pt_files
-from model import ContactPredictor
+from dataset import make_split
+from model import SDFSegmentor
 
 
 # --------------------------------------------------------------------------- #
@@ -44,7 +51,6 @@ def is_main() -> bool:
 
 
 def setup_ddp() -> tuple[int, int]:
-    """Initialize DDP from torchrun env vars. Returns (rank, local_rank)."""
     rank       = int(os.environ.get("RANK", 0))
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
@@ -61,9 +67,9 @@ def setup_ddp() -> tuple[int, int]:
 def save_ckpt(path: Path, model: torch.nn.Module, optimizer, epoch: int,
               best_val: float):
     torch.save({
-        "epoch": epoch,
+        "epoch":    epoch,
         "best_val": best_val,
-        "model": (model.module if isinstance(model, DDP) else model).state_dict(),
+        "model":    (model.module if isinstance(model, DDP) else model).state_dict(),
         "optimizer": optimizer.state_dict(),
     }, path)
 
@@ -81,21 +87,32 @@ def load_ckpt(path: str, model: torch.nn.Module, optimizer=None):
 # Training loop
 # --------------------------------------------------------------------------- #
 
-def run_epoch(model, loader, optimizer, device, train: bool) -> tuple[float, dict]:
+def run_epoch(
+    model:     torch.nn.Module,
+    loader:    DataLoader,
+    optimizer,
+    device:    torch.device,
+    train:     bool,
+) -> tuple[float, dict]:
     model.train(train)
     total_loss = 0.0
     agg: dict[str, float] = {}
     n = 0
     ctx = torch.enable_grad() if train else torch.no_grad()
+
     with ctx:
         for batch in loader:
-            tool_pc     = batch["tool_pc"].to(device)
-            object_pc   = batch["object_pc"].to(device)
-            contact_gt  = batch["contact_pts"].to(device)
-            normals_gt  = batch["contact_normals"].to(device)
+            # ---- Inputs: world-frame point clouds -------------------------
+            tool_pc = batch["tool_pc"].to(device)   # (B, N, 3)
+            obj_pc  = batch["obj_pc"].to(device)    # (B, N, 3)
 
+            # ---- GT: per-point signed SDF --------------------------------
+            tool_sdf_gt = batch["tool_pts_sdf"].to(device)  # (B, N)
+            obj_sdf_gt  = batch["obj_pts_sdf"].to(device)   # (B, N)
+
+            # Forward + loss
             m = model.module if isinstance(model, DDP) else model
-            loss, metrics = m.loss(tool_pc, object_pc, contact_gt, normals_gt)
+            loss, metrics = m.loss(tool_pc, obj_pc, tool_sdf_gt, obj_sdf_gt)
 
             if train:
                 optimizer.zero_grad()
@@ -118,37 +135,51 @@ def run_epoch(model, loader, optimizer, device, train: bool) -> tuple[float, dic
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-dir",    default="tmp_data",
-                        help="Root dir containing .pt files")
-    parser.add_argument("--out-dir",     default="checkpoints",
+
+    # Data
+    parser.add_argument("--data-dir",   default="tmp_data",
+                        help="Root dir containing .pt contact files")
+    parser.add_argument("--out-dir",    default="checkpoints",
                         help="Where to save checkpoints")
+    parser.add_argument("--val-ratio",  type=float, default=0.1)
+
+    # Training
     parser.add_argument("--epochs",      type=int,   default=1000)
     parser.add_argument("--batch-size",  type=int,   default=64)
     parser.add_argument("--lr",          type=float, default=3e-4)
-    parser.add_argument("--val-ratio",   type=float, default=0.1)
     parser.add_argument("--num-workers", type=int,   default=4)
     parser.add_argument("--resume",      default="",
-                        help="Path to checkpoint to resume from")
-    parser.add_argument("--icp-weights", default="",
-                        help="Optional pretrained ICPNet weights to warm-start")
-    parser.add_argument("--freeze-icp",  action="store_true",
-                        help="Freeze the ICP encoder (train head only)")
-    # ICPNet architecture
-    parser.add_argument("--num-pts",          type=int, default=512)
-    parser.add_argument("--encoder-channel",  type=int, default=128)
-    parser.add_argument("--patch-size",       type=int, default=32)
+                        help="Checkpoint path to resume from")
+
+    # Encoder
+    parser.add_argument("--num-pts",          type=int, default=512,
+                        help="Points per cloud (N)")
+    parser.add_argument("--encoder-channel",  type=int, default=128,
+                        help="Patch token dimension D")
+    parser.add_argument("--patch-size",       type=int, default=32,
+                        help="Points per FPS patch (K)")
+    parser.add_argument("--vit-depth",        type=int, default=4,
+                        help="Number of ViT transformer layers")
+    parser.add_argument("--vit-heads",        type=int, default=4,
+                        help="Number of ViT attention heads")
+    parser.add_argument("--freeze-encoder",   action="store_true",
+                        help="Freeze the ViT encoder (train SDF heads only)")
+
+    # SDF head
+    parser.add_argument("--head-mode",   default="point",
+                        choices=["point", "patch"],
+                        help="'point': per-point SDF  |  'patch': per-patch SDF")
+    parser.add_argument("--patch-agg",   default="mean",
+                        choices=["mean", "min", "max"],
+                        help="GT aggregation for patch mode")
+
     args = parser.parse_args()
 
     rank, local_rank = setup_ddp()
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
 
     # ---- Data ----------------------------------------------------------------
-    train_ds, val_ds = make_split(
-        args.data_dir,
-        val_ratio=args.val_ratio,
-        num_tool_pts=args.num_pts,
-        num_obj_pts=args.num_pts,
-    )
+    train_ds, val_ds = make_split(args.data_dir, val_ratio=args.val_ratio)
     if is_main():
         print(f"Train samples: {len(train_ds)}  Val samples: {len(val_ds)}")
 
@@ -170,30 +201,38 @@ def main():
     )
 
     # ---- Model ---------------------------------------------------------------
-    model = ContactPredictor(
-        num_contact_pts=5,
-        icp_weights_path=args.icp_weights or None,
-        freeze_icp=args.freeze_icp,
+    model = SDFSegmentor(
+        head_mode=args.head_mode,
+        patch_agg=args.patch_agg,
         num_pts=args.num_pts,
         patch_size=args.patch_size,
         encoder_channel=args.encoder_channel,
+        vit_depth=args.vit_depth,
+        vit_heads=args.vit_heads,
+        freeze_encoder=args.freeze_encoder,
     ).to(device)
 
     if dist.is_initialized():
         model = DDP(model, device_ids=[local_rank])
 
-    optimizer = torch.optim.AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=args.lr,
+    if is_main():
+        total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"Model: SDFSegmentor  head={args.head_mode}  "
         weight_decay=1e-4,
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+              f"vit_depth={args.vit_depth}  vit_heads={args.vit_heads}  "
+              f"trainable params: {total_params:,}")
+
+    optimizer = torch.optim.AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=args.lr,
         optimizer, T_max=args.epochs
     )
 
     # ---- Resume --------------------------------------------------------------
     start_epoch = 0
-    best_val = float("inf")
+    best_val    = float("inf")
     if args.resume:
         start_epoch, best_val = load_ckpt(args.resume, model, optimizer)
         if is_main():
@@ -216,17 +255,16 @@ def main():
         if is_main():
             dt = time.time() - t0
             lr = scheduler.get_last_lr()[0]
-            chamfer_v = val_m.get("chamfer", float("nan"))
-            normal_v  = val_m.get("normal_cos", float("nan"))
-            print(f"Epoch {epoch+1:04d}/{args.epochs}  "
-                  f"train={train_loss:.5f}  val={val_loss:.5f}  "
-                  f"chamfer={chamfer_v:.5f}  normal_cos={normal_v:.5f}  "
-                  f"lr={lr:.2e}  t={dt:.1f}s")
+            print(
+                f"Epoch {epoch+1:04d}/{args.epochs}  "
+                f"train={train_loss:.5f}  val={val_loss:.5f}  "
+                f"tool_sdf={val_m.get('tool_sdf_loss', float('nan')):.5f}  "
+                f"obj_sdf={val_m.get('obj_sdf_loss', float('nan')):.5f}  "
+                f"lr={lr:.2e}  t={dt:.1f}s"
+            )
 
-            # Save last checkpoint
             save_ckpt(out_dir / "last.pt", model, optimizer, epoch + 1, best_val)
 
-            # Save best
             if val_loss < best_val:
                 best_val = val_loss
                 save_ckpt(out_dir / "best.pt", model, optimizer, epoch + 1, best_val)
