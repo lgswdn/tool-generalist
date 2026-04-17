@@ -33,6 +33,12 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
+try:
+    import wandb
+    HAS_WANDB = True
+except ImportError:
+    HAS_WANDB = False
+
 _PRETRAIN_DIR = Path(__file__).resolve().parent
 _REPO_ROOT    = _PRETRAIN_DIR.parent
 if str(_REPO_ROOT) not in sys.path:
@@ -151,6 +157,14 @@ def main():
     parser.add_argument("--resume",      default="",
                         help="Checkpoint path to resume from")
 
+    # Logging
+    parser.add_argument("--wandb",       action="store_true",
+                        help="Enable Weights & Biases logging")
+    parser.add_argument("--wandb-project", default="sdf-segmentor",
+                        help="W&B project name")
+    parser.add_argument("--wandb-name",  default=None,
+                        help="W&B run name (default: auto-generated)")
+
     # Encoder
     parser.add_argument("--num-pts",          type=int, default=512,
                         help="Points per cloud (N)")
@@ -221,6 +235,17 @@ def main():
               f"vit_depth={args.vit_depth}  vit_heads={args.vit_heads}  "
               f"trainable params: {total_params:,}")
 
+        # Initialize wandb
+        if args.wandb:
+            if not HAS_WANDB:
+                raise RuntimeError("--wandb requires wandb to be installed. Run: pip install wandb")
+            wandb.init(
+                project=args.wandb_project,
+                name=args.wandb_name,
+                config=vars(args),
+            )
+            wandb.watch(model, log="all", log_freq=100)
+
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
         lr=args.lr,
@@ -268,12 +293,30 @@ def main():
                 f"lr={lr:.2e}  t={dt:.1f}s"
             )
 
+            # Wandb logging
+            if args.wandb and HAS_WANDB:
+                wandb.log({
+                    "epoch": epoch + 1,
+                    "train/loss": train_loss,
+                    "val/loss": val_loss,
+                    "val/tool_sdf_loss": val_m.get('tool_sdf_loss', float('nan')),
+                    "val/obj_sdf_loss": val_m.get('obj_sdf_loss', float('nan')),
+                    "train/tool_sdf_loss": train_m.get('tool_sdf_loss', float('nan')),
+                    "train/obj_sdf_loss": train_m.get('obj_sdf_loss', float('nan')),
+                    "lr": lr,
+                    "time": dt,
+                })
+
             save_ckpt(out_dir / "last.pt", model, optimizer, epoch + 1, best_val)
 
             if val_loss < best_val:
                 best_val = val_loss
                 save_ckpt(out_dir / "best.pt", model, optimizer, epoch + 1, best_val)
                 print(f"  ✓ New best val: {best_val:.5f}")
+
+    # Finish wandb run
+    if is_main() and args.wandb:
+        wandb.finish()
 
     if dist.is_initialized():
         dist.destroy_process_group()
