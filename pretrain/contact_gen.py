@@ -51,15 +51,20 @@ class Config:
     save_init_path: str = ""        # if set, dump initial poses (pre-optimisation)
     tools_json_path: str = ""       # path to tools_adjusted.json (for head_area)
 
+    # ----- Scale (matches RL) -----
+    tool_scale: float = 0.1         # tool uniform scale (fixed, from paths.yaml)
+    object_scale_range: tuple[float, float] = (0.1, 0.2)  # object scale randomized per run
+
     # ----- Batch & sampling -----
     batch_size: int = 512           # number of random tool poses
     num_tool_surface_pts: int = 512   # uniform surface cloud (all losses)
     contact_mode_prob: float = 0.7   # prob of targeting head (vs handle/body)
     device: str = "cuda:0"
+    seed: int = 42                  # random seed (change for different object poses)
 
     # ----- Optimisation -----
     opt_steps: int = 200
-    lr: float = 5e-3
+    lr: float = 1e-3
     # Loss weights
     w_pen: float = 10.0             # penetration penalty
     w_contact: float = 1.0          # attraction loss
@@ -302,22 +307,22 @@ def randomise_object_pose(
 # ==============================================================================
 
 def _project_orientation(R: torch.Tensor) -> torch.Tensor:
-    """Ensure the tool's local +Z maps to a direction with global z <= 0.
+    """Minimal orientation constraint: allow all approach angles.
 
-    Strategy: if the rotated +Z has positive global-z, flip it by
-    composing with a 180° rotation about the local X axis.
+    Only flips orientations where tool's +Z points very strongly upward (> 0.9),
+    which would be unnatural (tool pointing up like holding a flag).
+    Allows sideways, downward, and angled approaches for diverse contact coverage.
 
     Args:
         R: (N, 3, 3)
 
     Returns:
-        R_proj: (N, 3, 3) with the constraint enforced.
+        R_proj: (N, 3, 3) with minimal constraint.
     """
     z_col = R[:, :, 2]       # (N, 3) – image of local +Z
-    bad = z_col[:, 2] > 0    # violating samples
+    bad = z_col[:, 2] > 0.9  # only flip if nearly vertical upward
 
     if bad.any():
-        # Rotation by π about X:  diag(1, -1, -1)
         flip = torch.eye(3, device=R.device).unsqueeze(0).expand(bad.sum(), -1, -1).clone()
         flip[:, 1, 1] = -1.0
         flip[:, 2, 2] = -1.0
@@ -616,7 +621,7 @@ def compute_contact_info(
                        (default 5e-3, same scale as contact_eps).
 
     Returns dict with keys:
-        contact_pts_obj_frame  : (N, n_contact, 3)  – points in object frame
+        contact_pts_world  : (N, n_contact, 3)  – points in world frame
         contact_pts_tool_frame : (N, n_contact, 3)  – same points in tool frame
         contact_normals        : (N, n_contact, 3)  – outward face normals
         contact_sdfs           : (N, n_contact)     – SDF (distance) at each point
@@ -683,7 +688,7 @@ def compute_contact_info(
     contact_normals = face_normals[face_idx]   # (N, n_contact, 3)
 
     return {
-        "contact_pts_obj_frame":  sel_pts_world.cpu(),   # (N, n_contact, 3)
+        "contact_pts_world":      sel_pts_world.cpu(),   # (N, n_contact, 3) world frame
         "contact_pts_tool_frame": sel_pts_tool.cpu(),    # (N, n_contact, 3)
         "contact_normals":        contact_normals.cpu(), # (N, n_contact, 3)
     }
@@ -784,6 +789,7 @@ def filter_and_save(
     P_obj_canonical: torch.Tensor,  # (Q, 3)  canonical object pts (sampled once)
     losses: dict,
     cfg: Config,
+    obj_scale: float,
 ) -> int:
     """Keep only converged configurations and save to disk.
 
@@ -806,7 +812,7 @@ def filter_and_save(
       - contact_loss        (N,)
       - tool_pts_sdf        (N, P)  : signed SDF tool canonical pts → object
       - obj_pts_sdf         (N, Q)  : signed SDF object canonical pts → tool
-      - contact_pts_obj_frame   (N, 5, 3)
+      - contact_pts_world       (N, 5, 3)  : contact points in world frame
       - contact_pts_tool_frame  (N, 5, 3)
       - contact_normals         (N, 5, 3)
 
@@ -836,7 +842,7 @@ def filter_and_save(
     contact_info = compute_contact_info(
         P_uniform, trans[valid], rot6d[valid], obj_verts, obj_faces, cfg,
     )
-    C = contact_info["contact_pts_obj_frame"].shape[1]
+    C = contact_info["contact_pts_world"].shape[1]
     print(f"  Contact info: {C} pts/config (with face normals)")
 
     # ---- Tool canonical pts → object SDF ----
@@ -856,6 +862,9 @@ def filter_and_save(
     result = {
         "object_mesh_path": str(Path(cfg.object_mesh_path).resolve()),
         "tool_mesh_path":   str(Path(cfg.tool_mesh_path).resolve()),
+        # ---- Scales (matches RL) ----
+        "tool_scale":       cfg.tool_scale,
+        "object_scale":     obj_scale,
         # ---- Canonical clouds (stored ONCE, shared across all configs) ----
         "tool_pts_canonical": P_uniform.cpu(),          # (P, 3)
         "obj_pts_canonical":  P_obj_canonical.cpu(),    # (Q, 3)
@@ -871,7 +880,7 @@ def filter_and_save(
         "tool_pts_sdf":       tool_pts_sdf,             # (N, P)  signed
         "obj_pts_sdf":        obj_pts_sdf,              # (N, Q)  signed
         # ---- Sparse contact geometry ----
-        "contact_pts_obj_frame":  contact_info["contact_pts_obj_frame"],   # (N, 5, 3)
+        "contact_pts_world":      contact_info["contact_pts_world"],       # (N, 5, 3) world frame
         "contact_pts_tool_frame": contact_info["contact_pts_tool_frame"],  # (N, 5, 3)
         "contact_normals":        contact_info["contact_normals"],         # (N, 5, 3)
     }
@@ -888,7 +897,7 @@ def filter_and_save(
 
 def main(cfg: Config) -> None:
     device = cfg.device
-    torch.manual_seed(42)
+    torch.manual_seed(cfg.seed)
 
     # ---- 1. Load meshes ----
     print(f"Loading object mesh: {cfg.object_mesh_path}")
@@ -896,6 +905,18 @@ def main(cfg: Config) -> None:
 
     print(f"Loading tool mesh:   {cfg.tool_mesh_path}")
     tool_verts, tool_faces = load_mesh(cfg.tool_mesh_path, device)
+
+    # ---- 1b. Apply scales (matches RL) ----
+    # Tool: fixed scale
+    print(f"  Applying tool scale: {cfg.tool_scale}")
+    tool_verts = tool_verts * cfg.tool_scale
+
+    # Object: random scale in range
+    obj_scale = torch.empty(1, device=device).uniform_(
+        cfg.object_scale_range[0], cfg.object_scale_range[1]
+    ).item()
+    print(f"  Applying object scale: {obj_scale:.4f} (range {cfg.object_scale_range})")
+    obj_verts = obj_verts * obj_scale
 
     # ---- 2. Sample canonical object cloud (before pose randomisation) ----
     P_obj_canonical = sample_surface_points(
@@ -974,7 +995,7 @@ def main(cfg: Config) -> None:
     n_saved = filter_and_save(
         trans_opt, rot6d_opt, R_obj, z_shift,
         obj_verts, obj_faces, tool_verts, tool_faces,
-        P_uniform, P_obj_canonical, final_losses, cfg,
+        P_uniform, P_obj_canonical, final_losses, cfg, obj_scale,
     )
     print(f"\nDone.  {n_saved} valid contact configurations saved.")
 
@@ -999,9 +1020,11 @@ def parse_args() -> Config:
                    help="Uniform surface cloud points (all losses)")
     p.add_argument("--contact-mode-prob", type=float, default=0.7,
                    help="Fraction of batch targeting head vs body for init")
-    p.add_argument("--opt-steps", type=int, default=300)
-    p.add_argument("--lr", type=float, default=5e-3)
+    p.add_argument("--opt-steps", type=int, default=200)
+    p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--device", type=str, default="cuda:0")
+    p.add_argument("--seed", type=int, default=42,
+                   help="Random seed (change for different object poses)")
     # Loss weights
     p.add_argument("--w-pen", type=float, default=30.0)
     p.add_argument("--w-contact", type=float, default=1.0)
@@ -1022,6 +1045,7 @@ def parse_args() -> Config:
         num_tool_surface_pts=args.num_pts,
         contact_mode_prob=args.contact_mode_prob,
         device=args.device,
+        seed=args.seed,
         opt_steps=args.opt_steps,
         lr=args.lr,
         w_pen=args.w_pen,

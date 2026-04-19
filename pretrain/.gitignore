@@ -1,0 +1,38 @@
+# Claude Code
+.claude/
+
+# Training outputs
+checkpoints/
+checkpoints_*/
+wandb/
+
+# Generated results
+results/
+vis_outputs/
+
+# Temporary data
+tmp_data/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Mesh files (generated outputs)
+*.obj
+*.ply
+*.stl
+
+# Test files
+test_*.pt
+test_*.obj
+test_*.png
+
+# Jupyter notebooks
+.ipynb_checkpoints/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

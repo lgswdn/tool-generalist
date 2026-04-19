@@ -45,7 +45,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from dataset import make_split
-from model import SDFSegmentor
+from model import SDFSegmentor, JointModel
 
 
 # --------------------------------------------------------------------------- #
@@ -116,9 +116,33 @@ def run_epoch(
             tool_sdf_gt = batch["tool_pts_sdf"].to(device)  # (B, N)
             obj_sdf_gt  = batch["obj_pts_sdf"].to(device)   # (B, N)
 
+            # ---- GT: diffusion inputs (optional) -------------------------
+            contact_pts = batch.get("contact_pts")
+            delta_pose  = batch.get("delta_pose")
+
+            if contact_pts is not None:
+                contact_pts = contact_pts.to(device)  # (B, K, 3)
+            if delta_pose is not None:
+                # Filter out None values (configs without init poses)
+                if any(d is None for d in delta_pose):
+                    # Create mask for valid delta_pose
+                    valid_mask = [d is not None for d in delta_pose]
+                    if not any(valid_mask):
+                        # No valid delta_pose, skip diffusion for this batch
+                        delta_pose = None
+                    else:
+                        # Stack only valid ones (but we need to handle different batch size)
+                        # For simplicity, skip diffusion if any is None
+                        delta_pose = None
+                else:
+                    delta_pose = torch.stack(delta_pose).to(device)  # (B, 9)
+
             # Forward + loss
             m = model.module if isinstance(model, DDP) else model
-            loss, metrics = m.loss(tool_pc, obj_pc, tool_sdf_gt, obj_sdf_gt)
+            loss, metrics = m.loss(
+                tool_pc, obj_pc, tool_sdf_gt, obj_sdf_gt,
+                contact_pts=contact_pts, delta_pose_gt=delta_pose,
+            )
 
             if train:
                 optimizer.zero_grad()
@@ -152,7 +176,8 @@ def main():
     # Training
     parser.add_argument("--epochs",      type=int,   default=1000)
     parser.add_argument("--batch-size",  type=int,   default=64)
-    parser.add_argument("--lr",          type=float, default=3e-4)
+    parser.add_argument("--lr",          type=float, default=1e-3,
+                        help="Learning rate")
     parser.add_argument("--num-workers", type=int,   default=4)
     parser.add_argument("--resume",      default="",
                         help="Checkpoint path to resume from")
@@ -187,6 +212,25 @@ def main():
                         choices=["mean", "min", "max"],
                         help="GT aggregation for patch mode")
 
+    # Diffusion head
+    parser.add_argument("--diffusion",    action="store_true",
+                        help="Enable diffusion head (joint training)")
+    parser.add_argument("--diffusion-steps", type=int, default=100,
+                        help="Number of diffusion timesteps")
+    parser.add_argument("--diffusion-hidden", type=int, nargs="+", default=[256, 256, 256],
+                        help="Diffusion MLP hidden dims")
+    parser.add_argument("--contact-hidden", type=int, nargs="+", default=[128, 128],
+                        help="Contact points encoder hidden dims")
+    parser.add_argument("--contact-pool", default="mean",
+                        choices=["mean", "max"],
+                        help="Contact points pooling method")
+
+    # Loss weights
+    parser.add_argument("--sdf-weight",      type=float, default=1.0,
+                        help="SDF loss weight")
+    parser.add_argument("--diffusion-weight", type=float, default=1.0,
+                        help="Diffusion loss weight")
+
     args = parser.parse_args()
 
     rank, local_rank = setup_ddp()
@@ -215,23 +259,43 @@ def main():
     )
 
     # ---- Model ---------------------------------------------------------------
-    model = SDFSegmentor(
-        head_mode=args.head_mode,
-        patch_agg=args.patch_agg,
-        num_pts=args.num_pts,
-        patch_size=args.patch_size,
-        encoder_channel=args.encoder_channel,
-        vit_depth=args.vit_depth,
-        vit_heads=args.vit_heads,
-        freeze_encoder=args.freeze_encoder,
-    ).to(device)
+    if args.diffusion:
+        model = JointModel(
+            head_mode=args.head_mode,
+            patch_agg=args.patch_agg,
+            num_pts=args.num_pts,
+            patch_size=args.patch_size,
+            encoder_channel=args.encoder_channel,
+            vit_depth=args.vit_depth,
+            vit_heads=args.vit_heads,
+            freeze_encoder=args.freeze_encoder,
+            diffusion_hidden=tuple(args.diffusion_hidden),
+            diffusion_steps=args.diffusion_steps,
+            contact_hidden=tuple(args.contact_hidden),
+            contact_pool=args.contact_pool,
+            sdf_weight=args.sdf_weight,
+            diffusion_weight=args.diffusion_weight,
+        ).to(device)
+        model_name = "JointModel"
+    else:
+        model = SDFSegmentor(
+            head_mode=args.head_mode,
+            patch_agg=args.patch_agg,
+            num_pts=args.num_pts,
+            patch_size=args.patch_size,
+            encoder_channel=args.encoder_channel,
+            vit_depth=args.vit_depth,
+            vit_heads=args.vit_heads,
+            freeze_encoder=args.freeze_encoder,
+        ).to(device)
+        model_name = "SDFSegmentor"
 
     if dist.is_initialized():
         model = DDP(model, device_ids=[local_rank])
 
     if is_main():
         total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"Model: SDFSegmentor  head={args.head_mode}  "
+        print(f"Model: {model_name}  head={args.head_mode}  "
               f"vit_depth={args.vit_depth}  vit_heads={args.vit_heads}  "
               f"trainable params: {total_params:,}")
 

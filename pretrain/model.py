@@ -254,3 +254,383 @@ class SDFSegmentor(nn.Module):
             "obj_sdf_loss":  obj_loss.item(),
             "total":         total.item(),
         }
+
+
+# --------------------------------------------------------------------------- #
+# PoseDiffusion - Diffusion head for pose prediction
+# --------------------------------------------------------------------------- #
+
+class SinusoidalPosEmb(nn.Module):
+    """Sinusoidal positional embedding for diffusion timestep."""
+    def __init__(self, dim: int):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, t: torch.Tensor) -> torch.Tensor:  # (B,) -> (B, dim)
+        device = t.device
+        half_dim = self.dim // 2
+        emb = torch.log(torch.tensor(10000.0, device=device)) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
+        emb = t[:, None] * emb[None, :]  # (B, half_dim)
+        emb = torch.cat([emb.sin(), emb.cos()], dim=-1)  # (B, dim)
+        return emb
+
+
+def rotation_6d_to_matrix(d6: torch.Tensor) -> torch.Tensor:
+    """Convert 6D rotation representation to 3x3 rotation matrix.
+
+    Zhou et al. "On the Continuity of Rotation Representations in Neural Networks"
+    """
+    a1, a2 = d6[..., :3], d6[..., 3:]
+    b1 = F.normalize(a1, dim=-1)
+    b2 = a2 - (b1 * a2).sum(dim=-1, keepdim=True) * b1
+    b2 = F.normalize(b2, dim=-1)
+    b3 = torch.cross(b1, b2, dim=-1)
+    return torch.stack([b1, b2, b3], dim=-1)  # (..., 3, 3)
+
+
+def matrix_to_rotation_6d(R: torch.Tensor) -> torch.Tensor:
+    """Convert 3x3 rotation matrix to 6D representation."""
+    return R[..., :2, :].reshape(*R.shape[:-2], 6)  # first two columns
+
+
+class PoseDiffusion(nn.Module):
+    """Diffusion model for predicting delta pose (translation + 6D rotation).
+
+    Conditioning:
+        - encoder features: tool_tokens, obj_tokens, global_feat
+        - contact points: (K, 3) → MLP → pooling
+
+    Output:
+        - delta pose: (9,) = translation (3) + 6D rotation (6)
+    """
+
+    def __init__(
+        self,
+        encoder: SDFPointCloudEncoder,  # shared encoder (frozen or not)
+        contact_hidden: tuple[int, ...] = (128, 128),
+        diffusion_hidden: tuple[int, ...] = (256, 256, 256),
+        time_embed_dim: int = 128,
+        num_steps: int = 100,
+        contact_pool: str = "mean",  # "mean" or "max"
+    ):
+        super().__init__()
+        self.encoder = encoder
+        self.num_steps = num_steps
+        self.contact_pool = contact_pool
+
+        D = encoder.feature_dim  # patch token dimension
+
+        # Contact points encoder (separate MLP, not shared)
+        self.contact_encoder = _make_mlp((3, contact_hidden[-1], contact_hidden[-1]))
+
+        # Time embedding
+        self.time_mlp = nn.Sequential(
+            SinusoidalPosEmb(time_embed_dim),
+            nn.Linear(time_embed_dim, diffusion_hidden[0]),
+            nn.LayerNorm(diffusion_hidden[0]),
+            nn.ELU(),
+        )
+
+        # Conditioning: concatenate all features
+        # tool_tokens (P, D) → pool → D
+        # obj_tokens (P, D) → pool → D
+        # global_feat: D
+        # contact_feat: contact_hidden[-1]
+        cond_dim = 3 * D + contact_hidden[-1]
+
+        # Denoising MLP
+        # Input: cond (cond_dim) + time_embed (diffusion_hidden[0]) + noisy_pose (9)
+        input_dim = cond_dim + diffusion_hidden[0] + 9
+
+        layers = [nn.Linear(input_dim, diffusion_hidden[0])]
+        for i in range(len(diffusion_hidden) - 1):
+            layers.append(nn.LayerNorm(diffusion_hidden[i]))
+            layers.append(nn.ELU())
+            layers.append(nn.Linear(diffusion_hidden[i], diffusion_hidden[i + 1]))
+        layers.append(nn.Linear(diffusion_hidden[-1], 9))  # output: 9D pose
+        self.denoiser = nn.Sequential(*layers)
+
+        # Beta schedule (linear)
+        self.betas = torch.linspace(1e-4, 0.02, num_steps)
+        self.alphas = 1.0 - self.betas
+        self.alphas_cumprod = self.alphas.cumprod(dim=0)
+
+    def _pool_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
+        """Pool patch tokens to single feature."""
+        if self.contact_pool == "max":
+            return tokens.max(dim=1).values
+        return tokens.mean(dim=1)  # default: mean
+
+    def _encode_contacts(self, contact_pts: torch.Tensor) -> torch.Tensor:
+        """Encode contact points.
+
+        Args:
+            contact_pts: (B, K, 3) world-frame contact points
+
+        Returns:
+            contact_feat: (B, contact_hidden[-1])
+        """
+        B, K, _ = contact_pts.shape
+        # Encode each point
+        pts_feat = self.contact_encoder(contact_pts)  # (B, K, D)
+        # Pool
+        if self.contact_pool == "max":
+            return pts_feat.max(dim=1).values
+        return pts_feat.mean(dim=1)
+
+    def get_conditioning(
+        self,
+        tool_pc: torch.Tensor,
+        obj_pc: torch.Tensor,
+        contact_pts: torch.Tensor,
+    ) -> torch.Tensor:
+        """Get conditioning features from encoder + contacts."""
+        # Encode clouds (get patch tokens)
+        res = self.encoder.encode(tool_pc, obj_pc)
+
+        # Pool tokens
+        tool_feat = self._pool_tokens(res.tool_tokens)  # (B, D)
+        obj_feat = self._pool_tokens(res.obj_tokens)    # (B, D)
+        global_feat = res.global_feat                    # (B, D)
+
+        # Encode contacts
+        contact_feat = self._encode_contacts(contact_pts)  # (B, contact_hidden[-1])
+
+        # Concatenate
+        cond = torch.cat([tool_feat, obj_feat, global_feat, contact_feat], dim=-1)
+        return cond
+
+    def forward(
+        self,
+        tool_pc: torch.Tensor,
+        obj_pc: torch.Tensor,
+        contact_pts: torch.Tensor,
+        t: torch.Tensor,  # (B,) timestep
+        noisy_pose: torch.Tensor,  # (B, 9) noisy delta pose
+    ) -> torch.Tensor:  # (B, 9) predicted clean pose
+        """Denoise pose at timestep t."""
+        # Get conditioning
+        cond = self.get_conditioning(tool_pc, obj_pc, contact_pts)
+
+        # Time embedding
+        t_emb = self.time_mlp(t)
+
+        # Concatenate
+        x = torch.cat([cond, t_emb, noisy_pose], dim=-1)
+
+        # Predict clean pose
+        return self.denoiser(x)
+
+    def add_noise(
+        self,
+        pose: torch.Tensor,  # (B, 9) clean pose
+        t: torch.Tensor,     # (B,) timestep
+    ) -> tuple[torch.Tensor, torch.Tensor]:  # noisy_pose, noise
+        """Add noise at timestep t."""
+        device = pose.device
+        alpha_t = self.alphas_cumprod[t].to(device)  # (B,)
+
+        noise = torch.randn_like(pose)
+        noisy_pose = torch.sqrt(alpha_t[:, None]) * pose + torch.sqrt(1 - alpha_t[:, None]) * noise
+
+        return noisy_pose, noise
+
+    def loss(
+        self,
+        tool_pc: torch.Tensor,
+        obj_pc: torch.Tensor,
+        contact_pts: torch.Tensor,
+        delta_pose_gt: torch.Tensor,  # (B, 9) translation + 6D rotation
+    ) -> tuple[torch.Tensor, dict]:
+        """Training loss: predict noise added."""
+        B = delta_pose_gt.shape[0]
+        device = delta_pose_gt.device
+
+        # Sample random timestep
+        t = torch.randint(0, self.num_steps, (B,), device=device)
+
+        # Add noise
+        noisy_pose, noise = self.add_noise(delta_pose_gt, t)
+
+        # Predict noise (or clean pose - standard DDPM predicts noise)
+        pred = self.forward(tool_pc, obj_pc, contact_pts, t, noisy_pose)
+
+        # Loss: predict the noise (standard diffusion training)
+        loss = F.mse_loss(pred, noise)
+
+        return loss, {"diffusion_loss": loss.item()}
+
+    @torch.no_grad()
+    def sample(
+        self,
+        tool_pc: torch.Tensor,
+        obj_pc: torch.Tensor,
+        contact_pts: torch.Tensor,
+        num_samples: int = 1,
+    ) -> torch.Tensor:  # (B, 9) predicted delta pose
+        """Sample from diffusion model (DDPM sampling)."""
+        B = tool_pc.shape[0]
+        device = tool_pc.device
+
+        # Start from noise
+        pose = torch.randn(B, 9, device=device)
+
+        for t in reversed(range(self.num_steps)):
+            t_tensor = torch.full((B,), t, device=device, dtype=torch.long)
+
+            # Predict noise
+            pred_noise = self.forward(tool_pc, obj_pc, contact_pts, t_tensor, pose)
+
+            # DDPM update
+            alpha_t = self.alphas_cumprod[t].to(device)
+            alpha_prev = self.alphas_cumprod[max(t - 1, 0)].to(device)
+            beta_t = self.betas[t].to(device)
+
+            if t > 0:
+                noise = torch.randn_like(pose)
+            else:
+                noise = torch.zeros_like(pose)
+
+            # x_{t-1} = (1/sqrt(alpha_t)) * (x_t - beta_t/sqrt(1-alpha_t) * pred_noise) + sqrt(beta_t) * noise
+            pose = (1.0 / torch.sqrt(alpha_t)) * (pose - beta_t / torch.sqrt(1 - alpha_t) * pred_noise)
+            pose = pose + torch.sqrt(beta_t) * noise
+
+        return pose
+
+
+# --------------------------------------------------------------------------- #
+# JointModel - Combined SDF + Diffusion training
+# --------------------------------------------------------------------------- #
+
+class JointModel(nn.Module):
+    """Joint training of SDF prediction and pose diffusion.
+
+    Uses shared encoder with two heads:
+        - SDFSegmentor (SDF prediction)
+        - PoseDiffusion (pose prediction)
+    """
+
+    def __init__(
+        self,
+        # SDF head
+        head_mode: str = "point",
+        patch_agg: str = "mean",
+        # Encoder (shared)
+        num_pts: int = 512,
+        patch_size: int = 32,
+        encoder_channel: int = 128,
+        vit_depth: int = 4,
+        vit_heads: int = 4,
+        freeze_encoder: bool = False,
+        # Diffusion head
+        diffusion_hidden: tuple[int, ...] = (256, 256, 256),
+        diffusion_steps: int = 100,
+        contact_hidden: tuple[int, ...] = (128, 128),
+        contact_pool: str = "mean",
+        # Loss weights
+        sdf_weight: float = 1.0,
+        diffusion_weight: float = 1.0,
+    ):
+        super().__init__()
+        self.sdf_weight = sdf_weight
+        self.diffusion_weight = diffusion_weight
+
+        # Shared encoder config
+        enc_cfg = SDFEncoderCfg(
+            num_pts=num_pts,
+            patch_size=patch_size,
+            encoder_channel=encoder_channel,
+            vit_depth=vit_depth,
+            vit_heads=vit_heads,
+            freeze=freeze_encoder,
+        )
+
+        # Shared encoder (created once, passed to both heads)
+        self.encoder = SDFPointCloudEncoder(enc_cfg)
+
+        # SDF head
+        self.sdf_head = SDFSegmentor(
+            head_mode=head_mode,
+            patch_agg=patch_agg,
+            num_pts=num_pts,
+            patch_size=patch_size,
+            encoder_channel=encoder_channel,
+            vit_depth=vit_depth,
+            vit_heads=vit_heads,
+            freeze_encoder=freeze_encoder,
+        )
+        # Replace encoder with shared one
+        self.sdf_head.encoder = self.encoder
+
+        # Diffusion head
+        self.diffusion_head = PoseDiffusion(
+            encoder=self.encoder,
+            contact_hidden=contact_hidden,
+            diffusion_hidden=diffusion_hidden,
+            num_steps=diffusion_steps,
+            contact_pool=contact_pool,
+        )
+
+    def forward_sdf(
+        self,
+        tool_pc: torch.Tensor,
+        obj_pc: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """SDF prediction forward."""
+        return self.sdf_head(tool_pc, obj_pc)
+
+    def forward_diffusion(
+        self,
+        tool_pc: torch.Tensor,
+        obj_pc: torch.Tensor,
+        contact_pts: torch.Tensor,
+        t: torch.Tensor,
+        noisy_pose: torch.Tensor,
+    ) -> torch.Tensor:
+        """Diffusion forward."""
+        return self.diffusion_head(tool_pc, obj_pc, contact_pts, t, noisy_pose)
+
+    def loss(
+        self,
+        # SDF inputs
+        tool_pc: torch.Tensor,
+        obj_pc: torch.Tensor,
+        tool_sdf_gt: torch.Tensor,
+        obj_sdf_gt: torch.Tensor,
+        # Diffusion inputs (optional)
+        contact_pts: torch.Tensor = None,
+        delta_pose_gt: torch.Tensor = None,
+    ) -> tuple[torch.Tensor, dict]:
+        """Joint loss computation."""
+        metrics = {}
+        total_loss = torch.tensor(0.0, device=tool_pc.device)
+
+        # SDF loss
+        sdf_loss, sdf_metrics = self.sdf_head.loss(
+            tool_pc, obj_pc, tool_sdf_gt, obj_sdf_gt,
+            sdf_weight=self.sdf_weight,
+        )
+        total_loss = total_loss + sdf_loss
+        metrics.update(sdf_metrics)
+
+        # Diffusion loss (if inputs provided)
+        if contact_pts is not None and delta_pose_gt is not None:
+            diff_loss, diff_metrics = self.diffusion_head.loss(
+                tool_pc, obj_pc, contact_pts, delta_pose_gt,
+            )
+            total_loss = total_loss + self.diffusion_weight * diff_loss
+            metrics.update(diff_metrics)
+
+        metrics["total"] = total_loss.item()
+        return total_loss, metrics
+
+    @torch.no_grad()
+    def sample_pose(
+        self,
+        tool_pc: torch.Tensor,
+        obj_pc: torch.Tensor,
+        contact_pts: torch.Tensor,
+    ) -> torch.Tensor:
+        """Sample pose from diffusion head."""
+        return self.diffusion_head.sample(tool_pc, obj_pc, contact_pts)

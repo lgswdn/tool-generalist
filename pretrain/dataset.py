@@ -51,6 +51,9 @@ class ContactDataset(Dataset):
     SDF supervision (per-config, same point ordering as the clouds above):
         tool_pts_sdf  — signed SDF of tool canonical pts to object
         obj_pts_sdf   — signed SDF of object canonical pts to tool
+
+    Note: Data is generated at RL scale (tool_scale=0.1, object_scale in 0.1-0.2).
+          No additional scale augmentation needed.
     """
 
     def __init__(
@@ -78,9 +81,9 @@ class ContactDataset(Dataset):
         pt_path, cfg_i = self._index[idx]
         data = self._pt_cache[pt_path]
 
-        # ---- Canonical clouds (stored once per file) -------------------------
-        P_tool = data["tool_pts_canonical"]  # (P, 3)
-        P_obj  = data["obj_pts_canonical"]   # (Q, 3)
+        # ---- Canonical clouds (stored once per file, already at RL scale) ----
+        P_tool = data["tool_pts_canonical"]  # (P, 3) - already scaled by tool_scale
+        P_obj  = data["obj_pts_canonical"]   # (Q, 3) - already scaled by object_scale
 
         # ---- Reconstruct world-frame clouds ----------------------------------
         # Tool: apply rotation + translation for this config
@@ -100,10 +103,36 @@ class ContactDataset(Dataset):
         obj_pts_sdf  = data["obj_pts_sdf"][cfg_i]   # (Q,)  signed
 
         # ---- Contact geometry (sparse) ---------------------------------------
-        contact_pts     = data["contact_pts_obj_frame"][cfg_i]  # (5, 3)
+        # Use world-frame contacts (new key name)
+        contact_pts     = data["contact_pts_world"][cfg_i]      # (5, 3)
         contact_normals = data["contact_normals"][cfg_i]        # (5, 3)
 
-        # ---- Optional augmentation: small Gaussian jitter on point clouds ---
+        # ---- Diffusion inputs: delta pose from initial to contact ----------
+        delta_pose = None
+        if "init_translations" in data and "init_rotations" in data:
+            # Initial pose
+            init_t = data["init_translations"][cfg_i]    # (3,)
+            init_R = data["init_rotations"][cfg_i]       # (3, 3)
+
+            # Contact pose
+            contact_t = data["tool_translations"][cfg_i]  # (3,)
+            contact_R = data["tool_rotations"][cfg_i]     # (3, 3)
+
+            # Delta translation
+            delta_t = contact_t - init_t  # (3,)
+
+            # Delta rotation: R_delta = R_contact @ R_init^{-1}
+            # Actually, for diffusion, we want: initial -> contact
+            # So delta_R = R_contact @ R_init.T (apply delta to initial gives contact)
+            delta_R = contact_R @ init_R.T  # (3, 3)
+
+            # Convert to 6D representation (first two columns)
+            delta_R_6d = delta_R[:, :2].reshape(6)  # (6,) = first two columns flattened
+
+            # Full delta pose: translation (3) + 6D rotation (6) = 9D
+            delta_pose = torch.cat([delta_t, delta_R_6d], dim=0)  # (9,)
+
+        # ---- Augmentation: small Gaussian jitter only ------------------------
         if self.augment:
             tool_pc = tool_pc + torch.randn_like(tool_pc) * 1e-3
             obj_pc  = obj_pc  + torch.randn_like(obj_pc)  * 1e-3
@@ -121,6 +150,8 @@ class ContactDataset(Dataset):
             # Sparse contact geometry
             "contact_pts":         contact_pts.float(),      # (5, 3)
             "contact_normals":     contact_normals.float(),  # (5, 3)
+            # Diffusion supervision (optional - None if init poses not generated)
+            "delta_pose":          delta_pose.float() if delta_pose is not None else None,
         }
 
 

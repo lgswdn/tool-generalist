@@ -1,13 +1,21 @@
 """gen_dataset.py — Batch contact-configuration dataset generator.
 
-Randomly samples tool × object pairs and runs contact_gen.py for each,
-writing output .pt files to pretrain/tmp_data/<tool>/<object>.pt.
+Randomly samples tool × object pairs and runs contact generation,
+writing output .pt files to pretrain/tmp_data/<tool>/<object>_pose<N>.pt.
 
-Usage (single GPU, 200 random pairs):
-    python gen_dataset.py --num-pairs 200
+Imports torch/trimesh once per worker, avoiding subprocess overhead.
 
-Usage (multi-GPU):
-    python gen_dataset.py --num-pairs 500 --gpus 2 3 6
+Usage (single GPU, 200 random pairs, gradient method):
+    python gen_dataset.py --num-pairs 200 --method gradient
+
+Usage (multi-GPU, optimize method):
+    python gen_dataset.py --num-pairs 500 --gpus 2 3 6 --num-poses 5 --method optimize
+
+Methods:
+    gradient   - Gradient-based approach (like corn.py): random pose + single gradient step
+                 Better coverage, simpler, no optimization loop
+    optimize   - Original approach: anchor on surface + Adam optimization
+                 More refined contacts, but orientation-biased
 
 Optional flags:
     --objects-json   Path to yes.json                (default: see DEFAULTS)
@@ -16,19 +24,20 @@ Optional flags:
     --out-dir        Root output directory            (default: tmp_data)
     --gpus           Space-separated GPU indices      (default: 0)
     --num-pairs      How many pairs to sample; 0 = all  (default: 200)
+    --num-poses      Poses per tool×object pair       (default: 1)
     --seed           Random seed for pair sampling    (default: 42)
     --skip-existing  Skip pairs whose .pt already exists (default: on)
     --no-skip        Re-run even if .pt already exists
     --viz            Also run visualize_contacts.py after each pair
     --viz-dir        Where to write visualizations   (default: tmp_data/viz)
-    --batch-size     Passed to contact_gen.py        (default: 512)
-    --opt-steps      Passed to contact_gen.py        (default: 300)
+    --batch-size     Batch size for generation        (default: 512)
+    --opt-steps      Optimization steps (optimize method only, default: 200)
 """
 
 import argparse
 import json
 import os
-import subprocess
+import random
 import sys
 from pathlib import Path
 
@@ -36,6 +45,10 @@ try:
     import yaml
 except ImportError:
     sys.exit("PyYAML is required:  pip install pyyaml")
+
+# Import both generators (heavy imports happen once here)
+from contact_gen_gradient import Config as GradientConfig, main as gradient_gen_main
+from contact_gen import Config as OptimizeConfig, main as optimize_gen_main
 
 # ---------------------------------------------------------------------------
 # Config loader
@@ -57,7 +70,6 @@ def load_paths(yaml_path: Path = PATHS_YAML) -> dict:
     }
 
 
-CONTACT_GEN = str(PRETRAIN_DIR / "contact_gen.py")
 VISUALIZE   = str(PRETRAIN_DIR / "visualize_contacts.py")
 
 
@@ -106,8 +118,11 @@ def sample_pairs(pairs: list[tuple], num_pairs: int, seed: int) -> list[tuple]:
     return rng.sample(pairs, num_pairs)
 
 
-def output_path(out_dir: str, tool_name: str, obj_name: str) -> Path:
-    return Path(out_dir) / tool_name / f"{obj_name}.pt"
+def output_path(out_dir: str, tool_name: str, obj_name: str, pose_idx: int = 0, num_poses: int = 1) -> Path:
+    """Return output path for a specific pose index."""
+    if num_poses == 1:
+        return Path(out_dir) / tool_name / f"{obj_name}.pt"
+    return Path(out_dir) / tool_name / f"{obj_name}_pose{pose_idx}.pt"
 
 
 def run_pair(
@@ -122,31 +137,46 @@ def run_pair(
     batch_size: int,
     opt_steps: int,
     do_viz: bool,
+    method: str,
+    pose_idx: int = 0,
+    num_poses: int = 1,
+    seed: int = 42,
 ) -> bool:
-    """Run contact_gen.py for one (tool, obj) pair. Returns True on success."""
-    pt_file = output_path(out_dir, tool_name, obj_name)
+    """Run contact generation for one (tool, obj) pair. Returns True on success."""
+    import subprocess  # only for viz
+
+    pt_file = output_path(out_dir, tool_name, obj_name, pose_idx, num_poses)
     pt_file.parent.mkdir(parents=True, exist_ok=True)
 
-    cmd = [
-        sys.executable, CONTACT_GEN,
-        "--object", obj_path,
-        "--tool",   tool_path,
-        "--output", str(pt_file),
-        "--device", f"cuda:{gpu}",
-        "--batch-size", str(batch_size),
-        "--opt-steps",  str(opt_steps),
-    ]
-    if tools_meta and Path(tools_meta).exists():
-        cmd += ["--tools-json", tools_meta]
-
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"  [FAIL] {tool_name} × {obj_name}")
-        print(result.stderr[-800:])
+    try:
+        if method == "gradient":
+            cfg = GradientConfig(
+                object_mesh_path=obj_path,
+                tool_mesh_path=tool_path,
+                output_path=str(pt_file),
+                batch_size=batch_size,
+                device=f"cuda:{gpu}",
+                seed=seed,
+            )
+            gradient_gen_main(cfg)
+        else:  # optimize
+            cfg = OptimizeConfig(
+                object_mesh_path=obj_path,
+                tool_mesh_path=tool_path,
+                output_path=str(pt_file),
+                tools_json_path=tools_meta if tools_meta and Path(tools_meta).exists() else "",
+                batch_size=batch_size,
+                opt_steps=opt_steps,
+                device=f"cuda:{gpu}",
+                seed=seed,
+            )
+            optimize_gen_main(cfg)
+    except Exception as e:
+        print(f"  [FAIL] {tool_name} × {obj_name} (pose {pose_idx}): {e}")
         return False
 
     if do_viz and pt_file.exists():
-        viz_out = Path(viz_dir) / tool_name / f"{obj_name}.png"
+        viz_out = Path(viz_dir) / tool_name / f"{obj_name}_pose{pose_idx}.png"
         viz_out.parent.mkdir(parents=True, exist_ok=True)
         viz_cmd = [
             sys.executable, VISUALIZE,
@@ -164,25 +194,29 @@ def run_pair(
 # ---------------------------------------------------------------------------
 
 def worker(pairs_subset, out_dir, viz_dir, tools_meta, gpu,
-           batch_size, opt_steps, do_viz, skip_existing):
+           batch_size, opt_steps, do_viz, skip_existing, num_poses, method):
     ok = fail = skip = 0
     for tool_path, obj_path, tool_name, obj_name in pairs_subset:
-        pt = output_path(out_dir, tool_name, obj_name)
-        if skip_existing and pt.exists():
-            skip += 1
-            continue
-        tag = f"[GPU:{gpu}] {tool_name} × {obj_name}"
-        print(f"  → {tag}")
-        success = run_pair(
-            tool_path, obj_path, tool_name, obj_name,
-            out_dir, viz_dir, tools_meta, gpu,
-            batch_size, opt_steps, do_viz,
-        )
-        if success:
-            ok += 1
-            print(f"  ✓ {tag}")
-        else:
-            fail += 1
+        for pose_idx in range(num_poses):
+            pt = output_path(out_dir, tool_name, obj_name, pose_idx, num_poses)
+            if skip_existing and pt.exists():
+                skip += 1
+                continue
+            # Random seed for each pose
+            pose_seed = random.randint(0, 2**31 - 1)
+            tag = f"[GPU:{gpu}] {tool_name} × {obj_name} pose{pose_idx}"
+            print(f"  → {tag} (seed={pose_seed})")
+            success = run_pair(
+                tool_path, obj_path, tool_name, obj_name,
+                out_dir, viz_dir, tools_meta, gpu,
+                batch_size, opt_steps, do_viz, method,
+                pose_idx, num_poses, pose_seed,
+            )
+            if success:
+                ok += 1
+                print(f"  ✓ {tag}")
+            else:
+                fail += 1
     return ok, fail, skip
 
 
@@ -201,6 +235,10 @@ def main():
     parser.add_argument("--gpus",        nargs="+", type=int, default=[0])
     parser.add_argument("--num-pairs",   type=int, default=200,
                         help="Number of pairs to randomly sample (0 = all)")
+    parser.add_argument("--num-poses",   type=int, default=1,
+                        help="Number of poses to generate per tool×object pair")
+    parser.add_argument("--method",      choices=["gradient", "optimize"], default="gradient",
+                        help="Generation method: gradient (corn-like) or optimize (original)")
     parser.add_argument("--seed",        type=int, default=42,
                         help="Random seed for pair sampling")
     parser.add_argument("--no-skip",     action="store_true",
@@ -208,7 +246,8 @@ def main():
     parser.add_argument("--viz",         action="store_true")
     parser.add_argument("--viz-dir",     default=str(PRETRAIN_DIR / "tmp_data/viz"))
     parser.add_argument("--batch-size",  type=int, default=512)
-    parser.add_argument("--opt-steps",   type=int, default=300)
+    parser.add_argument("--opt-steps",   type=int, default=100,
+                        help="Optimization steps (optimize method only)")
     args = parser.parse_args()
 
     # Reload paths if a custom config was given
@@ -228,7 +267,8 @@ def main():
     all_pairs = build_pairs(objects, tools, p["obj_mesh_dir"], p["tool_mesh_dir"])
     pairs = sample_pairs(all_pairs, args.num_pairs, args.seed)
 
-    print(f"Valid pairs : {len(all_pairs)}  →  sampling {len(pairs)}  (seed={args.seed})")
+    print(f"Valid pairs : {len(all_pairs)}  →  sampling {len(pairs)}  (seed={args.seed}, poses={args.num_poses})")
+    print(f"Method      : {args.method}")
     print(f"GPUs        : {args.gpus}")
     print(f"Output dir  : {args.out_dir}")
     print()
@@ -248,7 +288,7 @@ def main():
         ok, fail, skip = worker(
             subsets[0], args.out_dir, args.viz_dir, p["tools_meta"],
             args.gpus[0], args.batch_size, args.opt_steps,
-            args.viz, skip_existing,
+            args.viz, skip_existing, args.num_poses, args.method,
         )
     else:
         # Multi-GPU: one subprocess per GPU
@@ -258,16 +298,16 @@ def main():
             results = pool.starmap(worker, [
                 (subsets[i], args.out_dir, args.viz_dir, p["tools_meta"],
                  args.gpus[i], args.batch_size, args.opt_steps,
-                 args.viz, skip_existing)
+                 args.viz, skip_existing, args.num_poses, args.method)
                 for i in range(n_gpus)
             ])
         ok   = sum(r[0] for r in results)
         fail = sum(r[1] for r in results)
         skip = sum(r[2] for r in results)
 
-    total = len(pairs)
+    total = len(pairs) * args.num_poses
     print()
-    print(f"Done.  ✓ {ok}  ✗ {fail}  ⟳ {skip} skipped  (total {total})")
+    print(f"Done.  ✓ {ok}  ✗ {fail}  ⟳ {skip} skipped  (total {total} = {len(pairs)} pairs × {args.num_poses} poses)")
 
 
 if __name__ == "__main__":

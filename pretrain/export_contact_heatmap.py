@@ -37,7 +37,8 @@ import trimesh
 #                           COLORMAP  (no matplotlib needed)
 # =============================================================================
 
-def _plasma_lut() -> np.ndarray:    """50-entry approximation of matplotlib's 'plasma' colormap (dark→light).
+def _plasma_lut() -> np.ndarray:
+    """50-entry approximation of matplotlib's 'plasma' colormap (dark→light).
 
     Returns shape (50, 3) float32 in [0, 1].  Index 0 = darkest (deep purple),
     index 49 = lightest (bright yellow).
@@ -151,18 +152,28 @@ def load_pt(pt_path: str) -> dict:
 
 
 def gather_contact_points(data_list: list[dict]) -> np.ndarray | None:
-    """Collect all contact_pts_obj_frame from every .pt dataset.
+    """Collect all contact points from every .pt dataset.
+
+    Contact points are in world frame, same as the transformed object mesh
+    (which has R_obj and z_shift applied). No coordinate transformation needed.
 
     Returns:
-        pts: (M, 3)  all contact points in object frame, or None if absent.
+        pts: (M, 3)  all contact points in world frame, or None if absent.
     """
     all_pts = []
     for data in data_list:
-        if "contact_pts_obj_frame" not in data:
+        # Try new key name first, fall back to old name for backward compat
+        if "contact_pts_world" in data:
+            pts = data["contact_pts_world"]   # (N, C, 3) world frame
+        elif "contact_pts_obj_frame" in data:
+            # Old name was misleading - it was actually world frame
+            pts = data["contact_pts_obj_frame"]
+        else:
             continue
-        pts = data["contact_pts_obj_frame"]   # (N, C, 3)
-        pts = pts.reshape(-1, 3)              # (N*C, 3)
+
+        pts = pts.reshape(-1, 3)  # (N*C, 3)
         all_pts.append(pts)
+
     if not all_pts:
         return None
     return np.concatenate(all_pts, axis=0)
@@ -199,7 +210,10 @@ def compute_vertex_heat(
 def transform_object_verts(verts: np.ndarray, R_obj: np.ndarray) -> np.ndarray:
     """Rotate and ground the object (z_min = 0)."""
     v = verts @ R_obj.T
-    v[:, 2] -= v[:, 2].min()
+    # Only ground if z_min < 0 (object not already grounded)
+    z_min = v[:, 2].min()
+    if z_min < 0:
+        v[:, 2] -= z_min
     return v
 
 
@@ -276,19 +290,27 @@ def main() -> None:
         sys.exit(1)
 
     # ---- All datasets must share the same object rotation (first one wins) ----
-    R_obj = data_list[0]["object_rotation"]  # (3, 3)
+    R_obj = data_list[0].get("object_rotation", np.eye(3))  # Identity if no rotation (gradient method)
 
-    # ---- Gather all contact points  ----
+    # ---- Gather all contact points (world frame, same as transformed mesh) ----
     contact_pts = gather_contact_points(data_list)
     if contact_pts is None or contact_pts.shape[0] == 0:
-        print("ERROR: No contact_pts_obj_frame found in any input file.")
+        print("ERROR: No contact points found in any input file.")
         sys.exit(1)
     print(f"\nTotal contact points: {contact_pts.shape[0]}")
 
     # ---- Load and transform object mesh ----
     print(f"Loading object mesh: {obj_mesh_path}")
     obj_mesh = trimesh.load(obj_mesh_path, force="mesh", process=False)
-    verts = transform_object_verts(np.array(obj_mesh.vertices, dtype=np.float32), R_obj)
+    verts = np.array(obj_mesh.vertices, dtype=np.float32)
+
+    # Apply object scale (default to RL scale if not saved)
+    object_scale = data_list[0].get("object_scale", 0.15)
+    verts = verts * object_scale
+    print(f"  Object scale: {object_scale:.4f}")
+
+    # Apply rotation and grounding
+    verts = transform_object_verts(verts, R_obj)
     faces = np.array(obj_mesh.faces, dtype=np.int32)
 
     # ---- Compute per-vertex heat ----

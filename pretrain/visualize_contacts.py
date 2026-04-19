@@ -122,6 +122,55 @@ def _set_equal_aspect(ax, all_verts: np.ndarray):
     ax.set_zlim(max(0, centres[2] - span), centres[2] + span)
 
 
+def visualize_heatmap(
+    obj_mesh: trimesh.Trimesh,
+    all_contact_pts: np.ndarray,    # (N_total, C, 3) all contact points
+    all_contact_sdfs: np.ndarray,   # (N_total, C) all SDF values
+    save_path: str | None = None,
+    title: str = "Contact Heatmap",
+):
+    """Render object with contact heatmap showing contact density/SDF distribution."""
+    import matplotlib
+    if save_path:
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.cm as cm
+
+    fig = plt.figure(figsize=(14, 10), dpi=150)
+    ax = fig.add_subplot(111, projection="3d")
+
+    # Object mesh
+    obj_extent = np.linalg.norm(obj_mesh.vertices.max(axis=0) - obj_mesh.vertices.min(axis=0))
+    _add_ground_plane(ax, obj_extent)
+    _plot_mesh_on_ax(ax, obj_mesh, OBJECT_COLOUR, alpha=0.5, label="Object")
+
+    # Flatten all contact points and SDFs
+    pts_flat = all_contact_pts.reshape(-1, 3)  # (N_total * C, 3)
+    sdf_flat = all_contact_sdfs.reshape(-1)    # (N_total * C,)
+
+    # Normalize SDF for coloring
+    sdf_min, sdf_max = sdf_flat.min(), sdf_flat.max()
+    sdf_norm = (sdf_flat - sdf_min) / (sdf_max - sdf_min + 1e-9)
+
+    # Color by SDF: purple=close (small SDF), yellow=far (large SDF)
+    colors = cm.plasma(sdf_norm)[:, :3]
+
+    ax.scatter(
+        pts_flat[:, 0], pts_flat[:, 1], pts_flat[:, 2],
+        c=colors, s=5, zorder=5,
+        depthshade=False, alpha=0.8,
+        label=f"Contact pts ({len(pts_flat)} total)",
+    )
+
+    # Add colorbar
+    sm = cm.ScalarMappable(cmap=cm.plasma, norm=plt.Normalize(vmin=sdf_min, vmax=sdf_max))
+    sm.set_array([])
+    cbar = plt.colorbar(sm, ax=ax, shrink=0.5, aspect=20)
+    cbar.set_label("SDF distance (m)")
+
+    _set_equal_aspect(ax, obj_mesh.vertices)
+
+
 def visualize_matplotlib(
     obj_mesh: trimesh.Trimesh,
     tool_meshes: list[trimesh.Trimesh],
@@ -230,14 +279,14 @@ def _extract_contact_overlays(
         contact_sdfs    – list of (C,)   SDF distance arrays  (None if absent)
         All lists are None if the .pt file predates the contact metadata.
     """
-    has_pts     = "contact_pts_obj_frame" in data
+    has_pts     = "contact_pts_world" in data or "contact_pts_obj_frame" in data
     has_normals = "contact_normals"       in data
     has_sdfs    = "contact_sdfs"          in data
 
     if not has_pts and not has_normals:
         return None, None, None
 
-    pts_arr = data.get("contact_pts_obj_frame")   # (N, C, 3)
+    pts_arr = data.get("contact_pts_world", data.get("contact_pts_obj_frame"))   # (N, C, 3) world frame
     nor_arr = data.get("contact_normals")          # (N, C, 3)
     sdf_arr = data.get("contact_sdfs")             # (N, C)
 
@@ -279,6 +328,8 @@ def main():
                              default=True, help="Overlay contact points and normals (default: on)")
     contact_grp.add_argument("--no-contacts", dest="show_contacts", action="store_false",
                              help="Disable contact overlays")
+    p.add_argument("--heatmap", action="store_true",
+                   help="Show contact heatmap on object surface instead of individual poses")
     args = p.parse_args()
 
     print(f"Loading {args.input} …")
@@ -305,14 +356,48 @@ def main():
     obj_mesh_raw  = load_mesh_trimesh(obj_path)
     tool_mesh_raw = load_mesh_trimesh(tool_path)
 
-    tool_scale = data.get("tool_scale", 1.0)
+    # Apply scales (defaults match RL if not saved in file)
+    tool_scale = data.get("tool_scale", 0.1)
+    object_scale = data.get("object_scale", 0.15)
     tool_mesh_raw.vertices *= tool_scale
-    print(f"  Tool scale:  {tool_scale:.4f}")
+    obj_mesh_raw.vertices *= object_scale
+    print(f"  Tool scale:   {tool_scale:.4f}")
+    print(f"  Object scale: {object_scale:.4f}")
 
-    R_obj    = data["object_rotation"]
+    R_obj    = data.get("object_rotation", np.eye(3))  # Identity if no rotation (gradient method)
     obj_mesh = transform_object_mesh(obj_mesh_raw, R_obj)
 
-    # Diverse subset: evenly spaced along contact_loss ranking
+    # Heatmap mode: show all contact points colored by SDF
+    if args.heatmap:
+        if "contact_pts_world" not in data and "contact_pts_obj_frame" not in data:
+            print("ERROR: Heatmap requires contact_pts_world in .pt file")
+            sys.exit(1)
+
+        # All contact points in world frame (N_total, C, 3)
+        all_contact_pts = data.get("contact_pts_world", data.get("contact_pts_obj_frame"))
+        # Use tool SDF as contact distance proxy (N_total, P) -> take min per config
+        # Or use contact_loss if available
+        all_contact_sdfs = data["contact_loss"][:, None].repeat(5, axis=1)  # (N_total, 5)
+
+        print(f"  Showing heatmap with {all_contact_pts.shape[0]} configs × {all_contact_pts.shape[1]} pts")
+
+        title = (
+            f"Contact Heatmap  ({n_total} configs)\n"
+            f"Object: {Path(obj_path).name}   Tool: {Path(tool_path).name}"
+        )
+
+        visualize_heatmap(
+            obj_mesh, all_contact_pts, all_contact_sdfs,
+            save_path=args.save, title=title,
+        )
+        if args.save:
+            print(f"Saved heatmap to {args.save}")
+        else:
+            import matplotlib.pyplot as plt
+            plt.show()
+        return
+
+    # Normal mode: diverse subset of tool poses
     order   = np.argsort(data["contact_loss"]) if "contact_loss" in data else np.arange(n_total)
     indices = order[np.linspace(0, len(order) - 1, n_show, dtype=int)]
 
