@@ -236,6 +236,7 @@ def process_pt_file(pt_path: str, cfg: Config) -> bool:
 
     # Ground object (same as contact_gen)
     R_obj = data.get("object_rotation", torch.eye(3))
+    R_obj = R_obj.to(device)  # move to GPU
     obj_verts = obj_verts @ R_obj.T
     z_min = obj_verts[:, 2].min()
     if z_min < 0:

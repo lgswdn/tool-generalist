@@ -180,3 +180,92 @@ class MomentumPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         desired_kl=0.016,
         max_grad_norm=1.0,
     )
+
+
+# =============================================================================
+# SDF Encoder configuration — for tool-sdf-v0
+# =============================================================================
+
+@configclass
+class SDFActorCriticCfg:
+    """Config for Actor-Critic using SDFPointCloudEncoder (joint ViT encoder).
+
+    Observation layout (env_tool):
+        object_cloud (512*3=1536) | tool_cloud (512*3=1536) | hand_state (9) | rest
+    Uses ActorCriticSDF: joint ViT encoder processes tool + object together.
+    """
+
+    class_name: str = "ActorCriticSDF"
+
+    # Point cloud settings
+    num_points: int = 512
+    point_dim: int = 3
+    patch_size: int = 32
+
+    # Encoder architecture (default: vit_depth=4, vit_heads=4)
+    encoder_channel: int = 128
+    vit_depth: int = 4
+    vit_heads: int = 4
+
+    # Encoder weights (pretrained from SDF pretraining)
+    encoder_weights_path: str | None = "/mnt/home/zhengyixin/tool-generalist/pretrain/checkpoints_fixed_sdf/best.pt"
+    freeze_encoder: bool = True
+
+    # Network architecture
+    fusion_hidden_dims: list[int] = field(default_factory=lambda: [512, 256, 128])
+    fusion_use_norm: bool = True
+    fusion_norm_type: str = "layer"
+
+    actor_hidden_dims: list[int] = field(default_factory=lambda: [64])
+    actor_use_norm: bool = True
+    actor_norm_type: str = "layer"
+    actor_output_activation: bool = False
+
+    critic_hidden_dims: list[int] = field(default_factory=lambda: [128])
+    critic_use_norm: bool = True
+    critic_norm_type: str = "layer"
+
+    # SD-Cross settings
+    use_sd_cross: bool = True
+    sd_num_query: int = 16
+    sd_emb_dim: int = 128
+    sd_cat_query: bool = False
+    sd_cat_ctx: bool = True
+
+    # Activation / noise
+    activation: str = "elu"
+    init_noise_std: float = 1.0
+    noise_std_type: str = "scalar"
+
+
+@configclass
+class SDFPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    """RSL-RL PPO configuration for SDF-encoder-based task.
+
+    Uses the same NonPrehensileEnv from env_tool.py but with ActorCriticSDF policy.
+    """
+
+    num_steps_per_env = 8
+    max_iterations = 1000000
+    save_interval = 500
+
+    experiment_name = "franka_nonprehensile_sdf"
+
+    empirical_normalization = False
+
+    policy = SDFActorCriticCfg()
+
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=0.5,
+        use_clipped_value_loss=True,
+        clip_param=0.3,
+        entropy_coef=0.006,
+        num_learning_epochs=8,
+        num_mini_batches=8,
+        learning_rate=5.0e-5,
+        schedule="adaptive",
+        gamma=0.99,
+        lam=0.95,
+        desired_kl=0.016,
+        max_grad_norm=1.0,
+    )

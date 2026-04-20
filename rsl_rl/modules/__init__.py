@@ -37,6 +37,7 @@ _optional.update(_try_import(globals(), "actor_critic_ptv3_momentum", ["ActorCri
 _optional.update(_try_import(globals(), "actor_critic_concerto", ["ActorCriticConcerto"]))
 _optional.update(_try_import(globals(), "actor_critic_point2vec", ["ActorCriticPoint2Vec"]))
 _optional.update(_try_import(globals(), "actor_critic_icp", ["ActorCriticICP"]))
+_optional.update(_try_import(globals(), "actor_critic_sdf", ["ActorCriticSDF"]))
 _optional.update(_try_import(globals(), "rnd", ["RandomNetworkDistillation"]))
 
 # Inject into module namespace so eval(class_name) still works
@@ -53,6 +54,7 @@ ActorCriticPTV3Momentum = _optional.get("ActorCriticPTV3Momentum")
 ActorCriticConcerto = _optional.get("ActorCriticConcerto")
 ActorCriticPoint2Vec = _optional.get("ActorCriticPoint2Vec")
 ActorCriticICP = _optional.get("ActorCriticICP")
+ActorCriticSDF = _optional.get("ActorCriticSDF")
 RandomNetworkDistillation = _optional.get("RandomNetworkDistillation")
 
 __all__ = [
@@ -63,6 +65,7 @@ __all__ = [
     "ActorCriticUnicorn",
     "ActorCriticMultiUnicorn",
     "ActorCriticICP",
+    "ActorCriticSDF",
     "ActorCriticMomentum",
     "ActorCriticPTV3Momentum",
     "ActorCriticConcerto",

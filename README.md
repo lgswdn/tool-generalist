@@ -120,7 +120,9 @@ cd ..
 To utilize the customized version of `rsl_rl` included in this repository, export the project root to your `PYTHONPATH`:
 
 ```bash
-export PYTHONPATH=$HOME/IsaacLab_nonPrehensile:$PYTHONPATH
+  export PYTHONPATH=/mnt/home/zhengyixin/tool-generalist:/mnt/home/zhengyixin/tool-generalist/source/IsaacLab_nonPrehensile
+
+
 ```
 
 ### Train (RSL-RL / PPO)
@@ -131,6 +133,10 @@ python scripts/train.py \
   --experiment_name=franka_nonprehensile \
   --num_envs=4096 \
   --video --headless
+
+python -m torch.distributed.run --nnodes=1 --nproc_per_node=2 scripts/train.py --distributed --task=tool-sdf-v0 --headless --logger wandb --num_envs 2048
+
+python -m torch.distributed.run --nnodes=1 --nproc_per_node=4 scripts/train.py --distributed --task=tool-sdf-v0 --headless --logger wandb --num_envs 1024
 ```
 
 Common options:

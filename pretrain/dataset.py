@@ -86,10 +86,10 @@ class ContactDataset(Dataset):
         P_obj  = data["obj_pts_canonical"]   # (Q, 3) - already scaled by object_scale
 
         # ---- Reconstruct world-frame clouds ----------------------------------
-        # Tool: apply rotation + translation for this config
-        R_tool = data["tool_rotations"][cfg_i]      # (3, 3)
-        t_tool = data["tool_translations"][cfg_i]   # (3,)
-        tool_pc = P_tool @ R_tool.T + t_tool         # (P, 3)
+        # Tool at CONTACT pose (for SDF task)
+        R_tool_contact = data["tool_rotations"][cfg_i]      # (3, 3)
+        t_tool_contact = data["tool_translations"][cfg_i]   # (3,)
+        tool_pc = P_tool @ R_tool_contact.T + t_tool_contact  # (P, 3) - for SDF
 
         # Object: apply R_obj + z_shift (same for all configs in this file)
         R_obj   = data["object_rotation"]            # (3, 3)
@@ -97,6 +97,13 @@ class ContactDataset(Dataset):
         obj_pc  = P_obj @ R_obj.T                    # (Q, 3)
         obj_pc  = obj_pc.clone()
         obj_pc[:, 2] -= z_shift
+
+        # Tool at INITIAL pose (for diffusion task)
+        tool_pc_init = None
+        if "init_translations" in data and "init_rotations" in data:
+            R_tool_init = data["init_rotations"][cfg_i]      # (3, 3)
+            t_tool_init = data["init_translations"][cfg_i]   # (3,)
+            tool_pc_init = P_tool @ R_tool_init.T + t_tool_init  # (P, 3)
 
         # ---- SDF arrays (per-config) -----------------------------------------
         tool_pts_sdf = data["tool_pts_sdf"][cfg_i]  # (P,)  signed
@@ -107,7 +114,7 @@ class ContactDataset(Dataset):
         contact_pts     = data["contact_pts_world"][cfg_i]      # (5, 3)
         contact_normals = data["contact_normals"][cfg_i]        # (5, 3)
 
-        # ---- Diffusion inputs: delta pose from initial to contact ----------
+        # ---- Diffusion inputs: delta pose ----------
         delta_pose = None
         if "init_translations" in data and "init_rotations" in data:
             # Initial pose
@@ -121,16 +128,16 @@ class ContactDataset(Dataset):
             # Delta translation
             delta_t = contact_t - init_t  # (3,)
 
-            # Delta rotation: R_delta = R_contact @ R_init^{-1}
-            # Actually, for diffusion, we want: initial -> contact
-            # So delta_R = R_contact @ R_init.T (apply delta to initial gives contact)
+            # Delta rotation
             delta_R = contact_R @ init_R.T  # (3, 3)
+            delta_R_6d = delta_R[:, :2].reshape(6)  # (6,)
 
-            # Convert to 6D representation (first two columns)
-            delta_R_6d = delta_R[:, :2].reshape(6)  # (6,) = first two columns flattened
+            # Normalize to unit variance (translation std=0.13, rotation std=0.58)
+            delta_t_norm = delta_t / 0.13
+            delta_R_6d_norm = delta_R_6d / 0.58
 
-            # Full delta pose: translation (3) + 6D rotation (6) = 9D
-            delta_pose = torch.cat([delta_t, delta_R_6d], dim=0)  # (9,)
+            # Full normalized delta pose (9D)
+            delta_pose = torch.cat([delta_t_norm, delta_R_6d_norm], dim=0)  # (9,)
 
         # ---- Augmentation: small Gaussian jitter only ------------------------
         if self.augment:
@@ -139,8 +146,9 @@ class ContactDataset(Dataset):
 
         return {
             # World-frame clouds (for encoder input)
-            "tool_pc":             tool_pc.float(),          # (P, 3)
+            "tool_pc":             tool_pc.float(),          # (P, 3) - contact pose for SDF task
             "obj_pc":              obj_pc.float(),           # (Q, 3)
+            "tool_pc_init":        tool_pc_init.float() if tool_pc_init is not None else None,  # (P, 3) - init pose for diffusion
             # Canonical clouds (pose-invariant geometry)
             "tool_pts_canonical":  P_tool.float(),           # (P, 3)
             "obj_pts_canonical":   P_obj.float(),            # (Q, 3)

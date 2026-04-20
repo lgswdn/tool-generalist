@@ -1,33 +1,26 @@
-"""model.py — SDF segmentation wrapper for pretraining the joint-ViT encoder.
+"""model.py — Joint encoder pretraining: SDF prediction + Pose diffusion.
 
-This module wraps SDFPointCloudEncoder (from rsl_rl.modules.models.cloud.sdf_encoder)
-with lightweight SDF prediction heads and a Huber-loss training objective.
+Uses TransformerForDiffusion from diffusion_policy for pose prediction.
+Uses DDPMScheduler from diffusers for noise schedule.
 
-The encoder itself lives in rsl_rl so that the RL policy can import it directly
-once pretraining is done — exactly the same pattern as ICPNet.
-
-Architecture
-────────────
-  SDFSegmentor
-    ├── encoder: SDFPointCloudEncoder  (shared ViT backbone)
-    ├── tool_head: MLP  (tool-point / tool-patch → SDF scalar)
-    └── obj_head:  MLP  (obj-point  / obj-patch  → SDF scalar)
-
-Head modes
-──────────
-  "point"  — per-point SDF via unpatchify (scatter patch token → points) + MLP
-  "patch"  — per-patch SDF directly from patch tokens + global token
+Architecture:
+  JointModel (shared encoder + two heads)
+    ├── encoder: SDFPointCloudEncoder  (ViT backbone, FPS patches)
+    ├── sdf_head: SDFSegmentor          (point/patch → SDF)
+    └── transformer: TransformerForDiffusion (cross-attention to patches)
 """
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from diffusers import DDPMScheduler
 
 # ── repo path ────────────────────────────────────────────────────────────────
 _PRETRAIN_DIR = Path(__file__).resolve().parent
@@ -35,14 +28,21 @@ _REPO_ROOT    = _PRETRAIN_DIR.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+# ── diffusion_policy path ────────────────────────────────────────────────────
+_DIFFUSION_POLICY_DIR = _PRETRAIN_DIR / "diffusion_policy_repo"
+if str(_DIFFUSION_POLICY_DIR) not in sys.path:
+    sys.path.insert(0, str(_DIFFUSION_POLICY_DIR))
+
 from rsl_rl.modules.models.cloud.sdf_encoder import (
     SDFPointCloudEncoder,
     SDFEncoderCfg,
-)
+)  # import directly, not via modules/__init__.py (avoid pytorch3d chain)
+
+from diffusion_policy.model.diffusion.transformer_for_diffusion import TransformerForDiffusion
 
 
 # --------------------------------------------------------------------------- #
-# Small MLP helper (self-contained, no rsl_rl.common dependency)
+# Small MLP helper
 # --------------------------------------------------------------------------- #
 
 def _make_mlp(dims: tuple[int, ...]) -> nn.Sequential:
@@ -56,15 +56,11 @@ def _make_mlp(dims: tuple[int, ...]) -> nn.Sequential:
     return nn.Sequential(*layers)
 
 
-# --------------------------------------------------------------------------- #
-# GT SDF aggregation for patch mode
-# --------------------------------------------------------------------------- #
-
 def _aggregate_sdf(
-    sdf_pts:   torch.Tensor,   # (B, N)
-    patch_idx: torch.Tensor,   # (B, P, K)
+    sdf_pts:   torch.Tensor,
+    patch_idx: torch.Tensor,
     mode:      str = "mean",
-) -> torch.Tensor:             # (B, P)
+) -> torch.Tensor:
     B, P, K = patch_idx.shape
     gathered = sdf_pts.gather(1, patch_idx.reshape(B, P * K)).view(B, P, K)
     if mode == "min":  return gathered.min(-1).values
@@ -77,127 +73,86 @@ def _aggregate_sdf(
 # --------------------------------------------------------------------------- #
 
 class SDFSegmentor(nn.Module):
-    """SDF prediction wrapper around SDFPointCloudEncoder.
-
-    Args:
-        head_mode:       "point" | "patch"
-        patch_agg:       GT aggregation for patch mode ("mean"/"min"/"max")
-        num_pts:         Points per input cloud (N).
-        patch_size:      Points per FPS patch (K).
-        encoder_channel: Token dimension D.
-        vit_depth:       ViT transformer depth.
-        vit_heads:       ViT attention heads.
-        head_hidden:     Hidden dims for SDF MLP heads.
-        freeze_encoder:  If True, freeze the encoder after init.
-        icp_weights_path: (ignored, kept for CLI back-compat)
-        freeze_icp:       (alias for freeze_encoder, back-compat)
-    """
+    """SDF prediction wrapper around SDFPointCloudEncoder."""
 
     def __init__(
         self,
-        head_mode:       str = "point",
-        patch_agg:       str = "mean",
-        num_pts:         int = 512,
-        patch_size:      int = 32,
+        head_mode: str = "point",
+        patch_agg: str = "mean",
+        num_pts: int = 512,
+        patch_size: int = 32,
         encoder_channel: int = 128,
-        vit_depth:       int = 4,
-        vit_heads:       int = 4,
-        head_hidden:     tuple[int, ...] = (256, 128),
-        freeze_encoder:  bool = False,
-        # Legacy / back-compat
-        icp_weights_path: Optional[str] = None,
-        freeze_icp:       bool = False,
+        vit_depth: int = 4,
+        vit_heads: int = 4,
+        head_hidden: tuple[int, ...] = (256, 128),
+        freeze_encoder: bool = False,
     ):
         super().__init__()
         assert head_mode in ("point", "patch")
-        assert patch_agg  in ("mean", "min", "max")
+        assert patch_agg in ("mean", "min", "max")
         self.head_mode = head_mode
         self.patch_agg = patch_agg
-        self.num_pts   = num_pts
 
-        if icp_weights_path:
-            print("[SDFSegmentor] NOTE: icp_weights_path is ignored; "
-                  "encoder is SDFPointCloudEncoder (not ICPNet).")
-
-        # ── Encoder ──────────────────────────────────────────────────────────
         enc_cfg = SDFEncoderCfg(
             num_pts=num_pts,
             patch_size=patch_size,
             encoder_channel=encoder_channel,
             vit_depth=vit_depth,
             vit_heads=vit_heads,
-            freeze=freeze_encoder or freeze_icp,
+            freeze=freeze_encoder,
         )
         self.encoder = SDFPointCloudEncoder(enc_cfg)
         D = self.encoder.feature_dim
-        P = self.encoder.num_patches
 
-        # ── SDF heads ─────────────────────────────────────────────────────────
         if head_mode == "point":
-            # Input: per-point xyz embed (D) + scattered patch token (D) + CLS (D) = 3D
             self.xyz_embed = _make_mlp((3, D, D))
             self.tool_head = _make_mlp((3 * D,) + head_hidden + (1,))
-            self.obj_head  = _make_mlp((3 * D,) + head_hidden + (1,))
+            self.obj_head = _make_mlp((3 * D,) + head_hidden + (1,))
         else:
-            # Input: patch token (D) + CLS (D) = 2D
             self.tool_head = _make_mlp((2 * D,) + head_hidden + (1,))
-            self.obj_head  = _make_mlp((2 * D,) + head_hidden + (1,))
-
-    # ── Point-level prediction ───────────────────────────────────────────────
+            self.obj_head = _make_mlp((2 * D,) + head_hidden + (1,))
 
     def _predict_point(
         self,
-        pc:          torch.Tensor,    # (B, N, 3)
-        patch_tokens: torch.Tensor,   # (B, P, D)
-        global_feat:  torch.Tensor,   # (B, D)
-        patch_idx:    torch.Tensor,   # (B, P, K) — into this stream's N points
-        head:         nn.Module,
-    ) -> torch.Tensor:                # (B, N)
+        pc: torch.Tensor,
+        patch_tokens: torch.Tensor,
+        global_feat: torch.Tensor,
+        patch_idx: torch.Tensor,
+        head: nn.Module,
+    ) -> torch.Tensor:
         B, N, _ = pc.shape
-        P, K    = patch_tokens.shape[1], patch_idx.shape[2]
-        D       = self.encoder.feature_dim
+        D = self.encoder.feature_dim
+        P, K = patch_tokens.shape[1], patch_idx.shape[2]
 
-        # Lift XYZ
-        pt_xyz = self.xyz_embed(pc)                            # (B, N, D)
+        pt_xyz = self.xyz_embed(pc)
 
-        # Scatter patch tokens → per-point features (last-write for overlaps)
         pt_patch = torch.zeros(B, N, D, device=pc.device, dtype=pc.dtype)
-        exp_tok  = patch_tokens.unsqueeze(2).expand(B, P, K, D)   # (B, P, K, D)
+        exp_tok = patch_tokens.unsqueeze(2).expand(B, P, K, D)
         flat_idx = patch_idx.reshape(B, P * K, 1).expand(B, P * K, D)
         flat_tok = exp_tok.reshape(B, P * K, D)
-        pt_patch.scatter_(1, flat_idx, flat_tok)               # (B, N, D)
+        pt_patch.scatter_(1, flat_idx, flat_tok)
 
-        # Broadcast global feat
-        pt_global = global_feat.unsqueeze(1).expand(B, N, D)   # (B, N, D)
+        pt_global = global_feat.unsqueeze(1).expand(B, N, D)
 
-        feat = torch.cat([pt_xyz, pt_patch, pt_global], dim=-1)  # (B, N, 3D)
-        return head(feat).squeeze(-1)                             # (B, N)
-
-    # ── Patch-level prediction ───────────────────────────────────────────────
+        feat = torch.cat([pt_xyz, pt_patch, pt_global], dim=-1)
+        return head(feat).squeeze(-1)
 
     def _predict_patch(
         self,
-        patch_tokens: torch.Tensor,   # (B, P, D)
-        global_feat:  torch.Tensor,   # (B, D)
-        head:         nn.Module,
-    ) -> torch.Tensor:                # (B, P)
+        patch_tokens: torch.Tensor,
+        global_feat: torch.Tensor,
+        head: nn.Module,
+    ) -> torch.Tensor:
         B, P, D = patch_tokens.shape
-        pt_global = global_feat.unsqueeze(1).expand(B, P, D)      # (B, P, D)
-        feat = torch.cat([patch_tokens, pt_global], dim=-1)        # (B, P, 2D)
-        return head(feat).squeeze(-1)                               # (B, P)
-
-    # ── Forward ─────────────────────────────────────────────────────────────
+        pt_global = global_feat.unsqueeze(1).expand(B, P, D)
+        feat = torch.cat([patch_tokens, pt_global], dim=-1)
+        return head(feat).squeeze(-1)
 
     def forward(
         self,
-        tool_pc: torch.Tensor,   # (B, N, 3)
-        obj_pc:  torch.Tensor,   # (B, N, 3)
+        tool_pc: torch.Tensor,
+        obj_pc: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Returns:
-            tool_sdf : (B, N) in point mode  |  (B, P) in patch mode
-            obj_sdf  : (B, N) in point mode  |  (B, P) in patch mode
-        """
         res = self.encoder.encode(tool_pc, obj_pc)
 
         if self.head_mode == "point":
@@ -211,22 +166,18 @@ class SDFSegmentor(nn.Module):
             )
         else:
             tool_sdf = self._predict_patch(res.tool_tokens, res.global_feat, self.tool_head)
-            obj_sdf  = self._predict_patch(res.obj_tokens,  res.global_feat, self.obj_head)
+            obj_sdf = self._predict_patch(res.obj_tokens, res.global_feat, self.obj_head)
 
         return tool_sdf, obj_sdf
 
-    # ── Loss ────────────────────────────────────────────────────────────────
-
     def loss(
         self,
-        tool_pc:     torch.Tensor,
-        obj_pc:      torch.Tensor,
+        tool_pc: torch.Tensor,
+        obj_pc: torch.Tensor,
         tool_sdf_gt: torch.Tensor,
-        obj_sdf_gt:  torch.Tensor,
-        sdf_weight:  float = 1.0,
+        obj_sdf_gt: torch.Tensor,
+        sdf_weight: float = 1.0,
     ) -> Tuple[torch.Tensor, dict]:
-        """Huber (smooth-L1) loss on predicted vs. GT SDF for both streams."""
-        # Forward pass (also gives us patch indices for GT agg in patch mode)
         res = self.encoder.encode(tool_pc, obj_pc)
 
         if self.head_mode == "point":
@@ -239,264 +190,19 @@ class SDFSegmentor(nn.Module):
                 res.obj_patch_idx, self.obj_head,
             )
         else:
-            # Aggregate GT to patch level
             tool_sdf_gt = _aggregate_sdf(tool_sdf_gt, res.tool_patch_idx, self.patch_agg)
-            obj_sdf_gt  = _aggregate_sdf(obj_sdf_gt,  res.obj_patch_idx,  self.patch_agg)
+            obj_sdf_gt = _aggregate_sdf(obj_sdf_gt, res.obj_patch_idx, self.patch_agg)
             tool_pred = self._predict_patch(res.tool_tokens, res.global_feat, self.tool_head)
-            obj_pred  = self._predict_patch(res.obj_tokens,  res.global_feat, self.obj_head)
+            obj_pred = self._predict_patch(res.obj_tokens, res.global_feat, self.obj_head)
 
         tool_loss = F.smooth_l1_loss(tool_pred, tool_sdf_gt)
-        obj_loss  = F.smooth_l1_loss(obj_pred,  obj_sdf_gt)
-        total     = sdf_weight * (tool_loss + obj_loss)
+        obj_loss = F.smooth_l1_loss(obj_pred, obj_sdf_gt)
+        total = sdf_weight * (tool_loss + obj_loss)
 
         return total, {
             "tool_sdf_loss": tool_loss.item(),
-            "obj_sdf_loss":  obj_loss.item(),
-            "total":         total.item(),
+            "obj_sdf_loss": obj_loss.item(),
         }
-
-
-# --------------------------------------------------------------------------- #
-# PoseDiffusion - Diffusion head for pose prediction
-# --------------------------------------------------------------------------- #
-
-class SinusoidalPosEmb(nn.Module):
-    """Sinusoidal positional embedding for diffusion timestep."""
-    def __init__(self, dim: int):
-        super().__init__()
-        self.dim = dim
-
-    def forward(self, t: torch.Tensor) -> torch.Tensor:  # (B,) -> (B, dim)
-        device = t.device
-        half_dim = self.dim // 2
-        emb = torch.log(torch.tensor(10000.0, device=device)) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
-        emb = t[:, None] * emb[None, :]  # (B, half_dim)
-        emb = torch.cat([emb.sin(), emb.cos()], dim=-1)  # (B, dim)
-        return emb
-
-
-def rotation_6d_to_matrix(d6: torch.Tensor) -> torch.Tensor:
-    """Convert 6D rotation representation to 3x3 rotation matrix.
-
-    Zhou et al. "On the Continuity of Rotation Representations in Neural Networks"
-    """
-    a1, a2 = d6[..., :3], d6[..., 3:]
-    b1 = F.normalize(a1, dim=-1)
-    b2 = a2 - (b1 * a2).sum(dim=-1, keepdim=True) * b1
-    b2 = F.normalize(b2, dim=-1)
-    b3 = torch.cross(b1, b2, dim=-1)
-    return torch.stack([b1, b2, b3], dim=-1)  # (..., 3, 3)
-
-
-def matrix_to_rotation_6d(R: torch.Tensor) -> torch.Tensor:
-    """Convert 3x3 rotation matrix to 6D representation."""
-    return R[..., :2, :].reshape(*R.shape[:-2], 6)  # first two columns
-
-
-class PoseDiffusion(nn.Module):
-    """Diffusion model for predicting delta pose (translation + 6D rotation).
-
-    Conditioning:
-        - encoder features: tool_tokens, obj_tokens, global_feat
-        - contact points: (K, 3) → MLP → pooling
-
-    Output:
-        - delta pose: (9,) = translation (3) + 6D rotation (6)
-    """
-
-    def __init__(
-        self,
-        encoder: SDFPointCloudEncoder,  # shared encoder (frozen or not)
-        contact_hidden: tuple[int, ...] = (128, 128),
-        diffusion_hidden: tuple[int, ...] = (256, 256, 256),
-        time_embed_dim: int = 128,
-        num_steps: int = 100,
-        contact_pool: str = "mean",  # "mean" or "max"
-    ):
-        super().__init__()
-        self.encoder = encoder
-        self.num_steps = num_steps
-        self.contact_pool = contact_pool
-
-        D = encoder.feature_dim  # patch token dimension
-
-        # Contact points encoder (separate MLP, not shared)
-        self.contact_encoder = _make_mlp((3, contact_hidden[-1], contact_hidden[-1]))
-
-        # Time embedding
-        self.time_mlp = nn.Sequential(
-            SinusoidalPosEmb(time_embed_dim),
-            nn.Linear(time_embed_dim, diffusion_hidden[0]),
-            nn.LayerNorm(diffusion_hidden[0]),
-            nn.ELU(),
-        )
-
-        # Conditioning: concatenate all features
-        # tool_tokens (P, D) → pool → D
-        # obj_tokens (P, D) → pool → D
-        # global_feat: D
-        # contact_feat: contact_hidden[-1]
-        cond_dim = 3 * D + contact_hidden[-1]
-
-        # Denoising MLP
-        # Input: cond (cond_dim) + time_embed (diffusion_hidden[0]) + noisy_pose (9)
-        input_dim = cond_dim + diffusion_hidden[0] + 9
-
-        layers = [nn.Linear(input_dim, diffusion_hidden[0])]
-        for i in range(len(diffusion_hidden) - 1):
-            layers.append(nn.LayerNorm(diffusion_hidden[i]))
-            layers.append(nn.ELU())
-            layers.append(nn.Linear(diffusion_hidden[i], diffusion_hidden[i + 1]))
-        layers.append(nn.Linear(diffusion_hidden[-1], 9))  # output: 9D pose
-        self.denoiser = nn.Sequential(*layers)
-
-        # Beta schedule (linear)
-        self.betas = torch.linspace(1e-4, 0.02, num_steps)
-        self.alphas = 1.0 - self.betas
-        self.alphas_cumprod = self.alphas.cumprod(dim=0)
-
-    def _pool_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
-        """Pool patch tokens to single feature."""
-        if self.contact_pool == "max":
-            return tokens.max(dim=1).values
-        return tokens.mean(dim=1)  # default: mean
-
-    def _encode_contacts(self, contact_pts: torch.Tensor) -> torch.Tensor:
-        """Encode contact points.
-
-        Args:
-            contact_pts: (B, K, 3) world-frame contact points
-
-        Returns:
-            contact_feat: (B, contact_hidden[-1])
-        """
-        B, K, _ = contact_pts.shape
-        # Encode each point
-        pts_feat = self.contact_encoder(contact_pts)  # (B, K, D)
-        # Pool
-        if self.contact_pool == "max":
-            return pts_feat.max(dim=1).values
-        return pts_feat.mean(dim=1)
-
-    def get_conditioning(
-        self,
-        tool_pc: torch.Tensor,
-        obj_pc: torch.Tensor,
-        contact_pts: torch.Tensor,
-    ) -> torch.Tensor:
-        """Get conditioning features from encoder + contacts."""
-        # Encode clouds (get patch tokens)
-        res = self.encoder.encode(tool_pc, obj_pc)
-
-        # Pool tokens
-        tool_feat = self._pool_tokens(res.tool_tokens)  # (B, D)
-        obj_feat = self._pool_tokens(res.obj_tokens)    # (B, D)
-        global_feat = res.global_feat                    # (B, D)
-
-        # Encode contacts
-        contact_feat = self._encode_contacts(contact_pts)  # (B, contact_hidden[-1])
-
-        # Concatenate
-        cond = torch.cat([tool_feat, obj_feat, global_feat, contact_feat], dim=-1)
-        return cond
-
-    def forward(
-        self,
-        tool_pc: torch.Tensor,
-        obj_pc: torch.Tensor,
-        contact_pts: torch.Tensor,
-        t: torch.Tensor,  # (B,) timestep
-        noisy_pose: torch.Tensor,  # (B, 9) noisy delta pose
-    ) -> torch.Tensor:  # (B, 9) predicted clean pose
-        """Denoise pose at timestep t."""
-        # Get conditioning
-        cond = self.get_conditioning(tool_pc, obj_pc, contact_pts)
-
-        # Time embedding
-        t_emb = self.time_mlp(t)
-
-        # Concatenate
-        x = torch.cat([cond, t_emb, noisy_pose], dim=-1)
-
-        # Predict clean pose
-        return self.denoiser(x)
-
-    def add_noise(
-        self,
-        pose: torch.Tensor,  # (B, 9) clean pose
-        t: torch.Tensor,     # (B,) timestep
-    ) -> tuple[torch.Tensor, torch.Tensor]:  # noisy_pose, noise
-        """Add noise at timestep t."""
-        device = pose.device
-        alpha_t = self.alphas_cumprod[t].to(device)  # (B,)
-
-        noise = torch.randn_like(pose)
-        noisy_pose = torch.sqrt(alpha_t[:, None]) * pose + torch.sqrt(1 - alpha_t[:, None]) * noise
-
-        return noisy_pose, noise
-
-    def loss(
-        self,
-        tool_pc: torch.Tensor,
-        obj_pc: torch.Tensor,
-        contact_pts: torch.Tensor,
-        delta_pose_gt: torch.Tensor,  # (B, 9) translation + 6D rotation
-    ) -> tuple[torch.Tensor, dict]:
-        """Training loss: predict noise added."""
-        B = delta_pose_gt.shape[0]
-        device = delta_pose_gt.device
-
-        # Sample random timestep
-        t = torch.randint(0, self.num_steps, (B,), device=device)
-
-        # Add noise
-        noisy_pose, noise = self.add_noise(delta_pose_gt, t)
-
-        # Predict noise (or clean pose - standard DDPM predicts noise)
-        pred = self.forward(tool_pc, obj_pc, contact_pts, t, noisy_pose)
-
-        # Loss: predict the noise (standard diffusion training)
-        loss = F.mse_loss(pred, noise)
-
-        return loss, {"diffusion_loss": loss.item()}
-
-    @torch.no_grad()
-    def sample(
-        self,
-        tool_pc: torch.Tensor,
-        obj_pc: torch.Tensor,
-        contact_pts: torch.Tensor,
-        num_samples: int = 1,
-    ) -> torch.Tensor:  # (B, 9) predicted delta pose
-        """Sample from diffusion model (DDPM sampling)."""
-        B = tool_pc.shape[0]
-        device = tool_pc.device
-
-        # Start from noise
-        pose = torch.randn(B, 9, device=device)
-
-        for t in reversed(range(self.num_steps)):
-            t_tensor = torch.full((B,), t, device=device, dtype=torch.long)
-
-            # Predict noise
-            pred_noise = self.forward(tool_pc, obj_pc, contact_pts, t_tensor, pose)
-
-            # DDPM update
-            alpha_t = self.alphas_cumprod[t].to(device)
-            alpha_prev = self.alphas_cumprod[max(t - 1, 0)].to(device)
-            beta_t = self.betas[t].to(device)
-
-            if t > 0:
-                noise = torch.randn_like(pose)
-            else:
-                noise = torch.zeros_like(pose)
-
-            # x_{t-1} = (1/sqrt(alpha_t)) * (x_t - beta_t/sqrt(1-alpha_t) * pred_noise) + sqrt(beta_t) * noise
-            pose = (1.0 / torch.sqrt(alpha_t)) * (pose - beta_t / torch.sqrt(1 - alpha_t) * pred_noise)
-            pose = pose + torch.sqrt(beta_t) * noise
-
-        return pose
 
 
 # --------------------------------------------------------------------------- #
@@ -506,9 +212,14 @@ class PoseDiffusion(nn.Module):
 class JointModel(nn.Module):
     """Joint training of SDF prediction and pose diffusion.
 
-    Uses shared encoder with two heads:
+    Uses shared encoder with:
         - SDFSegmentor (SDF prediction)
-        - PoseDiffusion (pose prediction)
+        - TransformerForDiffusion (cross-attention to 32 encoder patches)
+
+    The transformer takes:
+        - sample: noisy pose (B, 9, 1)
+        - timestep: diffusion step
+        - cond: encoder patches (B, 32, 128) = [tool_tokens, obj_tokens]
     """
 
     def __init__(
@@ -516,6 +227,7 @@ class JointModel(nn.Module):
         # SDF head
         head_mode: str = "point",
         patch_agg: str = "mean",
+        head_hidden: tuple[int, ...] = (256, 128),
         # Encoder (shared)
         num_pts: int = 512,
         patch_size: int = 32,
@@ -523,11 +235,12 @@ class JointModel(nn.Module):
         vit_depth: int = 4,
         vit_heads: int = 4,
         freeze_encoder: bool = False,
-        # Diffusion head
-        diffusion_hidden: tuple[int, ...] = (256, 256, 256),
-        diffusion_steps: int = 100,
-        contact_hidden: tuple[int, ...] = (128, 128),
-        contact_pool: str = "mean",
+        # Diffusion transformer
+        n_layer: int = 4,
+        n_head: int = 4,
+        n_emb: int = 256,
+        p_drop_emb: float = 0.0,
+        p_drop_attn: float = 0.0,
         # Loss weights
         sdf_weight: float = 1.0,
         diffusion_weight: float = 1.0,
@@ -536,7 +249,7 @@ class JointModel(nn.Module):
         self.sdf_weight = sdf_weight
         self.diffusion_weight = diffusion_weight
 
-        # Shared encoder config
+        # Shared encoder
         enc_cfg = SDFEncoderCfg(
             num_pts=num_pts,
             patch_size=patch_size,
@@ -545,14 +258,15 @@ class JointModel(nn.Module):
             vit_heads=vit_heads,
             freeze=freeze_encoder,
         )
-
-        # Shared encoder (created once, passed to both heads)
         self.encoder = SDFPointCloudEncoder(enc_cfg)
+        D = self.encoder.feature_dim  # 128
+        P = self.encoder.num_patches   # 16
 
         # SDF head
         self.sdf_head = SDFSegmentor(
             head_mode=head_mode,
             patch_agg=patch_agg,
+            head_hidden=head_hidden,
             num_pts=num_pts,
             patch_size=patch_size,
             encoder_channel=encoder_channel,
@@ -560,77 +274,252 @@ class JointModel(nn.Module):
             vit_heads=vit_heads,
             freeze_encoder=freeze_encoder,
         )
-        # Replace encoder with shared one
         self.sdf_head.encoder = self.encoder
 
-        # Diffusion head
-        self.diffusion_head = PoseDiffusion(
-            encoder=self.encoder,
-            contact_hidden=contact_hidden,
-            diffusion_hidden=diffusion_hidden,
-            num_steps=diffusion_steps,
-            contact_pool=contact_pool,
+        # TransformerForDiffusion: condition on delta_pose (answer) as sanity check
+        # n_obs_steps=9: 9 conditioning tokens matching 9 input tokens
+        # n_cond_layers=1: encoder mixes time+cond tokens before cross-attention
+        self.transformer = TransformerForDiffusion(
+            input_dim=1,
+            output_dim=1,
+            horizon=9,  # pose sequence length
+            n_obs_steps=9,  # 9 conditioning tokens
+            cond_dim=1,  # each condition token is 1 value
+            n_layer=n_layer,
+            n_head=n_head,
+            n_emb=n_emb,
+            p_drop_emb=p_drop_emb,
+            p_drop_attn=p_drop_attn,
+            obs_as_cond=True,
+            time_as_cond=True,
+            n_cond_layers=1,  # encoder layer to mix memory tokens
         )
 
-    def forward_sdf(
-        self,
-        tool_pc: torch.Tensor,
-        obj_pc: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """SDF prediction forward."""
-        return self.sdf_head(tool_pc, obj_pc)
-
-    def forward_diffusion(
-        self,
-        tool_pc: torch.Tensor,
-        obj_pc: torch.Tensor,
-        contact_pts: torch.Tensor,
-        t: torch.Tensor,
-        noisy_pose: torch.Tensor,
-    ) -> torch.Tensor:
-        """Diffusion forward."""
-        return self.diffusion_head(tool_pc, obj_pc, contact_pts, t, noisy_pose)
+        # DDPM noise scheduler (from diffusers)
+        # DEBUG: Use 100 steps and fix timestep to 50 for controlled test
+        self.noise_scheduler = DDPMScheduler(
+            num_train_timesteps=100,
+            beta_schedule='squaredcos_cap_v2',
+            clip_sample=True,
+        )
 
     def loss(
         self,
-        # SDF inputs
+        # SDF inputs (tool at CONTACT pose)
         tool_pc: torch.Tensor,
         obj_pc: torch.Tensor,
         tool_sdf_gt: torch.Tensor,
         obj_sdf_gt: torch.Tensor,
-        # Diffusion inputs (optional)
-        contact_pts: torch.Tensor = None,
+        # Diffusion inputs (tool at INIT pose)
+        tool_pc_init: torch.Tensor = None,
         delta_pose_gt: torch.Tensor = None,
-    ) -> tuple[torch.Tensor, dict]:
+        noise: torch.Tensor = None,  # optional: provide target noise directly
+    ) -> Tuple[torch.Tensor, dict]:
         """Joint loss computation."""
         metrics = {}
         total_loss = torch.tensor(0.0, device=tool_pc.device)
 
-        # SDF loss
-        sdf_loss, sdf_metrics = self.sdf_head.loss(
-            tool_pc, obj_pc, tool_sdf_gt, obj_sdf_gt,
-            sdf_weight=self.sdf_weight,
-        )
-        total_loss = total_loss + sdf_loss
-        metrics.update(sdf_metrics)
+        # SDF task: encode tool at contact pose
+        enc_result_contact = self.encoder.encode(tool_pc, obj_pc)
 
-        # Diffusion loss (if inputs provided)
-        if contact_pts is not None and delta_pose_gt is not None:
-            diff_loss, diff_metrics = self.diffusion_head.loss(
-                tool_pc, obj_pc, contact_pts, delta_pose_gt,
+        # SDF loss
+        if self.sdf_head.head_mode == "point":
+            tool_pred = self.sdf_head._predict_point(
+                tool_pc, enc_result_contact.tool_tokens, enc_result_contact.global_feat,
+                enc_result_contact.tool_patch_idx, self.sdf_head.tool_head,
             )
+            obj_pred = self.sdf_head._predict_point(
+                obj_pc, enc_result_contact.obj_tokens, enc_result_contact.global_feat,
+                enc_result_contact.obj_patch_idx, self.sdf_head.obj_head,
+            )
+        else:
+            tool_sdf_gt_agg = _aggregate_sdf(tool_sdf_gt, enc_result_contact.tool_patch_idx, self.sdf_head.patch_agg)
+            obj_sdf_gt_agg = _aggregate_sdf(obj_sdf_gt, enc_result_contact.obj_patch_idx, self.sdf_head.patch_agg)
+            tool_pred = self.sdf_head._predict_patch(enc_result_contact.tool_tokens, enc_result_contact.global_feat, self.sdf_head.tool_head)
+            obj_pred = self.sdf_head._predict_patch(enc_result_contact.obj_tokens, enc_result_contact.global_feat, self.sdf_head.obj_head)
+            tool_sdf_gt = tool_sdf_gt_agg
+            obj_sdf_gt = obj_sdf_gt_agg
+
+        tool_loss = F.smooth_l1_loss(tool_pred, tool_sdf_gt)
+        obj_loss = F.smooth_l1_loss(obj_pred, obj_sdf_gt)
+        sdf_loss = tool_loss + obj_loss
+        total_loss = total_loss + self.sdf_weight * sdf_loss
+        metrics["tool_sdf_loss"] = tool_loss.item()
+        metrics["obj_sdf_loss"] = obj_loss.item()
+
+        # Diffusion task: condition on delta_pose_gt (the answer) as sanity check
+        if tool_pc_init is not None and delta_pose_gt is not None:
+            B = delta_pose_gt.shape[0]
+            device = delta_pose_gt.device
+
+            # SANITY CHECK: 1-step diffusion with FIXED noise for debugging
+            # Input = clean + noise, Condition = clean, Target = noise
+
+            # Clean pose as (B, 9, 1) - each value as separate token
+            clean_data = delta_pose_gt.unsqueeze(-1)  # (B, 9, 1)
+
+            # Condition: also (B, 9, 1) so each input token matches a cond token
+            # Need to change n_obs_steps=9 in transformer for this
+            cond = clean_data  # (B, 9, 1) - same format as input
+
+            # Use fixed noise (same every iteration) for memorization test
+            if not hasattr(self, '_fixed_noise') or self._fixed_noise.shape[0] != B:
+                self._fixed_noise = torch.randn(B, 9, 1, device=device)
+            noise = self._fixed_noise
+
+            # Simple 1-step: noisy = clean + noise
+            noisy_target = clean_data + noise  # (B, 9, 1)
+
+            # Use fixed timestep=0 (zero time embedding, only cond matters)
+            timesteps = torch.zeros(B, device=device, dtype=torch.long)
+
+            # Forward pass: predict noise
+            noise_prediction = self.transformer(
+                sample=noisy_target,
+                timestep=timesteps,
+                cond=cond,
+            )  # (B, 9, 1)
+
+            # Loss: MSE between predicted and target noise
+            diff_loss = F.mse_loss(noise_prediction, noise)
             total_loss = total_loss + self.diffusion_weight * diff_loss
-            metrics.update(diff_metrics)
+            metrics["diffusion_loss"] = diff_loss.item()
 
         metrics["total"] = total_loss.item()
         return total_loss, metrics
 
-    @torch.no_grad()
-    def sample_pose(
+    def forward_diffusion(
         self,
+        tool_pc_init: torch.Tensor,
+        obj_pc: torch.Tensor,
+        noisy_target: torch.Tensor,  # (B, 9, 1)
+        timesteps: torch.Tensor,     # (B,)
+    ) -> torch.Tensor:  # (B, 9, 1) predicted noise
+        """Forward pass for diffusion: predict noise given conditioning."""
+        enc_result = self.encoder.encode(tool_pc_init, obj_pc)
+        cond = torch.cat([enc_result.tool_tokens, enc_result.obj_tokens], dim=1)
+        return self.transformer(sample=noisy_target, timestep=timesteps, cond=cond)
+
+
+# --------------------------------------------------------------------------- #
+# JointModelMLP - SDF + Simple MLP pose regression (for debugging)
+# --------------------------------------------------------------------------- #
+
+class JointModelMLP(nn.Module):
+    """Joint training of SDF prediction + simple MLP pose regression.
+
+    For debugging: tests if pose regression works with simple MLP.
+    MLP takes delta_pose (answer) as input and predicts delta_pose.
+    """
+
+    def __init__(
+        self,
+        # SDF head
+        head_mode: str = "point",
+        patch_agg: str = "mean",
+        head_hidden: tuple[int, ...] = (256, 128),
+        # Encoder (shared)
+        num_pts: int = 512,
+        patch_size: int = 32,
+        encoder_channel: int = 128,
+        vit_depth: int = 4,
+        vit_heads: int = 4,
+        freeze_encoder: bool = False,
+        # MLP pose head
+        pose_hidden: tuple[int, ...] = (256, 256),
+        # Loss weights
+        sdf_weight: float = 1.0,
+        pose_weight: float = 1.0,
+    ):
+        super().__init__()
+        self.sdf_weight = sdf_weight
+        self.pose_weight = pose_weight
+
+        # Shared encoder
+        enc_cfg = SDFEncoderCfg(
+            num_pts=num_pts,
+            patch_size=patch_size,
+            encoder_channel=encoder_channel,
+            vit_depth=vit_depth,
+            vit_heads=vit_heads,
+            freeze=freeze_encoder,
+        )
+        self.encoder = SDFPointCloudEncoder(enc_cfg)
+        D = self.encoder.feature_dim  # 128
+
+        # SDF head (shares encoder)
+        self.sdf_head = SDFSegmentor(
+            head_mode=head_mode,
+            patch_agg=patch_agg,
+            head_hidden=head_hidden,
+            num_pts=num_pts,
+            patch_size=patch_size,
+            encoder_channel=encoder_channel,
+            vit_depth=vit_depth,
+            vit_heads=vit_heads,
+            freeze_encoder=freeze_encoder,
+        )
+        self.sdf_head.encoder = self.encoder
+
+        # Simple MLP pose head: answer → answer (identity test)
+        pose_layers = []
+        in_dim = 9  # delta_pose dimension
+        for h in pose_hidden:
+            pose_layers.append(nn.Linear(in_dim, h))
+            pose_layers.append(nn.LayerNorm(h))
+            pose_layers.append(nn.ELU())
+            in_dim = h
+        pose_layers.append(nn.Linear(in_dim, 9))  # output delta_pose
+        self.pose_head = nn.Sequential(*pose_layers)
+
+    def loss(
+        self,
+        # SDF inputs (tool at CONTACT pose)
         tool_pc: torch.Tensor,
         obj_pc: torch.Tensor,
-        contact_pts: torch.Tensor,
-    ) -> torch.Tensor:
-        """Sample pose from diffusion head."""
-        return self.diffusion_head.sample(tool_pc, obj_pc, contact_pts)
+        tool_sdf_gt: torch.Tensor,
+        obj_sdf_gt: torch.Tensor,
+        # Pose inputs
+        delta_pose_gt: torch.Tensor = None,
+    ) -> Tuple[torch.Tensor, dict]:
+        """Joint loss computation."""
+        metrics = {}
+        total_loss = torch.tensor(0.0, device=tool_pc.device)
+
+        # SDF task: encode tool at contact pose
+        enc_result_contact = self.encoder.encode(tool_pc, obj_pc)
+
+        # SDF loss
+        if self.sdf_head.head_mode == "point":
+            tool_pred = self.sdf_head._predict_point(
+                tool_pc, enc_result_contact.tool_tokens, enc_result_contact.global_feat,
+                enc_result_contact.tool_patch_idx, self.sdf_head.tool_head,
+            )
+            obj_pred = self.sdf_head._predict_point(
+                obj_pc, enc_result_contact.obj_tokens, enc_result_contact.global_feat,
+                enc_result_contact.obj_patch_idx, self.sdf_head.obj_head,
+            )
+        else:
+            tool_sdf_gt_agg = _aggregate_sdf(tool_sdf_gt, enc_result_contact.tool_patch_idx, self.sdf_head.patch_agg)
+            obj_sdf_gt_agg = _aggregate_sdf(obj_sdf_gt, enc_result_contact.obj_patch_idx, self.sdf_head.patch_agg)
+            tool_pred = self.sdf_head._predict_patch(enc_result_contact.tool_tokens, enc_result_contact.global_feat, self.sdf_head.tool_head)
+            obj_pred = self.sdf_head._predict_patch(enc_result_contact.obj_tokens, enc_result_contact.global_feat, self.sdf_head.obj_head)
+            tool_sdf_gt = tool_sdf_gt_agg
+            obj_sdf_gt = obj_sdf_gt_agg
+
+        tool_loss = F.smooth_l1_loss(tool_pred, tool_sdf_gt)
+        obj_loss = F.smooth_l1_loss(obj_pred, obj_sdf_gt)
+        sdf_loss = tool_loss + obj_loss
+        total_loss = total_loss + self.sdf_weight * sdf_loss
+        metrics["tool_sdf_loss"] = tool_loss.item()
+        metrics["obj_sdf_loss"] = obj_loss.item()
+
+        # Pose task: simple MLP (answer → answer)
+        if delta_pose_gt is not None:
+            pose_pred = self.pose_head(delta_pose_gt)  # (B, 9)
+            pose_loss = F.mse_loss(pose_pred, delta_pose_gt)
+            total_loss = total_loss + self.pose_weight * pose_loss
+            metrics["pose_loss"] = pose_loss.item()
+
+        metrics["total"] = total_loss.item()
+        return total_loss, metrics

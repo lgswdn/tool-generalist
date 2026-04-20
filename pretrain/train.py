@@ -1,22 +1,17 @@
-"""train.py — Training script for SDFSegmentor geometry encoder pretraining.
-
-SDFSegmentor uses a joint ViT encoder (PointNet patch encoder + joint ViT
-transformer) that processes tool and object clouds together, enabling
-implicit cross-stream attention before SDF prediction.
+"""train.py — Training script for joint SDF + Diffusion encoder pretraining.
 
 Usage:
-    # Point-level SDF (default)
-    python train.py --data-dir tmp_data/
+    # Default config (from config.py)
+    torchrun --nproc_per_node=2 train.py --data-dir /path/to/data/
 
-    # Patch-level SDF with larger ViT
-    python train.py --data-dir tmp_data/ --head-mode patch --patch-agg mean \\
-        --vit-depth 6 --vit-heads 8
+    # Custom config file
+    torchrun --nproc_per_node=2 train.py --data-dir /path/to/data/ --config my_config.py
 
-    # Multi-GPU (DDP)
-    torchrun --nproc_per_node=2 train.py --data-dir tmp_data/
+    # Resume from checkpoint
+    torchrun --nproc_per_node=2 train.py --data-dir /path/to/data/ --resume checkpoints/best.pt
 
-    # Resume
-    python train.py --data-dir tmp_data/ --resume checkpoints/last.pt
+    # Wandb logging
+    torchrun --nproc_per_node=2 train.py --data-dir /path/to/data/ --wandb
 """
 
 from __future__ import annotations
@@ -44,6 +39,7 @@ _REPO_ROOT    = _PRETRAIN_DIR.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from config import TrainConfig, DEFAULT_CONFIG
 from dataset import make_split
 from model import SDFSegmentor, JointModel
 
@@ -70,8 +66,7 @@ def setup_ddp() -> tuple[int, int]:
 # Checkpoint helpers
 # --------------------------------------------------------------------------- #
 
-def save_ckpt(path: Path, model: torch.nn.Module, optimizer, epoch: int,
-              best_val: float):
+def save_ckpt(path: Path, model: torch.nn.Module, optimizer, epoch: int, best_val: float):
     torch.save({
         "epoch":    epoch,
         "best_val": best_val,
@@ -99,6 +94,7 @@ def run_epoch(
     optimizer,
     device:    torch.device,
     train:     bool,
+    scaler:    torch.cuda.amp.GradScaler = None,
 ) -> tuple[float, dict]:
     model.train(train)
     total_loss = 0.0
@@ -108,47 +104,57 @@ def run_epoch(
 
     with ctx:
         for batch in loader:
-            # ---- Inputs: world-frame point clouds -------------------------
-            tool_pc = batch["tool_pc"].to(device)   # (B, N, 3)
-            obj_pc  = batch["obj_pc"].to(device)    # (B, N, 3)
+            tool_pc = batch["tool_pc"].to(device)
+            obj_pc  = batch["obj_pc"].to(device)
+            tool_sdf_gt = batch["tool_pts_sdf"].to(device)
+            obj_sdf_gt  = batch["obj_pts_sdf"].to(device)
 
-            # ---- GT: per-point signed SDF --------------------------------
-            tool_sdf_gt = batch["tool_pts_sdf"].to(device)  # (B, N)
-            obj_sdf_gt  = batch["obj_pts_sdf"].to(device)   # (B, N)
-
-            # ---- GT: diffusion inputs (optional) -------------------------
-            contact_pts = batch.get("contact_pts")
+            # Diffusion inputs (optional)
+            tool_pc_init = batch.get("tool_pc_init")
             delta_pose  = batch.get("delta_pose")
 
-            if contact_pts is not None:
-                contact_pts = contact_pts.to(device)  # (B, K, 3)
+            if tool_pc_init is not None:
+                if isinstance(tool_pc_init, list):
+                    if any(t is None for t in tool_pc_init):
+                        tool_pc_init = None
+                    else:
+                        tool_pc_init = torch.stack(tool_pc_init).to(device)
+                else:
+                    tool_pc_init = tool_pc_init.to(device)
             if delta_pose is not None:
-                # Filter out None values (configs without init poses)
-                if any(d is None for d in delta_pose):
-                    # Create mask for valid delta_pose
-                    valid_mask = [d is not None for d in delta_pose]
-                    if not any(valid_mask):
-                        # No valid delta_pose, skip diffusion for this batch
+                if isinstance(delta_pose, list):
+                    if any(d is None for d in delta_pose):
                         delta_pose = None
                     else:
-                        # Stack only valid ones (but we need to handle different batch size)
-                        # For simplicity, skip diffusion if any is None
-                        delta_pose = None
+                        delta_pose = torch.stack(delta_pose).to(device)
                 else:
-                    delta_pose = torch.stack(delta_pose).to(device)  # (B, 9)
+                    delta_pose = delta_pose.to(device)
 
-            # Forward + loss
             m = model.module if isinstance(model, DDP) else model
-            loss, metrics = m.loss(
-                tool_pc, obj_pc, tool_sdf_gt, obj_sdf_gt,
-                contact_pts=contact_pts, delta_pose_gt=delta_pose,
-            )
 
-            if train:
+            # Forward + loss with AMP
+            if scaler is not None and train:
+                with torch.cuda.amp.autocast():
+                    loss, metrics = m.loss(
+                        tool_pc, obj_pc, tool_sdf_gt, obj_sdf_gt,
+                        tool_pc_init=tool_pc_init, delta_pose_gt=delta_pose,
+                    )
                 optimizer.zero_grad()
-                loss.backward()
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss, metrics = m.loss(
+                    tool_pc, obj_pc, tool_sdf_gt, obj_sdf_gt,
+                    tool_pc_init=tool_pc_init, delta_pose_gt=delta_pose,
+                )
+                if train:
+                    optimizer.zero_grad()
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    optimizer.step()
 
             total_loss += loss.item()
             for k, v in metrics.items():
@@ -164,129 +170,83 @@ def run_epoch(
 # --------------------------------------------------------------------------- #
 
 def main():
-    parser = argparse.ArgumentParser()
-
-    # Data
-    parser.add_argument("--data-dir",   default="tmp_data",
-                        help="Root dir containing .pt contact files")
-    parser.add_argument("--out-dir",    default="checkpoints",
-                        help="Where to save checkpoints")
-    parser.add_argument("--val-ratio",  type=float, default=0.1)
-
-    # Training
-    parser.add_argument("--epochs",      type=int,   default=1000)
-    parser.add_argument("--batch-size",  type=int,   default=64)
-    parser.add_argument("--lr",          type=float, default=1e-3,
-                        help="Learning rate")
-    parser.add_argument("--num-workers", type=int,   default=4)
-    parser.add_argument("--resume",      default="",
-                        help="Checkpoint path to resume from")
-
-    # Logging
-    parser.add_argument("--wandb",       action="store_true",
-                        help="Enable Weights & Biases logging")
-    parser.add_argument("--wandb-project", default="sdf-segmentor",
-                        help="W&B project name")
-    parser.add_argument("--wandb-name",  default=None,
-                        help="W&B run name (default: auto-generated)")
-
-    # Encoder
-    parser.add_argument("--num-pts",          type=int, default=512,
-                        help="Points per cloud (N)")
-    parser.add_argument("--encoder-channel",  type=int, default=128,
-                        help="Patch token dimension D")
-    parser.add_argument("--patch-size",       type=int, default=32,
-                        help="Points per FPS patch (K)")
-    parser.add_argument("--vit-depth",        type=int, default=4,
-                        help="Number of ViT transformer layers")
-    parser.add_argument("--vit-heads",        type=int, default=4,
-                        help="Number of ViT attention heads")
-    parser.add_argument("--freeze-encoder",   action="store_true",
-                        help="Freeze the ViT encoder (train SDF heads only)")
-
-    # SDF head
-    parser.add_argument("--head-mode",   default="point",
-                        choices=["point", "patch"],
-                        help="'point': per-point SDF  |  'patch': per-patch SDF")
-    parser.add_argument("--patch-agg",   default="mean",
-                        choices=["mean", "min", "max"],
-                        help="GT aggregation for patch mode")
-
-    # Diffusion head
-    parser.add_argument("--diffusion",    action="store_true",
-                        help="Enable diffusion head (joint training)")
-    parser.add_argument("--diffusion-steps", type=int, default=100,
-                        help="Number of diffusion timesteps")
-    parser.add_argument("--diffusion-hidden", type=int, nargs="+", default=[256, 256, 256],
-                        help="Diffusion MLP hidden dims")
-    parser.add_argument("--contact-hidden", type=int, nargs="+", default=[128, 128],
-                        help="Contact points encoder hidden dims")
-    parser.add_argument("--contact-pool", default="mean",
-                        choices=["mean", "max"],
-                        help="Contact points pooling method")
-
-    # Loss weights
-    parser.add_argument("--sdf-weight",      type=float, default=1.0,
-                        help="SDF loss weight")
-    parser.add_argument("--diffusion-weight", type=float, default=1.0,
-                        help="Diffusion loss weight")
-
+    parser = argparse.ArgumentParser(description="Train SDF + Diffusion encoder")
+    parser.add_argument("--data-dir", required=True, help="Data directory with .pt files")
+    parser.add_argument("--config", default="config.py", help="Path to custom config.py")
+    parser.add_argument("--resume", default="", help="Checkpoint to resume from")
+    parser.add_argument("--wandb", action="store_true", help="Enable Wandb logging")
+    parser.add_argument("--no-amp", action="store_true", help="Disable AMP")
     args = parser.parse_args()
+
+    # Load config
+    if args.config:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("custom_config", args.config)
+        cfg_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cfg_module)
+        cfg = cfg_module.TrainConfig()
+    else:
+        cfg = DEFAULT_CONFIG
+
+    # Override from CLI
+    cfg.data_dir = args.data_dir
+    cfg.resume = args.resume
+    cfg.wandb = args.wandb
+    if args.no_amp:
+        cfg.amp = False
 
     rank, local_rank = setup_ddp()
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
 
-    # ---- Data ----------------------------------------------------------------
-    train_ds, val_ds = make_split(args.data_dir, val_ratio=args.val_ratio)
+    # ---- Data ----
+    train_ds, val_ds = make_split(cfg.data_dir, val_ratio=cfg.val_ratio)
     if is_main():
-        print(f"Train samples: {len(train_ds)}  Val samples: {len(val_ds)}")
+        print(f"Train: {len(train_ds)}  Val: {len(val_ds)}")
+        print(f"Config: diffusion={cfg.diffusion}, amp={cfg.amp}, batch={cfg.batch_size}")
 
     train_sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
-    train_loader  = DataLoader(
-        train_ds,
-        batch_size=args.batch_size,
-        sampler=train_sampler,
-        shuffle=(train_sampler is None),
-        num_workers=args.num_workers,
-        pin_memory=True,
+    train_loader = DataLoader(
+        train_ds, batch_size=cfg.batch_size,
+        sampler=train_sampler, shuffle=(train_sampler is None),
+        num_workers=cfg.num_workers, pin_memory=True,
     )
     val_loader = DataLoader(
-        val_ds,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=True,
+        val_ds, batch_size=cfg.batch_size,
+        shuffle=False, num_workers=cfg.num_workers, pin_memory=True,
     )
 
-    # ---- Model ---------------------------------------------------------------
-    if args.diffusion:
+    # ---- Model ----
+    if cfg.diffusion:
         model = JointModel(
-            head_mode=args.head_mode,
-            patch_agg=args.patch_agg,
-            num_pts=args.num_pts,
-            patch_size=args.patch_size,
-            encoder_channel=args.encoder_channel,
-            vit_depth=args.vit_depth,
-            vit_heads=args.vit_heads,
-            freeze_encoder=args.freeze_encoder,
-            diffusion_hidden=tuple(args.diffusion_hidden),
-            diffusion_steps=args.diffusion_steps,
-            contact_hidden=tuple(args.contact_hidden),
-            contact_pool=args.contact_pool,
-            sdf_weight=args.sdf_weight,
-            diffusion_weight=args.diffusion_weight,
+            head_mode=cfg.head_mode,
+            patch_agg=cfg.patch_agg,
+            head_hidden=cfg.head_hidden,
+            num_pts=cfg.num_pts,
+            patch_size=cfg.patch_size,
+            encoder_channel=cfg.encoder_channel,
+            vit_depth=cfg.vit_depth,
+            vit_heads=cfg.vit_heads,
+            freeze_encoder=cfg.freeze_encoder,
+            n_layer=cfg.n_layer,
+            n_head=cfg.n_head,
+            n_emb=cfg.n_emb,
+            p_drop_emb=cfg.p_drop_emb,
+            p_drop_attn=cfg.p_drop_attn,
+            sdf_weight=cfg.sdf_weight,
+            diffusion_weight=cfg.diffusion_weight,
         ).to(device)
         model_name = "JointModel"
     else:
         model = SDFSegmentor(
-            head_mode=args.head_mode,
-            patch_agg=args.patch_agg,
-            num_pts=args.num_pts,
-            patch_size=args.patch_size,
-            encoder_channel=args.encoder_channel,
-            vit_depth=args.vit_depth,
-            vit_heads=args.vit_heads,
-            freeze_encoder=args.freeze_encoder,
+            head_mode=cfg.head_mode,
+            patch_agg=cfg.patch_agg,
+            head_hidden=cfg.head_hidden,
+            num_pts=cfg.num_pts,
+            patch_size=cfg.patch_size,
+            encoder_channel=cfg.encoder_channel,
+            vit_depth=cfg.vit_depth,
+            vit_heads=cfg.vit_heads,
+            freeze_encoder=cfg.freeze_encoder,
         ).to(device)
         model_name = "SDFSegmentor"
 
@@ -295,91 +255,74 @@ def main():
 
     if is_main():
         total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"Model: {model_name}  head={args.head_mode}  "
-              f"vit_depth={args.vit_depth}  vit_heads={args.vit_heads}  "
-              f"trainable params: {total_params:,}")
+        print(f"Model: {model_name}  trainable params: {total_params:,}")
 
-        # Initialize wandb
-        if args.wandb:
+        if cfg.wandb:
             if not HAS_WANDB:
-                raise RuntimeError("--wandb requires wandb to be installed. Run: pip install wandb")
-            wandb.init(
-                project=args.wandb_project,
-                name=args.wandb_name,
-                config=vars(args),
-            )
+                raise RuntimeError("--wandb requires wandb installed")
+            wandb.init(project=cfg.wandb_project, name=cfg.wandb_name, config=vars(cfg))
             wandb.watch(model, log="all", log_freq=100)
 
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
-        lr=args.lr,
-        weight_decay=1e-4,
+        lr=cfg.lr, weight_decay=1e-4,
     )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.epochs
-    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.epochs)
 
+    scaler = torch.cuda.amp.GradScaler() if cfg.amp else None
+    if cfg.amp and is_main():
+        print("Using AMP")
 
-    # ---- Resume --------------------------------------------------------------
+    # ---- Resume ----
     start_epoch = 0
-    best_val    = float("inf")
-    if args.resume:
-        start_epoch, best_val = load_ckpt(args.resume, model, optimizer)
+    best_val = float("inf")
+    if cfg.resume:
+        start_epoch, best_val = load_ckpt(cfg.resume, model, optimizer)
         if is_main():
-            print(f"Resumed from {args.resume} (epoch {start_epoch})")
+            print(f"Resumed from {cfg.resume} (epoch {start_epoch})")
 
-    # ---- Train ---------------------------------------------------------------
-    out_dir = Path(args.out_dir)
+    # ---- Train ----
+    out_dir = Path(cfg.out_dir)
     if is_main():
         out_dir.mkdir(parents=True, exist_ok=True)
 
-    for epoch in range(start_epoch, args.epochs):
+    for epoch in range(start_epoch, cfg.epochs):
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
 
         t0 = time.time()
-        train_loss, train_m = run_epoch(model, train_loader, optimizer, device, train=True)
-        val_loss,   val_m   = run_epoch(model, val_loader,   optimizer, device, train=False)
+        train_loss, train_m = run_epoch(model, train_loader, optimizer, device, train=True, scaler=scaler)
+        val_loss, val_m = run_epoch(model, val_loader, optimizer, device, train=False, scaler=scaler)
         scheduler.step()
 
         if is_main():
             dt = time.time() - t0
             lr = scheduler.get_last_lr()[0]
-            print(
-                f"Epoch {epoch+1:04d}/{args.epochs}  "
-                f"train={train_loss:.4f}  val={val_loss:.4f}  "
-                f"tool_sdf={val_m.get('tool_sdf_loss', float('nan')):.4f} "
-                f"(raw={val_m.get('tool_sdf_loss_raw', float('nan')):.5f} "
-                f"scale={val_m.get('tool_scale', float('nan')):.4f})  "
-                f"obj_sdf={val_m.get('obj_sdf_loss', float('nan')):.4f} "
-                f"(raw={val_m.get('obj_sdf_loss_raw', float('nan')):.5f} "
-                f"scale={val_m.get('obj_scale', float('nan')):.4f})  "
-                f"lr={lr:.2e}  t={dt:.1f}s"
-            )
 
-            # Wandb logging
-            if args.wandb and HAS_WANDB:
-                wandb.log({
-                    "epoch": epoch + 1,
-                    "train/loss": train_loss,
-                    "val/loss": val_loss,
-                    "val/tool_sdf_loss": val_m.get('tool_sdf_loss', float('nan')),
-                    "val/obj_sdf_loss": val_m.get('obj_sdf_loss', float('nan')),
-                    "train/tool_sdf_loss": train_m.get('tool_sdf_loss', float('nan')),
-                    "train/obj_sdf_loss": train_m.get('obj_sdf_loss', float('nan')),
-                    "lr": lr,
-                    "time": dt,
-                })
+            # Print metrics
+            print_str = f"Epoch {epoch+1:04d}/{cfg.epochs}  train={train_loss:.4f}  val={val_loss:.4f}  "
+            for k in ["tool_sdf_loss", "obj_sdf_loss", "diffusion_loss"]:
+                if k in val_m:
+                    print_str += f"{k.split('_loss')[0]}={val_m[k]:.4f}  "
+            print_str += f"lr={lr:.2e}  t={dt:.1f}s"
+            print(print_str)
 
-            save_ckpt(out_dir / "last.pt", model, optimizer, epoch + 1, best_val)
+            # Wandb
+            if cfg.wandb and HAS_WANDB:
+                log_dict = {"epoch": epoch+1, "train/loss": train_loss, "val/loss": val_loss, "lr": lr, "time": dt}
+                for k, v in val_m.items():
+                    log_dict[f"val/{k}"] = v
+                for k, v in train_m.items():
+                    log_dict[f"train/{k}"] = v
+                wandb.log(log_dict)
 
+            save_ckpt(out_dir / "last.pt", model, optimizer, epoch+1, best_val)
             if val_loss < best_val:
                 best_val = val_loss
-                save_ckpt(out_dir / "best.pt", model, optimizer, epoch + 1, best_val)
-                print(f"  ✓ New best val: {best_val:.5f}")
+                save_ckpt(out_dir / "best.pt", model, optimizer, epoch+1, best_val)
+                print(f"  ✓ New best: {best_val:.5f}")
 
-    # Finish wandb run
-    if is_main() and args.wandb:
+    if is_main() and cfg.wandb:
         wandb.finish()
 
     if dist.is_initialized():

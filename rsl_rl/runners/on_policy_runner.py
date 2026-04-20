@@ -28,6 +28,7 @@ from rsl_rl.modules import (
     ActorCriticPTV3Momentum,
     ActorCriticConcerto,
     ActorCriticPoint2Vec,
+    ActorCriticSDF,
     EmpiricalNormalization,
     StudentTeacher,
     StudentTeacherRecurrent,
@@ -94,6 +95,7 @@ class OnPolicyRunner:
             | ActorCriticPTV3Momentum
             | ActorCriticConcerto
             | ActorCriticPoint2Vec
+            | ActorCriticSDF
             | StudentTeacher
             | StudentTeacherRecurrent
         ) = policy_class(

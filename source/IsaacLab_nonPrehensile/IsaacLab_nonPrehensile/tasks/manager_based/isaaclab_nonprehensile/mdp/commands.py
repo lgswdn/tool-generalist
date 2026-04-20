@@ -125,7 +125,7 @@ class StablePoseCommand(CommandTerm):
             sel = torch.tensor(g["indices"], device=self.device, dtype=torch.long)
             scales_sub = scales.index_select(0, sel)  # (G,3)
 
-            from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env import get_cached_cloud
+            from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import get_cached_cloud
             object_cloud = get_cached_cloud(obj_path)
 
             # Batch sample stable poses (returns numpy), then convert to torch
