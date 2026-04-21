@@ -139,6 +139,14 @@ class ContactDataset(Dataset):
             # Full normalized delta pose (9D)
             delta_pose = torch.cat([delta_t_norm, delta_R_6d_norm], dim=0)  # (9,)
 
+        # ---- Init pose (9D: translation + 6D rotation) ----
+        init_pose = None
+        if "init_translations" in data and "init_rotations" in data:
+            init_t = data["init_translations"][cfg_i]    # (3,)
+            init_R = data["init_rotations"][cfg_i]       # (3, 3)
+            init_R_6d = init_R[:, :2].reshape(6)         # (6,)
+            init_pose = torch.cat([init_t, init_R_6d], dim=0)  # (9,)
+
         # ---- Augmentation: small Gaussian jitter only ------------------------
         if self.augment:
             tool_pc = tool_pc + torch.randn_like(tool_pc) * 1e-3
@@ -160,6 +168,8 @@ class ContactDataset(Dataset):
             "contact_normals":     contact_normals.float(),  # (5, 3)
             # Diffusion supervision (optional - None if init poses not generated)
             "delta_pose":          delta_pose.float() if delta_pose is not None else None,
+            # Init pose for conditioning tests
+            "init_pose":           init_pose.float() if init_pose is not None else None,  # (9,)
         }
 
 

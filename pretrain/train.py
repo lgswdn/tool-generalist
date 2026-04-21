@@ -292,7 +292,12 @@ def main():
 
         t0 = time.time()
         train_loss, train_m = run_epoch(model, train_loader, optimizer, device, train=True, scaler=scaler)
-        val_loss, val_m = run_epoch(model, val_loader, optimizer, device, train=False, scaler=scaler)
+
+        # Validate every 20 epochs (validation nearly doubles epoch time)
+        val_freq = 20
+        do_val = (epoch + 1) % val_freq == 0 or epoch == cfg.epochs - 1
+        if do_val:
+            val_loss, val_m = run_epoch(model, val_loader, optimizer, device, train=False, scaler=scaler)
         scheduler.step()
 
         if is_main():
@@ -300,25 +305,34 @@ def main():
             lr = scheduler.get_last_lr()[0]
 
             # Print metrics
-            print_str = f"Epoch {epoch+1:04d}/{cfg.epochs}  train={train_loss:.4f}  val={val_loss:.4f}  "
-            for k in ["tool_sdf_loss", "obj_sdf_loss", "diffusion_loss"]:
-                if k in val_m:
-                    print_str += f"{k.split('_loss')[0]}={val_m[k]:.4f}  "
+            if do_val:
+                print_str = f"Epoch {epoch+1:04d}/{cfg.epochs}  train={train_loss:.4f}  val={val_loss:.4f}  "
+                for k in ["tool_sdf_loss", "obj_sdf_loss", "diffusion_loss"]:
+                    if k in val_m:
+                        print_str += f"{k.split('_loss')[0]}={val_m[k]:.4f}  "
+            else:
+                print_str = f"Epoch {epoch+1:04d}/{cfg.epochs}  train={train_loss:.4f}  "
+                for k in ["tool_sdf_loss", "obj_sdf_loss", "diffusion_loss"]:
+                    if k in train_m:
+                        print_str += f"{k.split('_loss')[0]}={train_m[k]:.4f}  "
             print_str += f"lr={lr:.2e}  t={dt:.1f}s"
             print(print_str)
 
             # Wandb
             if cfg.wandb and HAS_WANDB:
-                log_dict = {"epoch": epoch+1, "train/loss": train_loss, "val/loss": val_loss, "lr": lr, "time": dt}
-                for k, v in val_m.items():
-                    log_dict[f"val/{k}"] = v
+                log_dict = {"epoch": epoch+1, "train/loss": train_loss, "lr": lr, "time": dt}
+                if do_val:
+                    log_dict["val/loss"] = val_loss
+                    for k, v in val_m.items():
+                        log_dict[f"val/{k}"] = v
                 for k, v in train_m.items():
                     log_dict[f"train/{k}"] = v
                 wandb.log(log_dict)
 
             save_ckpt(out_dir / "last.pt", model, optimizer, epoch+1, best_val)
-            if val_loss < best_val:
-                best_val = val_loss
+            check_loss = val_loss if do_val else train_loss
+            if check_loss < best_val:
+                best_val = check_loss
                 save_ckpt(out_dir / "best.pt", model, optimizer, epoch+1, best_val)
                 print(f"  ✓ New best: {best_val:.5f}")
 

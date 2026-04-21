@@ -276,15 +276,15 @@ class JointModel(nn.Module):
         )
         self.sdf_head.encoder = self.encoder
 
-        # TransformerForDiffusion: condition on delta_pose (answer) as sanity check
-        # n_obs_steps=9: 9 conditioning tokens matching 9 input tokens
-        # n_cond_layers=1: encoder mixes time+cond tokens before cross-attention
+        # TransformerForDiffusion: condition on encoder patches
+        # Encoder produces 2*P patches (tool + obj) of dimension D.
+        # The transformer cross-attends to these to predict delta pose noise.
         self.transformer = TransformerForDiffusion(
-            input_dim=1,
-            output_dim=1,
-            horizon=9,  # pose sequence length
-            n_obs_steps=9,  # 9 conditioning tokens
-            cond_dim=1,  # each condition token is 1 value
+            input_dim=9,
+            output_dim=9,
+            horizon=1,           # single token = full 9D pose
+            n_obs_steps=2 * P,   # 32 encoder patches (16 tool + 16 obj)
+            cond_dim=D,          # 128 (encoder feature dim)
             n_layer=n_layer,
             n_head=n_head,
             n_emb=n_emb,
@@ -292,8 +292,12 @@ class JointModel(nn.Module):
             p_drop_attn=p_drop_attn,
             obs_as_cond=True,
             time_as_cond=True,
-            n_cond_layers=1,  # encoder layer to mix memory tokens
+            n_cond_layers=1,
         )
+
+        # Position-aware conditioning: project tool-obj centroids into token space
+        # This provides an explicit position signal since encoder patches are locally centered
+        self.cond_pos_proj = nn.Linear(6, D)
 
         # DDPM noise scheduler (from diffusers)
         # DEBUG: Use 100 steps and fix timestep to 50 for controlled test
@@ -347,38 +351,45 @@ class JointModel(nn.Module):
         metrics["tool_sdf_loss"] = tool_loss.item()
         metrics["obj_sdf_loss"] = obj_loss.item()
 
-        # Diffusion task: condition on delta_pose_gt (the answer) as sanity check
+        # Diffusion task: condition on encoder features from INIT pose
         if tool_pc_init is not None and delta_pose_gt is not None:
             B = delta_pose_gt.shape[0]
             device = delta_pose_gt.device
 
-            # SANITY CHECK: 1-step diffusion with FIXED noise for debugging
-            # Input = clean + noise, Condition = clean, Target = noise
+            # Encode tool at INITIAL pose + object → encoder patches
+            enc_result_init = self.encoder.encode(tool_pc_init, obj_pc)
+            cond = torch.cat(
+                [enc_result_init.tool_tokens, enc_result_init.obj_tokens], dim=1
+            )  # (B, 32, 128)
 
-            # Clean pose as (B, 9, 1) - each value as separate token
-            clean_data = delta_pose_gt.unsqueeze(-1)  # (B, 9, 1)
+            # Add explicit position bias: tool-obj centroids → broadcast to all tokens
+            tool_centroid = tool_pc_init.mean(dim=1)  # (B, 3)
+            obj_centroid = obj_pc.mean(dim=1)          # (B, 3)
+            pos_info = torch.cat([tool_centroid, obj_centroid], dim=-1)  # (B, 6)
+            pos_bias = self.cond_pos_proj(pos_info)    # (B, D)
+            cond = cond + pos_bias.unsqueeze(1)        # broadcast-add to all 32 tokens
 
-            # Condition: also (B, 9, 1) so each input token matches a cond token
-            # Need to change n_obs_steps=9 in transformer for this
-            cond = clean_data  # (B, 9, 1) - same format as input
+            # Full 9D pose as single token: (B, 1, 9)
+            clean_data = delta_pose_gt.unsqueeze(1)  # (B, 1, 9)
 
-            # Use fixed noise (same every iteration) for memorization test
-            if not hasattr(self, '_fixed_noise') or self._fixed_noise.shape[0] != B:
-                self._fixed_noise = torch.randn(B, 9, 1, device=device)
-            noise = self._fixed_noise
+            # Random noise each step
+            noise = torch.randn_like(clean_data)      # (B, 1, 9)
 
-            # Simple 1-step: noisy = clean + noise
-            noisy_target = clean_data + noise  # (B, 9, 1)
+            # Random timesteps per sample
+            timesteps = torch.randint(
+                0, self.noise_scheduler.config.num_train_timesteps,
+                (B,), device=device, dtype=torch.long,
+            )
 
-            # Use fixed timestep=0 (zero time embedding, only cond matters)
-            timesteps = torch.zeros(B, device=device, dtype=torch.long)
+            # Proper DDPM noising: x_t = √ᾱ_t · x_0 + √(1-ᾱ_t) · ε
+            noisy_data = self.noise_scheduler.add_noise(clean_data, noise, timesteps)
 
-            # Forward pass: predict noise
+            # Forward pass: predict noise conditioned on encoder features
             noise_prediction = self.transformer(
-                sample=noisy_target,
+                sample=noisy_data,
                 timestep=timesteps,
                 cond=cond,
-            )  # (B, 9, 1)
+            )  # (B, 1, 9)
 
             # Loss: MSE between predicted and target noise
             diff_loss = F.mse_loss(noise_prediction, noise)

@@ -12,14 +12,14 @@ class TrainConfig:
     data_dir: str = "/mnt/project/world_model/tool_generalist/teardrop_contact/000_asym_teardrop_contour_scraper_var_000/"
     out_dir: str = "checkpoints_diffusion_sdf"
     val_ratio: float = 0.1
-    num_workers: int = 1
+    num_workers: int = 4
 
     # Training
-    epochs: int = 1000
-    batch_size: int = 128
-    lr: float = 1e-3
+    epochs: int = 200
+    batch_size: int = 256
+    lr: float = 3e-4
     resume: str = ""
-    amp: bool = True  # Use Automatic Mixed Precision
+    amp: bool = False  # Disabled: float16 corrupts DDPM noise prediction
 
     # Logging
     wandb: bool = True

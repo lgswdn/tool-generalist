@@ -482,7 +482,7 @@ class RewardsCfg:
             "planar": False,
             "base_reward": 1.0,  # Base reward for success
         },
-        weight=3000.0
+        weight=2000.0
     )
 
     contact_reward = RewTerm(
@@ -514,15 +514,15 @@ class RewardsCfg:
             "ee_frame_cfg": SceneEntityCfg("ee_frame"),
             "object_cfg": SceneEntityCfg("object"),
         },
-        weight=12.0,
+        weight=7.0,
     )
     
     # Energy penalty: c_energy = k_e * Σ(τ_i * q̇_i)
-    # energy_penalty = RewTerm(
-    #     func=mdp.joint_power_penalty,
-    #     params={"k_e": 0.0001},  # scaling coefficient
-    #     weight=-1.0,  # negative weight for penalty
-    # )
+    energy_penalty = RewTerm(
+        func=mdp.joint_power_penalty,
+        params={"k_e": 0.0001},  # scaling coefficient
+        weight=-0.5,  # negative weight for penalty
+    )
 
 @configclass
 class TerminationsCfg:
