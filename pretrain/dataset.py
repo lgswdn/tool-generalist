@@ -187,16 +187,27 @@ def make_split(
     val_ratio: float = 0.1,
     seed: int = 42,
     augment: bool = True,
+    max_files: int = 0,
 ) -> Tuple[ContactDataset, ContactDataset]:
-    """Return (train_dataset, val_dataset) split by file."""
+    """Return (train_dataset, val_dataset) split by file.
+
+    Args:
+        max_files: If > 0, limit total number of .pt files before splitting.
+                   Useful for quick single-file overfitting tests.
+    """
     files = collect_pt_files(data_dir)
     if not files:
         raise RuntimeError(f"No .pt files found under {data_dir}")
     rng = random.Random(seed)
     rng.shuffle(files)
+    if max_files > 0:
+        files = files[:max_files]
     n_val = max(1, int(len(files) * val_ratio))
     val_files   = files[:n_val]
     train_files = files[n_val:]
+    if not train_files:
+        # If only 1 file, use it for both train and val
+        train_files = val_files
     return (
         ContactDataset(train_files, augment=augment),
         ContactDataset(val_files,   augment=False),

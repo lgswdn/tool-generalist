@@ -13,13 +13,17 @@ class TrainConfig:
     out_dir: str = "checkpoints_diffusion_sdf"
     val_ratio: float = 0.1
     num_workers: int = 4
+    max_files: int = 0  # 0 = use all .pt files, >0 = limit
 
     # Training
-    epochs: int = 200
+    epochs: int = 700
     batch_size: int = 256
-    lr: float = 3e-4
+    lr: float = 1e-3
     resume: str = ""
     amp: bool = False  # Disabled: float16 corrupts DDPM noise prediction
+
+    # Warmup: regression-only phase before diffusion starts
+    warmup_epochs: int = 200
 
     # Logging
     wandb: bool = True
@@ -39,13 +43,18 @@ class TrainConfig:
     patch_agg: str = "mean"   # "mean", "min", "max"
     head_hidden: Tuple[int, ...] = (128, 64)  # SDF prediction MLP hidden dims
 
-    # Diffusion head (using TransformerForDiffusion + DDPMScheduler)
+    # Diffusion head
     diffusion: bool = True
+    use_mlp_head: bool = True   # MLP noise predictor (proven faster for horizon=1)
     n_layer: int = 4
     n_head: int = 4
     n_emb: int = 256
     p_drop_emb: float = 0.0
     p_drop_attn: float = 0.0
+
+    # Auxiliary regression (prevents encoder posterior collapse)
+    aux_reg: bool = True
+    aux_weight: float = 1.0
 
     # Loss weights
     sdf_weight: float = 1.0
