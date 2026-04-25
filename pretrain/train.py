@@ -128,6 +128,7 @@ def run_epoch(
             # Diffusion inputs (optional)
             tool_pc_init = batch.get("tool_pc_init")
             delta_pose  = batch.get("delta_pose")
+            init_pose   = batch.get("init_pose")
 
             if tool_pc_init is not None:
                 if isinstance(tool_pc_init, list):
@@ -145,6 +146,14 @@ def run_epoch(
                         delta_pose = torch.stack(delta_pose).to(device)
                 else:
                     delta_pose = delta_pose.to(device)
+            if init_pose is not None:
+                if isinstance(init_pose, list):
+                    if any(p is None for p in init_pose):
+                        init_pose = None
+                    else:
+                        init_pose = torch.stack(init_pose).to(device)
+                else:
+                    init_pose = init_pose.to(device)
 
             m = model.module if isinstance(model, DDP) else model
 
@@ -154,7 +163,7 @@ def run_epoch(
                     loss, metrics = m.loss(
                         tool_pc, obj_pc, tool_sdf_gt, obj_sdf_gt,
                         tool_pc_init=tool_pc_init, delta_pose_gt=delta_pose,
-                        warmup=warmup,
+                        init_pose_gt=init_pose, warmup=warmup,
                     )
                 optimizer.zero_grad()
                 scaler.scale(loss).backward()
@@ -166,7 +175,7 @@ def run_epoch(
                 loss, metrics = m.loss(
                     tool_pc, obj_pc, tool_sdf_gt, obj_sdf_gt,
                     tool_pc_init=tool_pc_init, delta_pose_gt=delta_pose,
-                    warmup=warmup,
+                    init_pose_gt=init_pose, warmup=warmup,
                 )
                 if train:
                     optimizer.zero_grad()
@@ -233,16 +242,23 @@ def main():
 
     rank, local_rank = setup_ddp()
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+
+    # Linear LR scaling: keep effective LR/sample constant across GPU counts
+    effective_lr = cfg.lr * world_size
+    effective_batch = cfg.batch_size * world_size
 
     # ---- Data ----
     train_ds, val_ds = make_split(
         cfg.data_dir, val_ratio=cfg.val_ratio, max_files=cfg.max_files,
     )
     if is_main():
-        print(f"Train: {len(train_ds)}  Val: {len(val_ds)}")
+        print(f"Train: {len(train_ds)}  Val: {len(val_ds)}  GPUs: {world_size}")
         print(f"Config: diffusion={cfg.diffusion}, mlp_head={cfg.use_mlp_head}, "
               f"aux_reg={cfg.aux_reg}, warmup={cfg.warmup_epochs}ep")
-        print(f"        amp={cfg.amp}, batch={cfg.batch_size}, lr={cfg.lr:.1e}, "
+        print(f"        amp={cfg.amp}, batch/gpu={cfg.batch_size}, "
+              f"effective_batch={effective_batch}, "
+              f"base_lr={cfg.lr:.1e}, effective_lr={effective_lr:.1e}, "
               f"epochs={cfg.epochs}")
 
     train_sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
@@ -309,7 +325,7 @@ def main():
 
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
-        lr=cfg.lr, weight_decay=1e-4,
+        lr=effective_lr, weight_decay=1e-4,
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.epochs)
 

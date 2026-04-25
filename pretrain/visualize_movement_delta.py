@@ -45,9 +45,9 @@ OBJ_COLOUR_BEFORE   = (0.65, 0.65, 0.70, 0.85)   # cool grey, solid
 TOOL_COLOUR_AFTER   = (0.90, 0.40, 0.35, 0.70)   # coral red, semi-transparent
 OBJ_COLOUR_AFTER    = (0.45, 0.80, 0.55, 0.85)   # jade green, solid
 
-# Ghost (original position shown as wireframe-like overlay in "After" panel)
-TOOL_COLOUR_GHOST   = (0.35, 0.55, 0.90, 0.12)   # faint blue
-OBJ_COLOUR_GHOST    = (0.65, 0.65, 0.70, 0.12)   # faint grey
+# Ghost (original position shown in "After" panel)
+TOOL_COLOUR_GHOST   = (0.35, 0.55, 0.90, 0.35)   # blue (original tool position)
+OBJ_COLOUR_GHOST    = (0.85, 0.65, 0.35, 0.35)   # amber/tan, contrasts with green
 
 # Contact point markers
 CONTACT_PT_COLOUR   = (1.0, 0.85, 0.0)            # gold
@@ -79,6 +79,14 @@ def load_mesh_trimesh(path: str) -> trimesh.Trimesh:
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Mesh transform helpers
 # ═══════════════════════════════════════════════════════════════════════════════
+
+def rotation_angle(R: np.ndarray) -> float:
+    """Compute rotation angle in radians from rotation matrix (0 to π)."""
+    trace = np.trace(R)
+    # Clamp to [-1, 3] to handle numerical errors
+    trace = np.clip(trace, -1.0, 3.0)
+    return np.arccos((trace - 1.0) / 2.0)
+
 
 def transform_mesh(mesh: trimesh.Trimesh, R: np.ndarray, t: np.ndarray) -> trimesh.Trimesh:
     m = mesh.copy()
@@ -174,7 +182,7 @@ def _set_equal_aspect(ax, all_verts: np.ndarray, pad: float = 1.15):
 def render_one_sample(
     fig,
     ax_before,
-    ax_after,
+    ax_after_list,                       # list of 3 axes for different viewpoints
     obj_mesh_posed: trimesh.Trimesh,     # object in world frame (before ΔO)
     tool_mesh_raw: trimesh.Trimesh,      # tool mesh at canonical scale
     tool_R: np.ndarray,                  # (3, 3) original tool rotation
@@ -187,7 +195,7 @@ def render_one_sample(
     anchor_pt_new: np.ndarray,           # (3,)   anchor after moving with tool
     title: str = "",
 ):
-    """Render before/after panels for one (ΔT, ΔO) pair."""
+    """Render before/after panels for one (ΔT, ΔO) pair with 3 viewpoints for after state."""
 
     # ---- Posed meshes ----
     tool_before = transform_mesh(tool_mesh_raw, tool_R, tool_t)
@@ -221,34 +229,42 @@ def render_one_sample(
     ax_before.legend(loc="upper left", fontsize=7, framealpha=0.7)
     ax_before.view_init(elev=25, azim=-55)
 
-    # ════════════  RIGHT PANEL: After  ════════════
-    _add_ground(ax_after, extent)
+    # ════════════  RIGHT PANELS: After (3 viewpoints)  ════════════
+    viewpoints = [
+        (25, -55, "After (front)"),
+        (60, -30, "After (top-front)"),
+        (10, -120, "After (side)"),
+    ]
 
-    # Ghost of original positions (faint)
-    _plot_mesh(ax_after, obj_mesh_posed, OBJ_COLOUR_GHOST, edge_alpha=0.05, label="Object (orig)")
-    _plot_mesh(ax_after, tool_before, TOOL_COLOUR_GHOST, edge_alpha=0.05, label="Tool (orig)")
+    for i, (ax_after, (elev, azim, view_title)) in enumerate(zip(ax_after_list, viewpoints)):
+        _add_ground(ax_after, extent)
 
-    # New positions (solid)
-    _plot_mesh(ax_after, obj_after, OBJ_COLOUR_AFTER, label="Object after ΔO")
-    _plot_mesh(ax_after, tool_after, TOOL_COLOUR_AFTER, label="Tool after ΔT")
+        # Ghost of original positions
+        _plot_mesh(ax_after, obj_mesh_posed, OBJ_COLOUR_GHOST, edge_alpha=0.05, label="Object (orig)" if i == 0 else None)
+        _plot_mesh(ax_after, tool_before, TOOL_COLOUR_GHOST, edge_alpha=0.05, label="Tool (orig)" if i == 0 else None)
 
-    # Anchor points
-    _plot_contact_point(ax_after, contact_pt, CONTACT_PT_COLOUR, size=60, label="P (orig)")
-    _plot_contact_point(ax_after, anchor_pt_new, CONTACT_PT_AFTER, size=120, marker="*", label="P (moved)")
+        # New positions (solid)
+        _plot_mesh(ax_after, obj_after, OBJ_COLOUR_AFTER, label="Object after ΔO" if i == 0 else None)
+        _plot_mesh(ax_after, tool_after, TOOL_COLOUR_AFTER, label="Tool after ΔT" if i == 0 else None)
 
-    # Arrow: P_orig → P_new (shows the push)
-    direction = anchor_pt_new - contact_pt
-    d_norm = np.linalg.norm(direction)
-    if d_norm > 1e-6:
-        _plot_arrow(ax_after, contact_pt, direction / d_norm, d_norm, (1.0, 0.4, 0.0), lw=2.5)
+        # Anchor points
+        _plot_contact_point(ax_after, contact_pt, CONTACT_PT_COLOUR, size=60, label="P (orig)" if i == 0 else None)
+        _plot_contact_point(ax_after, anchor_pt_new, CONTACT_PT_AFTER, size=120, marker="*", label="P (moved)" if i == 0 else None)
 
-    ax_after.set_title("After ΔT + ΔO", fontsize=11, fontweight="bold", pad=8)
-    _set_equal_aspect(ax_after, all_verts)
-    ax_after.set_xlabel("X", fontsize=8)
-    ax_after.set_ylabel("Y", fontsize=8)
-    ax_after.set_zlabel("Z", fontsize=8)
-    ax_after.legend(loc="upper left", fontsize=7, framealpha=0.7)
-    ax_after.view_init(elev=25, azim=-55)
+        # Arrow: P_orig → P_new (shows the push)
+        direction = anchor_pt_new - contact_pt
+        d_norm = np.linalg.norm(direction)
+        if d_norm > 1e-6:
+            _plot_arrow(ax_after, contact_pt, direction / d_norm, d_norm, (1.0, 0.4, 0.0), lw=2.5)
+
+        ax_after.set_title(view_title, fontsize=11, fontweight="bold", pad=8)
+        _set_equal_aspect(ax_after, all_verts)
+        ax_after.set_xlabel("X", fontsize=8)
+        ax_after.set_ylabel("Y", fontsize=8)
+        ax_after.set_zlabel("Z", fontsize=8)
+        if i == 0:
+            ax_after.legend(loc="upper left", fontsize=7, framealpha=0.7)
+        ax_after.view_init(elev=elev, azim=azim)
 
     if title:
         fig.suptitle(title, fontsize=10, y=0.98, fontweight="bold", color="#333")
@@ -270,6 +286,12 @@ def main():
                         help="Save figure to path instead of interactive display")
     parser.add_argument("--seed", type=int, default=None,
                         help="Random seed for sample selection")
+    parser.add_argument("--max-rotation", action="store_true",
+                        help="Select samples with maximum ΔO rotation magnitude")
+    parser.add_argument("--push-down", action="store_true",
+                        help="Select samples with clear push-down (negative z in ΔT)")
+    parser.add_argument("--min-z-delta", type=float, default=0.02,
+                        help="Minimum z delta (meters) for push-down selection (default: 0.02)")
     args = parser.parse_args()
 
     import matplotlib
@@ -301,47 +323,129 @@ def main():
 
     # ---- Sample files ----
     rng = random.Random(args.seed)
-    n_samples = min(args.num_samples, len(valid_files))
-    sampled_files = rng.sample(valid_files, n_samples)
 
-    # ---- Create figure: n_samples rows × 2 columns ----
-    fig = plt.figure(figsize=(16, 7 * n_samples), dpi=150)
+    # Compute rotation angles for ΔO and select samples with max rotation
+    if args.max_rotation:
+        sampled_items = []
+        for pt_path in valid_files:
+            data = load_data(pt_path)
+            N = data["tool_translations"].shape[0]
+            delta_obj_R = data["delta_obj_rotations"]  # (N, 3, 3)
+
+            # Compute rotation angles for all configs
+            angles = np.array([rotation_angle(delta_obj_R[i]) for i in range(N)])
+
+            # Get indices sorted by rotation angle (descending)
+            sorted_indices = np.argsort(angles)[::-1]
+            top_indices = sorted_indices[:args.num_samples]
+
+            for cfg_i in top_indices:
+                sampled_items.append((pt_path, int(cfg_i)))
+                print(f"  {Path(pt_path).name} cfg {cfg_i}: ΔO rotation = {angles[cfg_i]*180/np.pi:.1f}°")
+
+        # Limit total samples
+        sampled_items = sampled_items[:args.num_samples]
+        print(f"Selected {len(sampled_items)} configs with maximum ΔO rotation")
+
+    # Select samples with push-down movement (negative z in ΔT)
+    elif args.push_down:
+        sampled_items = []
+        push_down_candidates = []
+
+        for pt_path in valid_files:
+            data = load_data(pt_path)
+            N = data["tool_translations"].shape[0]
+            delta_tool_t = data["delta_tool_translations"]  # (N, 3)
+
+            # Find configs with negative z delta (push down)
+            for cfg_i in range(N):
+                z_delta = delta_tool_t[cfg_i, 2]  # z component
+                if z_delta < -args.min_z_delta:  # push down threshold
+                    push_down_candidates.append((pt_path, cfg_i, z_delta))
+
+        # Sort by z delta (most negative first) and take top samples
+        push_down_candidates.sort(key=lambda x: x[2])  # sort by z (ascending, most negative first)
+        for pt_path, cfg_i, z_delta in push_down_candidates[:args.num_samples]:
+            sampled_items.append((pt_path, cfg_i))
+            print(f"  {Path(pt_path).name} cfg {cfg_i}: ΔT_z = {z_delta*1000:.1f}mm (push down)")
+
+        print(f"Selected {len(sampled_items)} configs with push-down movement")
+
+    elif len(valid_files) == 1:
+        # When only one file, sample multiple configs from it
+        pt_path = valid_files[0]
+        data = load_data(pt_path)
+        N = data["tool_translations"].shape[0]
+        n_configs = min(args.num_samples, N)
+        config_indices = rng.sample(range(N), n_configs)
+        sampled_items = [(pt_path, cfg_i) for cfg_i in config_indices]
+        print(f"Single file: sampling {n_configs} configs from {N} available")
+    else:
+        n_files = min(args.num_samples, len(valid_files))
+        sampled_files = rng.sample(valid_files, n_files)
+        sampled_items = []
+        for pt_path in sampled_files:
+            data = load_data(pt_path)
+            N = data["tool_translations"].shape[0]
+            cfg_i = rng.randint(0, N - 1)
+            sampled_items.append((pt_path, cfg_i))
+        print(f"Multiple files: sampling 1 config from each of {n_files} files")
+
+    n_rows = len(sampled_items)
+
+    # ---- Create figure: n_rows × 4 columns (before + 3 viewpoints) ----
+    fig = plt.figure(figsize=(28, 7 * n_rows), dpi=150)
     fig.patch.set_facecolor("#f8f8f8")
 
-    for row, pt_path in enumerate(sampled_files):
-        print(f"\n[{row+1}/{n_samples}] Loading {pt_path}")
-        data = load_data(pt_path)
+    # Pre-load mesh data for reuse when single file has multiple configs
+    mesh_cache = {}
 
-        N = data["tool_translations"].shape[0]
-        cfg_i = rng.randint(0, N - 1)
-        print(f"  Config {cfg_i}/{N}")
+    for row, (pt_path, cfg_i) in enumerate(sampled_items):
+        print(f"\n[{row+1}/{n_rows}] {Path(pt_path).name}  config {cfg_i}")
 
-        # ---- Load meshes ----
-        obj_path = data["object_mesh_path"]
-        tool_path = data["tool_mesh_path"]
+        # ---- Load data (cache to avoid re-loading same file) ----
+        if pt_path not in mesh_cache:
+            data = load_data(pt_path)
+            obj_path = data["object_mesh_path"]
+            tool_path = data["tool_mesh_path"]
 
-        if not Path(obj_path).exists():
-            print(f"  [SKIP] Object mesh not found: {obj_path}")
-            continue
-        if not Path(tool_path).exists():
-            print(f"  [SKIP] Tool mesh not found: {tool_path}")
-            continue
+            if not Path(obj_path).exists():
+                print(f"  [SKIP] Object mesh not found: {obj_path}")
+                continue
+            if not Path(tool_path).exists():
+                print(f"  [SKIP] Tool mesh not found: {tool_path}")
+                continue
 
-        obj_mesh_raw = load_mesh_trimesh(obj_path)
-        tool_mesh_raw = load_mesh_trimesh(tool_path)
+            obj_mesh_raw = load_mesh_trimesh(obj_path)
+            tool_mesh_raw = load_mesh_trimesh(tool_path)
 
-        # Scales
-        tool_scale = data.get("tool_scale", 0.1)
-        obj_scale = data.get("object_scale", 0.15)
-        tool_mesh_raw.vertices *= tool_scale
-        obj_mesh_raw.vertices *= obj_scale
+            # Scales
+            tool_scale = data.get("tool_scale", 0.1)
+            obj_scale = data.get("object_scale", 0.15)
+            tool_mesh_raw.vertices *= tool_scale
+            obj_mesh_raw.vertices *= obj_scale
 
-        # Object world-frame pose
-        R_obj = data.get("object_rotation", np.eye(3))
-        z_shift = data.get("obj_z_shift", 0.0)
-        if hasattr(z_shift, "item"):
-            z_shift = z_shift.item()
-        obj_mesh_posed = apply_object_pose(obj_mesh_raw, R_obj, z_shift)
+            # Object world-frame pose
+            R_obj = data.get("object_rotation", np.eye(3))
+            z_shift = data.get("obj_z_shift", 0.0)
+            if hasattr(z_shift, "item"):
+                z_shift = z_shift.item()
+            obj_mesh_posed = apply_object_pose(obj_mesh_raw, R_obj, z_shift)
+
+            mesh_cache[pt_path] = {
+                "data": data,
+                "obj_mesh_posed": obj_mesh_posed,
+                "tool_mesh_raw": tool_mesh_raw,
+                "obj_path": obj_path,
+                "tool_path": tool_path,
+            }
+        else:
+            cache = mesh_cache[pt_path]
+            data = cache["data"]
+            obj_mesh_posed = cache["obj_mesh_posed"]
+            tool_mesh_raw = cache["tool_mesh_raw"]
+            obj_path = cache["obj_path"]
+            tool_path = cache["tool_path"]
 
         # ---- Extract config data ----
         tool_R = data["tool_rotations"][cfg_i]          # (3, 3)
@@ -354,9 +458,13 @@ def main():
         delta_obj_t = data["delta_obj_translations"][cfg_i]  # (3,)
         anchor_new = data["movement_contact_pts"][cfg_i]     # (3,)
 
-        # ---- Axes ----
-        ax_before = fig.add_subplot(n_samples, 2, row * 2 + 1, projection="3d")
-        ax_after  = fig.add_subplot(n_samples, 2, row * 2 + 2, projection="3d")
+        # ---- Axes: 1 before + 3 after viewpoints ----
+        ax_before = fig.add_subplot(n_rows, 4, row * 4 + 1, projection="3d")
+        ax_after_list = [
+            fig.add_subplot(n_rows, 4, row * 4 + 2, projection="3d"),
+            fig.add_subplot(n_rows, 4, row * 4 + 3, projection="3d"),
+            fig.add_subplot(n_rows, 4, row * 4 + 4, projection="3d"),
+        ]
 
         title = (
             f"{Path(tool_path).stem}  ×  {Path(obj_path).stem}\n"
@@ -365,7 +473,7 @@ def main():
         )
 
         render_one_sample(
-            fig, ax_before, ax_after,
+            fig, ax_before, ax_after_list,
             obj_mesh_posed, tool_mesh_raw,
             tool_R, tool_t, contact_pt,
             delta_tool_R, delta_tool_t,

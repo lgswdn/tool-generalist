@@ -133,10 +133,11 @@ class MLPNoisePredictor(nn.Module):
 # --------------------------------------------------------------------------- #
 
 class AuxRegressionHead(nn.Module):
-    """Auxiliary regression: pooled condition → delta_pose.
+    """Auxiliary regression: pooled condition → init_pose.
 
-    Provides direct supervision for encoder features during warmup,
-    preventing posterior collapse in the diffusion pathway.
+    Predicts the initial pose from encoder features. This is directly
+    solvable (the encoder sees tool@init_pose), forcing the encoder to
+    produce position-aware features and preventing representation collapse.
     """
 
     def __init__(self, cond_dim: int = 128, pose_dim: int = 9):
@@ -430,6 +431,7 @@ class JointModel(nn.Module):
         # Diffusion inputs (tool at INIT pose)
         tool_pc_init: torch.Tensor = None,
         delta_pose_gt: torch.Tensor = None,
+        init_pose_gt: torch.Tensor = None,
         # Training phase
         warmup: bool = False,
     ) -> Tuple[torch.Tensor, dict]:
@@ -473,10 +475,10 @@ class JointModel(nn.Module):
 
             cond = self.build_condition(tool_pc_init, obj_pc)
 
-            # Auxiliary regression (always, if head exists)
-            if self.aux_reg_head is not None:
-                dp_pred = self.aux_reg_head(cond)
-                aux_loss = F.mse_loss(dp_pred, delta_pose_gt)
+            # Auxiliary regression: predict init_pose (directly solvable)
+            if self.aux_reg_head is not None and init_pose_gt is not None:
+                ip_pred = self.aux_reg_head(cond)
+                aux_loss = F.mse_loss(ip_pred, init_pose_gt)
                 total_loss = total_loss + self.aux_weight * aux_loss
                 metrics["aux_loss"] = aux_loss.item()
 

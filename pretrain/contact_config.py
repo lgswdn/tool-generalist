@@ -76,9 +76,10 @@ class MovementDeltaHyperparams:
     # ---- Loss weights ----
     w_pen: float = 30.0              # penetration penalty  (same semantic as ContactGen)
     w_contact: float = 1.0           # surface attraction
-    w_floor: float = 20.0            # below-floor penalty
+    w_floor: float = 30.0            # below-floor penalty (tool points)
+    w_obj_floor: float = 30.0        # below-floor penalty (object vertices)
     w_contact_anchor: float = 5.0    # keep contact point P on object surface
-    w_reg_trans: float = 0.1         # penalise ΔO translation magnitude
+    w_reg_trans: float = 0.3         # penalise ΔO translation magnitude
     w_reg_rot: float = 0.1           # penalise ΔO rotation magnitude
     k_closest: int = 4               # same as ContactGen
 

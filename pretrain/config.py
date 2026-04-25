@@ -10,7 +10,7 @@ class TrainConfig:
 
     # Data
     data_dir: str = "/mnt/project/world_model/tool_generalist/teardrop_contact/000_asym_teardrop_contour_scraper_var_000/"
-    out_dir: str = "checkpoints_diffusion_sdf"
+    out_dir: str = "checkpoints_diffusion_sdf_2"
     val_ratio: float = 0.1
     num_workers: int = 4
     max_files: int = 0  # 0 = use all .pt files, >0 = limit
@@ -23,7 +23,7 @@ class TrainConfig:
     amp: bool = False  # Disabled: float16 corrupts DDPM noise prediction
 
     # Warmup: regression-only phase before diffusion starts
-    warmup_epochs: int = 200
+    warmup_epochs: int = 0
 
     # Logging
     wandb: bool = True
