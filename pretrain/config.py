@@ -1,4 +1,4 @@
-"""config.py — Training configuration for SDF + Diffusion encoder pretraining."""
+"""config.py — Training configuration for SDF + Flow Matching encoder pretraining."""
 
 from dataclasses import dataclass, field
 from typing import Tuple
@@ -17,14 +17,17 @@ class TrainConfig:
 
     # Training
     epochs: int = 1000
-    total_steps: int = 0
-    batch_size: int = 256
+    total_steps: int = 0      # Fixed step budget (overrides epochs; 0 = use epochs)
+    batch_size: int = 256     # GLOBAL batch size, split evenly across GPUs
     lr: float = 5e-4
     resume: str = ""
-    amp: bool = False  # Disabled: float16 corrupts DDPM noise prediction
+    amp: bool = False  # Disabled: float16 corrupts flow matching prediction
 
     # Warmup: SDF+aux only phase before flow matching starts (0 = disabled).
     warmup_epochs: int = 0
+
+    # Task selector: "joint" (SDF+flow), "movement" (SDF+movement), "sdf" (SDF-only)
+    task: str = "joint"
 
     # Logging
     wandb: bool = True
@@ -44,9 +47,9 @@ class TrainConfig:
     patch_agg: str = "min"    # "mean", "min", "max" (used in patch mode)
     head_hidden: Tuple[int, ...] = (128, 64)  # SDF prediction MLP hidden dims
 
-    # Diffusion head
+    # Flow matching / diffusion head
     diffusion: bool = True
-    use_mlp_head: bool = True   # MLP noise predictor (proven faster for horizon=1)
+    use_mlp_head: bool = True   # MLP velocity net (proven faster for horizon=1)
     n_layer: int = 5
     n_head: int = 4
     n_emb: int = 256
@@ -57,13 +60,14 @@ class TrainConfig:
     aux_reg: bool = True
     aux_weight: float = 1.0
 
+    # Movement prediction
+    movement_pred: bool = True
+    movement_n_heads: int = 4
+
     # Loss weights
     sdf_weight: float = 1.0
     diffusion_weight: float = 1.0
     movement_weight: float = 1.0
-
-    # Task selector
-    task: str = "joint"  # "joint" (SDF+flow) or "movement" (SDF+movement prediction)
 
 
 # Default config instance

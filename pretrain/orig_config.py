@@ -1,10 +1,10 @@
-"""train.py — Training script for joint SDF + Flow Matching encoder pretraining.
+"""train.py — Training script for joint SDF + Diffusion encoder pretraining.
 
 Proven recipe (from debug_overfit.py experiments):
-  1. MLPVelocityNet (bypasses cross-attention, faster for horizon=1)
+  1. MLPNoisePredictor (bypasses cross-attention, faster for horizon=1)
   2. Regression warmup (prevents encoder posterior collapse)
   3. Auxiliary regression (keeps encoder discriminative during joint training)
-  4. LR 5e-4
+  4. LR 1e-3
 
 Usage:
     # Single GPU, default config
@@ -21,9 +21,6 @@ Usage:
 
     # Wandb logging
     python train.py --data-dir /path/to/data/ --wandb
-
-    # Movement-only training
-    python train.py --data-dir /path/to/data/ --task movement
 """
 
 from __future__ import annotations
@@ -99,21 +96,6 @@ def load_ckpt(path: str, model: torch.nn.Module, optimizer=None):
 
 
 # --------------------------------------------------------------------------- #
-# Safe-to-device helper
-# --------------------------------------------------------------------------- #
-
-def _safe_to_device(val, device):
-    """Handle None, list-of-None, or tensor → device."""
-    if val is None:
-        return None
-    if isinstance(val, list):
-        if any(v is None for v in val):
-            return None
-        return torch.stack(val).to(device)
-    return val.to(device)
-
-
-# --------------------------------------------------------------------------- #
 # Training loop
 # --------------------------------------------------------------------------- #
 
@@ -142,25 +124,84 @@ def run_epoch(
             obj_sdf_gt  = batch["obj_pts_sdf"].to(device)
 
             # Initial pose SDF (optional)
-            init_tool_sdf_gt = _safe_to_device(batch.get("init_tool_pts_sdf"), device)
-            init_obj_sdf_gt = _safe_to_device(batch.get("init_obj_pts_sdf"), device)
+            init_tool_sdf_gt = batch.get("init_tool_pts_sdf")
+            init_obj_sdf_gt = batch.get("init_obj_pts_sdf")
 
-            # Flow matching inputs (optional)
-            tool_pc_init = _safe_to_device(batch.get("tool_pc_init"), device)
-            delta_pose = _safe_to_device(batch.get("delta_pose"), device)
-            init_pose = _safe_to_device(batch.get("init_pose"), device)
+            if init_tool_sdf_gt is not None:
+                if isinstance(init_tool_sdf_gt, list):
+                    if any(s is None for s in init_tool_sdf_gt):
+                        init_tool_sdf_gt = None
+                    else:
+                        init_tool_sdf_gt = torch.stack(init_tool_sdf_gt).to(device)
+                else:
+                    init_tool_sdf_gt = init_tool_sdf_gt.to(device)
+            if init_obj_sdf_gt is not None:
+                if isinstance(init_obj_sdf_gt, list):
+                    if any(s is None for s in init_obj_sdf_gt):
+                        init_obj_sdf_gt = None
+                    else:
+                        init_obj_sdf_gt = torch.stack(init_obj_sdf_gt).to(device)
+                else:
+                    init_obj_sdf_gt = init_obj_sdf_gt.to(device)
+
+            # Diffusion inputs (optional)
+            tool_pc_init = batch.get("tool_pc_init")
+            delta_pose  = batch.get("delta_pose")
+            init_pose   = batch.get("init_pose")
+
+            if tool_pc_init is not None:
+                if isinstance(tool_pc_init, list):
+                    if any(t is None for t in tool_pc_init):
+                        tool_pc_init = None
+                    else:
+                        tool_pc_init = torch.stack(tool_pc_init).to(device)
+                else:
+                    tool_pc_init = tool_pc_init.to(device)
+            if delta_pose is not None:
+                if isinstance(delta_pose, list):
+                    if any(d is None for d in delta_pose):
+                        delta_pose = None
+                    else:
+                        delta_pose = torch.stack(delta_pose).to(device)
+                else:
+                    delta_pose = delta_pose.to(device)
+            if init_pose is not None:
+                if isinstance(init_pose, list):
+                    if any(p is None for p in init_pose):
+                        init_pose = None
+                    else:
+                        init_pose = torch.stack(init_pose).to(device)
+                else:
+                    init_pose = init_pose.to(device)
 
             # Movement inputs (optional)
-            obj_point_displacement = _safe_to_device(batch.get("obj_point_displacement"), device)
-            tool_delta_pose = _safe_to_device(batch.get("tool_delta_pose"), device)
+            tool_delta_action = batch.get("tool_delta_action")
+            obj_displacement  = batch.get("obj_displacement")
+
+            if tool_delta_action is not None:
+                if isinstance(tool_delta_action, list):
+                    if any(a is None for a in tool_delta_action):
+                        tool_delta_action = None
+                    else:
+                        tool_delta_action = torch.stack(tool_delta_action).to(device)
+                else:
+                    tool_delta_action = tool_delta_action.to(device)
+            if obj_displacement is not None:
+                if isinstance(obj_displacement, list):
+                    if any(d is None for d in obj_displacement):
+                        obj_displacement = None
+                    else:
+                        obj_displacement = torch.stack(obj_displacement).to(device)
+                else:
+                    obj_displacement = obj_displacement.to(device)
 
             # Forward — call model() (not model.module.loss()) so DDP hooks fire
             # Build kwargs based on model type
             fwd_kwargs = {}
             raw_model = model.module if isinstance(model, DDP) else model
             if isinstance(raw_model, MovementModel):
-                fwd_kwargs["tool_delta_action"] = tool_delta_pose
-                fwd_kwargs["obj_displacement_gt"] = obj_point_displacement
+                fwd_kwargs["tool_delta_action"] = tool_delta_action
+                fwd_kwargs["obj_displacement_gt"] = obj_displacement
             elif isinstance(raw_model, JointModel):
                 fwd_kwargs["tool_pc_init"] = tool_pc_init
                 fwd_kwargs["delta_pose_gt"] = delta_pose
@@ -168,8 +209,6 @@ def run_epoch(
                 fwd_kwargs["enable_flow"] = enable_flow
                 fwd_kwargs["init_tool_sdf_gt"] = init_tool_sdf_gt
                 fwd_kwargs["init_obj_sdf_gt"] = init_obj_sdf_gt
-                fwd_kwargs["obj_point_displacement"] = obj_point_displacement
-                fwd_kwargs["tool_delta_pose"] = tool_delta_pose
 
             if scaler is not None and train:
                 with torch.cuda.amp.autocast():
@@ -205,7 +244,7 @@ def run_epoch(
                     # Which params went NaN?
                     nan_params = []
                     ok_params_max = []
-                    for pname, p in raw_model.named_parameters():
+                    for pname, p in m.named_parameters():
                         if torch.isnan(p).any() or torch.isinf(p).any():
                             nan_params.append(pname)
                         elif p.requires_grad:
@@ -214,6 +253,7 @@ def run_epoch(
                         print(f"  NaN params ({len(nan_params)}):")
                         for pn in nan_params:
                             print(f"    {pn}")
+                    # Show top-5 largest OK params
                     ok_params_max.sort(key=lambda x: -x[1])
                     print(f"  Top-5 largest OK param abs values:")
                     for pn, v in ok_params_max[:5]:
@@ -236,6 +276,8 @@ def run_epoch(
                 else:
                     loss.backward()
                     # Sanitize: zero out any NaN/Inf per-parameter grads
+                    # instead of skipping the entire step (which causes
+                    # cascading failures on large datasets).
                     n_sanitized = 0
                     for p in model.parameters():
                         if p.grad is not None and not torch.isfinite(p.grad).all():
@@ -256,7 +298,6 @@ def run_epoch(
                          f"sdf_t={metrics.get('tool_sdf_loss', 0):.4f} "
                          f"sdf_o={metrics.get('obj_sdf_loss', 0):.4f} "
                          f"aux={metrics.get('aux_loss', 0):.4f} "
-                         f"mvmt={metrics.get('movement_loss', 0):.4f} "
                          f"grad={grad_norm:.2f} dp_max={dp_max:.3f}")
                 _debug_history.append(entry)
 
@@ -274,7 +315,7 @@ def run_epoch(
 # --------------------------------------------------------------------------- #
 
 def main():
-    parser = argparse.ArgumentParser(description="Train SDF + Flow Matching encoder")
+    parser = argparse.ArgumentParser(description="Train SDF + Diffusion encoder")
     parser.add_argument("--data-dir", required=True, help="Data directory with .pt files")
     parser.add_argument("--out-dir", type=str, default="",
                         help="Override checkpoint output directory")
@@ -387,7 +428,6 @@ def main():
             vit_depth=cfg.vit_depth,
             vit_heads=cfg.vit_heads,
             freeze_encoder=cfg.freeze_encoder,
-            movement_n_heads=cfg.movement_n_heads,
             sdf_weight=cfg.sdf_weight,
             movement_weight=cfg.movement_weight,
         ).to(device)
@@ -410,12 +450,9 @@ def main():
             p_drop_attn=cfg.p_drop_attn,
             use_mlp_head=cfg.use_mlp_head,
             aux_reg=cfg.aux_reg,
-            movement_pred=cfg.movement_pred,
-            movement_n_heads=cfg.movement_n_heads,
             sdf_weight=cfg.sdf_weight,
             diffusion_weight=cfg.diffusion_weight,
             aux_weight=cfg.aux_weight,
-            movement_weight=cfg.movement_weight,
         ).to(device)
         model_name = "JointModel"
     else:
@@ -507,9 +544,7 @@ def main():
             phase = "[WARMUP]" if not enable_flow else "[JOINT] "
 
             # Print metrics
-            metric_keys = ["tool_sdf_loss", "obj_sdf_loss",
-                           "init_tool_sdf_loss", "init_obj_sdf_loss",
-                           "flow_loss", "aux_loss", "movement_loss"]
+            metric_keys = ["tool_sdf_loss", "obj_sdf_loss", "init_tool_sdf_loss", "init_obj_sdf_loss", "flow_loss", "aux_loss", "movement_loss"]
             if do_val:
                 print_str = f"{phase} Epoch {epoch+1:04d}/{cfg.epochs}  train={train_loss:.4f}  val={val_loss:.4f}  "
                 for k in metric_keys:

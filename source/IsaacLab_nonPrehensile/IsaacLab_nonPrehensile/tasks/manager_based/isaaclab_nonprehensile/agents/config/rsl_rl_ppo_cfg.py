@@ -190,8 +190,8 @@ class MomentumPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 class SDFActorCriticCfg:
     """Config for Actor-Critic using SDFPointCloudEncoder (joint ViT encoder).
 
-    Observation layout (env_tool):
-        object_cloud (512*3=1536) | tool_cloud (512*3=1536) | hand_state (9) | rest
+    Observation layout:
+        object_cloud (512*3=1536) | tool_cloud (512*3=1536) | extra_state
     Uses ActorCriticSDF: joint ViT encoder processes tool + object together.
     """
 
@@ -202,7 +202,7 @@ class SDFActorCriticCfg:
     point_dim: int = 3
     patch_size: int = 32
 
-    # Encoder architecture (default: vit_depth=4, vit_heads=4)
+    # Encoder architecture
     encoder_channel: int = 128
     vit_depth: int = 4
     vit_heads: int = 4
@@ -211,26 +211,27 @@ class SDFActorCriticCfg:
     encoder_weights_path: str | None = "/mnt/project/world_model/tool_generalist/model/encoder/teardrop_sdf_patch/best.pt"
     freeze_encoder: bool = True
 
-    # Network architecture
-    fusion_hidden_dims: list[int] = field(default_factory=lambda: [512, 256, 128])
-    fusion_use_norm: bool = True
-    fusion_norm_type: str = "layer"
-
-    actor_hidden_dims: list[int] = field(default_factory=lambda: [64])
-    actor_use_norm: bool = True
-    actor_norm_type: str = "layer"
-    actor_output_activation: bool = False
-
-    critic_hidden_dims: list[int] = field(default_factory=lambda: [128])
-    critic_use_norm: bool = True
-    critic_norm_type: str = "layer"
-
-    # SD-Cross settings
-    use_sd_cross: bool = True
+    # StateDependentCrossFeatNet settings
+    use_learnable_query_tokens: bool = False
     sd_num_query: int = 16
+    sd_num_query_object: int | None = 8
     sd_emb_dim: int = 128
     sd_cat_query: bool = False
     sd_cat_ctx: bool = True
+    sd_query_keys: tuple | None = None
+
+    # Learnable query tokens settings (when use_learnable_query_tokens=True)
+    num_query_object_tokens: int | None = None
+    num_query_tokens: int = 16
+    cross_attn_heads: int = 4
+    cross_attn_layers: int = 1
+    cross_attn_ff_dim: int | None = None
+    cross_attn_dropout: float = 0.0
+
+    # Actor / Critic heads
+    fusion_hidden_dims: list[int] = field(default_factory=lambda: [512, 256, 128])
+    actor_hidden_dims: list[int] = field(default_factory=lambda: [64])
+    critic_hidden_dims: list[int] = field(default_factory=lambda: [128])
 
     # Activation / noise
     activation: str = "elu"

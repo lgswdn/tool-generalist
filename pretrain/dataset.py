@@ -154,6 +154,31 @@ class ContactDataset(Dataset):
             init_R_6d = init_R[:, :2].reshape(6)         # (6,)
             init_pose = torch.cat([init_t, init_R_6d], dim=0)  # (9,)
 
+        # ---- Movement prediction: per-point displacement (on-the-fly) ---------
+        obj_point_displacement = None
+        tool_delta_pose_9d = None
+        if ("delta_obj_translations" in data and "delta_obj_rotations" in data
+                and "movement_contact_pts" in data):
+            try:
+                delta_R_obj = data["delta_obj_rotations"][cfg_i]      # (3, 3)
+                delta_t_obj = data["delta_obj_translations"][cfg_i]   # (3,)
+                pivot = data["movement_contact_pts"][cfg_i]           # (3,)
+
+                # Per-point displacement for object cloud (world-frame)
+                # obj_new = delta_R_obj @ (obj_pc - pivot) + pivot + delta_t_obj
+                obj_pc_new = (obj_pc - pivot) @ delta_R_obj.T + pivot + delta_t_obj
+                obj_point_displacement = obj_pc_new - obj_pc         # (Q, 3)
+
+                # Tool delta pose as 9D conditioning: trans(3) + rot6d(6)
+                delta_t_tool = data["delta_tool_translations"][cfg_i]  # (3,)
+                delta_R_tool = data["delta_tool_rotations"][cfg_i]     # (3, 3)
+                delta_R_tool_6d = delta_R_tool[:, :2].reshape(6)       # (6,)
+                tool_delta_pose_9d = torch.cat([delta_t_tool, delta_R_tool_6d])  # (9,)
+            except Exception:
+                # Skip invalid data gracefully
+                obj_point_displacement = None
+                tool_delta_pose_9d = None
+
         # ---- Augmentation: small Gaussian jitter only ------------------------
         if self.augment:
             tool_pc = tool_pc + torch.randn_like(tool_pc) * 1e-3
@@ -180,6 +205,9 @@ class ContactDataset(Dataset):
             "delta_pose":          delta_pose.float() if delta_pose is not None else None,
             # Init pose for conditioning tests
             "init_pose":           init_pose.float() if init_pose is not None else None,  # (9,)
+            # Movement prediction (optional - None if gen_movement_delta not run)
+            "obj_point_displacement": obj_point_displacement.float() if obj_point_displacement is not None else None,  # (Q, 3)
+            "tool_delta_pose":        tool_delta_pose_9d.float() if tool_delta_pose_9d is not None else None,  # (9,)
         }
 
 

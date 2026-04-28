@@ -90,6 +90,8 @@ class SDFEncodeResult(NamedTuple):
     fused_tokens: torch.Tensor   # (B, 2P, D) — all patch tokens after joint ViT (no CLS)
     tool_patch_idx: torch.Tensor # (B, P, K) — point indices into tool_pc
     obj_patch_idx:  torch.Tensor # (B, P, K) — point indices into obj_pc
+    tool_patch_centers: torch.Tensor  # (B, P, 3) — FPS centers for tool patches
+    obj_patch_centers:  torch.Tensor  # (B, P, 3) — FPS centers for object patches
 
 
 # --------------------------------------------------------------------------- #
@@ -297,10 +299,12 @@ class SDFPointCloudEncoder(nn.Module):
         """Encode two point clouds jointly.
 
         Returns an SDFEncodeResult namedtuple with:
-            tool_tokens,  obj_tokens   — (B, P, D) cross-stream-aware patch tokens
-            global_feat               — (B, D) scene-level CLS summary
-            tool_patch_idx            — (B, P, K) point indices into tool_pc
-            obj_patch_idx             — (B, P, K) point indices into obj_pc
+            tool_tokens,  obj_tokens     — (B, P, D) cross-stream-aware patch tokens
+            global_feat                  — (B, D) scene-level CLS summary
+            tool_patch_idx               — (B, P, K) point indices into tool_pc
+            obj_patch_idx                — (B, P, K) point indices into obj_pc
+            tool_patch_centers           — (B, P, 3) FPS centers for tool patches
+            obj_patch_centers            — (B, P, 3) FPS centers for object patches
         """
         B  = tool_pc.size(0)
         D  = self._D
@@ -348,10 +352,16 @@ class SDFPointCloudEncoder(nn.Module):
         tool_patch_idx = patch_idx[:, :P, :]        # (B, P, K) — into tool_pc
         obj_patch_idx  = patch_idx[:, P:, :] - N    # (B, P, K) — into obj_pc
 
+        # Patch centers split
+        tool_patch_centers = centers[:, :P, :]      # (B, P, 3)
+        obj_patch_centers  = centers[:, P:, :]      # (B, P, 3)
+
         return SDFEncodeResult(
             fused_tokens=fused_tokens,
             tool_patch_idx=tool_patch_idx,
             obj_patch_idx=obj_patch_idx,
+            tool_patch_centers=tool_patch_centers,
+            obj_patch_centers=obj_patch_centers,
         )
 
     # Convenience wrapper so the module can be called directly

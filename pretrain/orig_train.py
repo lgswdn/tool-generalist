@@ -4,18 +4,10 @@ Uses Conditional Flow Matching (Rectified Flow) for pose prediction.
   Training:  x_t = (1-t)·x_0 + t·ε,  predict velocity v = ε - x_0
   Inference: Euler integration from noise (t=1) to data (t=0)
 
-Pretraining tasks and their locality constraints:
-  - Pointwise SDF : patch token + relative xyz (point − patch_center)  → per-point SDF
-  - Patchwise SDF : patch token only                                    → per-patch SDF
-  - Movement pred : patch token + relative xyz, cross-attn with tool Δpose → per-point displacement
-  - Flow matching : ALL patch tokens (global conditioning)               → delta pose
-  - Aux regression: ALL tokens mean-pooled → init_pose (unchanged)
-
 Architecture:
-  JointModel (shared encoder + task heads)
+  JointModel (shared encoder + two heads)
     ├── encoder: SDFPointCloudEncoder  (ViT backbone, FPS patches)
-    ├── sdf_head: SDFSegmentor          (local-only: no global_feat)
-    ├── movement_head: MovementPredictionHead  (per-point displacement)
+    ├── sdf_head: SDFSegmentor          (point/patch → SDF)
     ├── velocity_net: MLPVelocityNet    (MLP, fast for horizon=1)
     └── aux_reg_head: AuxRegressionHead (optional, pooled cond → init_pose)
 """
@@ -148,7 +140,7 @@ MLPNoisePredictor = MLPVelocityNet
 
 
 # --------------------------------------------------------------------------- #
-# AuxRegressionHead — pooled condition → init_pose
+# AuxRegressionHead — pooled condition → delta_pose
 # --------------------------------------------------------------------------- #
 
 class AuxRegressionHead(nn.Module):
@@ -173,109 +165,11 @@ class AuxRegressionHead(nn.Module):
 
 
 # --------------------------------------------------------------------------- #
-# MovementPredictionHead — per-point displacement from object patch features
-# --------------------------------------------------------------------------- #
-
-class MovementPredictionHead(nn.Module):
-    """Per-point movement prediction conditioned on tool delta pose.
-
-    For each object surface point, predicts its displacement when the tool
-    pushes. Uses only the point's OWN patch feature (local) plus the point's
-    relative coordinate within that patch, fused with tool delta pose via
-    cross-attention.
-
-    Architecture:
-        query  = patch_token + rel_xyz_embed(point − patch_center)  (B, N, D)
-        kv     = tool_delta_pose_projected                          (B, 1, D)
-        fused  = cross_attn(query, kv, kv)                          (B, N, D)
-        output = MLP(fused) → displacement                          (B, N, 3)
-    """
-
-    def __init__(self, patch_dim: int = 128, pose_dim: int = 9, n_heads: int = 4):
-        super().__init__()
-        self.patch_dim = patch_dim
-
-        # Embed relative xyz to patch feature space
-        self.xyz_embed = _make_mlp((3, patch_dim, patch_dim))
-
-        # Project tool delta pose to key/value space
-        self.pose_proj = nn.Sequential(
-            nn.Linear(pose_dim, patch_dim),
-            nn.LayerNorm(patch_dim),
-            nn.GELU(),
-        )
-
-        # Cross-attention: query = per-point feature, kv = tool delta pose
-        self.cross_attn = nn.MultiheadAttention(
-            patch_dim, n_heads, batch_first=True,
-        )
-        self.cross_norm = nn.LayerNorm(patch_dim)
-
-        # Output MLP: fused feature → 3D displacement
-        self.head = _make_mlp((patch_dim, patch_dim // 2, 3))
-
-    def forward(
-        self,
-        pc: torch.Tensor,              # (B, N, 3) — object point cloud
-        patch_tokens: torch.Tensor,     # (B, P, D) — object patch tokens
-        patch_idx: torch.Tensor,        # (B, P, K) — point indices per patch
-        patch_centers: torch.Tensor,    # (B, P, 3) — FPS patch centers
-        tool_delta_pose: torch.Tensor,  # (B, 9) — tool delta pose conditioning
-    ) -> torch.Tensor:
-        """Predict per-point displacement.
-
-        Returns: (B, N, 3) — predicted displacement for each object point.
-        """
-        B, N, _ = pc.shape
-        D = self.patch_dim
-        P, K = patch_tokens.shape[1], patch_idx.shape[2]
-
-        # ---- 1. Scatter patch tokens to per-point ----
-        pt_patch = torch.zeros(B, N, D, device=pc.device, dtype=pc.dtype)
-        exp_tok = patch_tokens.unsqueeze(2).expand(B, P, K, D)
-        flat_idx = patch_idx.reshape(B, P * K, 1).expand(B, P * K, D)
-        flat_tok = exp_tok.reshape(B, P * K, D)
-        pt_patch.scatter_(1, flat_idx, flat_tok)
-
-        # ---- 2. Scatter patch centers to per-point ----
-        pt_centers = torch.zeros(B, N, 3, device=pc.device, dtype=pc.dtype)
-        exp_ctr = patch_centers.unsqueeze(2).expand(B, P, K, 3)
-        flat_ctr_idx = patch_idx.reshape(B, P * K, 1).expand(B, P * K, 3)
-        flat_ctr = exp_ctr.reshape(B, P * K, 3)
-        pt_centers.scatter_(1, flat_ctr_idx, flat_ctr)
-
-        # ---- 3. Relative coordinate embedding ----
-        rel_xyz = pc - pt_centers                    # (B, N, 3)
-        pt_rel_embed = self.xyz_embed(rel_xyz)       # (B, N, D)
-
-        # ---- 4. Per-point query = patch_token + rel_xyz_embed ----
-        query = pt_patch + pt_rel_embed              # (B, N, D)
-
-        # ---- 5. Tool delta pose as key/value ----
-        kv = self.pose_proj(tool_delta_pose)         # (B, D)
-        kv = kv.unsqueeze(1)                         # (B, 1, D)
-
-        # ---- 6. Cross-attention (all points attend to single tool pose token) ----
-        # query (B, N, D) attends to kv (B, 1, D) — efficient batched attention
-        fused, _ = self.cross_attn(query, kv, kv)    # (B, N, D)
-        fused = self.cross_norm(query + fused)        # residual + norm
-
-        # ---- 7. Predict displacement ----
-        return self.head(fused)                       # (B, N, 3)
-
-
-# --------------------------------------------------------------------------- #
-# SDFSegmentor — local-only SDF prediction (no global_feat)
+# SDFSegmentor
 # --------------------------------------------------------------------------- #
 
 class SDFSegmentor(nn.Module):
-    """SDF prediction wrapper around SDFPointCloudEncoder.
-
-    Locality constraints:
-      - Pointwise: each point uses ONLY its own patch token + relative coordinate
-      - Patchwise: each patch uses ONLY its own patch token
-    No global_feat (CLS token) is used in either mode.
-    """
+    """SDF prediction wrapper around SDFPointCloudEncoder."""
 
     def __init__(
         self,
@@ -307,58 +201,42 @@ class SDFSegmentor(nn.Module):
         D = self.encoder.feature_dim
 
         if head_mode == "point":
-            # Embed relative xyz (point − patch_center) to feature space
+            # Pointwise: xyz_embed (3→D) + global_feat (D) → 2D input
             self.xyz_embed = _make_mlp((3, D, D))
-            # Input: rel_xyz_embed (D) + patch_token (D) = 2*D
             self.tool_head = _make_mlp((2 * D,) + head_hidden + (1,))
             self.obj_head = _make_mlp((2 * D,) + head_hidden + (1,))
         else:
-            # Input: patch_token only (D)
-            self.tool_head = _make_mlp((D,) + head_hidden + (1,))
-            self.obj_head = _make_mlp((D,) + head_hidden + (1,))
+            # Patchwise: patch_token (D) + global_feat (D) → 2D input
+            self.tool_head = _make_mlp((2 * D,) + head_hidden + (1,))
+            self.obj_head = _make_mlp((2 * D,) + head_hidden + (1,))
 
     def _predict_point(
         self,
-        pc: torch.Tensor,              # (B, N, 3) — point cloud
-        patch_tokens: torch.Tensor,     # (B, P, D) — patch tokens
-        patch_idx: torch.Tensor,        # (B, P, K) — point indices per patch
-        patch_centers: torch.Tensor,    # (B, P, 3) — FPS patch centers
+        pc: torch.Tensor,
+        patch_tokens: torch.Tensor,
+        global_feat: torch.Tensor,
+        patch_idx: torch.Tensor,
         head: nn.Module,
     ) -> torch.Tensor:
-        """Predict per-point SDF using local patch features only."""
         B, N, _ = pc.shape
         D = self.encoder.feature_dim
-        P, K = patch_tokens.shape[1], patch_idx.shape[2]
 
-        # ---- Scatter patch centers to per-point ----
-        pt_centers = torch.zeros(B, N, 3, device=pc.device, dtype=pc.dtype)
-        exp_ctr = patch_centers.unsqueeze(2).expand(B, P, K, 3)
-        flat_ctr_idx = patch_idx.reshape(B, P * K, 1).expand(B, P * K, 3)
-        flat_ctr = exp_ctr.reshape(B, P * K, 3)
-        pt_centers.scatter_(1, flat_ctr_idx, flat_ctr)
+        pt_xyz = self.xyz_embed(pc)                      # (B, N, D) world xyz embedded
+        pt_global = global_feat.unsqueeze(1).expand(B, N, D)  # (B, N, D)
 
-        # ---- Relative coordinate embedding ----
-        rel_xyz = pc - pt_centers                    # (B, N, 3)
-        pt_rel_xyz = self.xyz_embed(rel_xyz)         # (B, N, D)
-
-        # ---- Scatter patch tokens to per-point ----
-        pt_patch = torch.zeros(B, N, D, device=pc.device, dtype=pc.dtype)
-        exp_tok = patch_tokens.unsqueeze(2).expand(B, P, K, D)
-        flat_idx = patch_idx.reshape(B, P * K, 1).expand(B, P * K, D)
-        flat_tok = exp_tok.reshape(B, P * K, D)
-        pt_patch.scatter_(1, flat_idx, flat_tok)
-
-        # ---- Concatenate: [rel_xyz_embed, patch_token] ----
-        feat = torch.cat([pt_rel_xyz, pt_patch], dim=-1)  # (B, N, 2*D)
+        feat = torch.cat([pt_xyz, pt_global], dim=-1)    # (B, N, 2D)
         return head(feat).squeeze(-1)
 
     def _predict_patch(
         self,
-        patch_tokens: torch.Tensor,    # (B, P, D) — patch tokens
+        patch_tokens: torch.Tensor,
+        global_feat: torch.Tensor,
         head: nn.Module,
     ) -> torch.Tensor:
-        """Predict per-patch SDF using patch token only."""
-        return head(patch_tokens).squeeze(-1)
+        B, P, D = patch_tokens.shape
+        pt_global = global_feat.unsqueeze(1).expand(B, P, D)  # (B, P, D)
+        feat = torch.cat([patch_tokens, pt_global], dim=-1)  # (B, P, 2D)
+        return head(feat).squeeze(-1)
 
     def forward(
         self,
@@ -375,16 +253,16 @@ class SDFSegmentor(nn.Module):
         res = self.encoder.encode(tool_pc, obj_pc)
         if self.head_mode == "point":
             tool_sdf = self._predict_point(
-                tool_pc, res.tool_tokens,
-                res.tool_patch_idx, res.tool_patch_centers, self.tool_head,
+                tool_pc, res.tool_tokens, res.global_feat,
+                res.tool_patch_idx, self.tool_head,
             )
             obj_sdf = self._predict_point(
-                obj_pc, res.obj_tokens,
-                res.obj_patch_idx, res.obj_patch_centers, self.obj_head,
+                obj_pc, res.obj_tokens, res.global_feat,
+                res.obj_patch_idx, self.obj_head,
             )
         else:
-            tool_sdf = self._predict_patch(res.tool_tokens, self.tool_head)
-            obj_sdf = self._predict_patch(res.obj_tokens, self.obj_head)
+            tool_sdf = self._predict_patch(res.tool_tokens, res.global_feat, self.tool_head)
+            obj_sdf = self._predict_patch(res.obj_tokens, res.global_feat, self.obj_head)
         return tool_sdf, obj_sdf
 
     def loss(
@@ -399,18 +277,18 @@ class SDFSegmentor(nn.Module):
 
         if self.head_mode == "point":
             tool_pred = self._predict_point(
-                tool_pc, res.tool_tokens,
-                res.tool_patch_idx, res.tool_patch_centers, self.tool_head,
+                tool_pc, res.tool_tokens, res.global_feat,
+                res.tool_patch_idx, self.tool_head,
             )
             obj_pred = self._predict_point(
-                obj_pc, res.obj_tokens,
-                res.obj_patch_idx, res.obj_patch_centers, self.obj_head,
+                obj_pc, res.obj_tokens, res.global_feat,
+                res.obj_patch_idx, self.obj_head,
             )
         else:
             tool_sdf_gt = _aggregate_sdf(tool_sdf_gt, res.tool_patch_idx, self.patch_agg)
             obj_sdf_gt = _aggregate_sdf(obj_sdf_gt, res.obj_patch_idx, self.patch_agg)
-            tool_pred = self._predict_patch(res.tool_tokens, self.tool_head)
-            obj_pred = self._predict_patch(res.obj_tokens, self.obj_head)
+            tool_pred = self._predict_patch(res.tool_tokens, res.global_feat, self.tool_head)
+            obj_pred = self._predict_patch(res.obj_tokens, res.global_feat, self.obj_head)
 
         tool_loss = F.smooth_l1_loss(tool_pred, tool_sdf_gt)
         obj_loss = F.smooth_l1_loss(obj_pred, obj_sdf_gt)
@@ -423,21 +301,21 @@ class SDFSegmentor(nn.Module):
 
 
 # --------------------------------------------------------------------------- #
-# JointModel - Combined SDF + Flow Matching + Movement training
+# JointModel - Combined SDF + Diffusion training
 # --------------------------------------------------------------------------- #
 
 class JointModel(nn.Module):
-    """Joint training of SDF prediction, pose flow matching, and movement prediction.
+    """Joint training of SDF prediction and pose diffusion.
 
     Uses shared encoder with:
-        - SDFSegmentor (local-only SDF prediction)
-        - MovementPredictionHead (per-point displacement, optional)
-        - Velocity net: MLPVelocityNet (default) or TransformerForDiffusion
+        - SDFSegmentor (SDF prediction)
+        - Noise predictor: MLPNoisePredictor (default) or TransformerForDiffusion
         - AuxRegressionHead (optional, for regression warmup)
 
-    The velocity net (flow matching) uses ALL patch tokens as conditioning.
-    SDF heads use only local patch features (no global_feat).
-    Movement head uses local patch features + cross-attn with tool delta pose.
+    The noise predictor takes:
+        - sample: noisy pose (B, 1, 9)
+        - timestep: diffusion step
+        - cond: encoder patches (B, 32, 128) = [tool_tokens, obj_tokens]
     """
 
     def __init__(
@@ -453,7 +331,7 @@ class JointModel(nn.Module):
         vit_depth: int = 4,
         vit_heads: int = 4,
         freeze_encoder: bool = False,
-        # Flow matching / diffusion head
+        # Diffusion head
         n_layer: int = 4,
         n_head: int = 4,
         n_emb: int = 256,
@@ -462,20 +340,15 @@ class JointModel(nn.Module):
         use_mlp_head: bool = True,
         # Auxiliary regression
         aux_reg: bool = True,
-        # Movement prediction
-        movement_pred: bool = True,
-        movement_n_heads: int = 4,
         # Loss weights
         sdf_weight: float = 1.0,
         diffusion_weight: float = 1.0,
         aux_weight: float = 1.0,
-        movement_weight: float = 1.0,
     ):
         super().__init__()
         self.sdf_weight = sdf_weight
         self.diffusion_weight = diffusion_weight
         self.aux_weight = aux_weight
-        self.movement_weight = movement_weight
         self.use_mlp_head = use_mlp_head
 
         # Shared encoder
@@ -539,11 +412,6 @@ class JointModel(nn.Module):
         # Auxiliary regression head (optional)
         self.aux_reg_head = AuxRegressionHead(cond_dim=D) if aux_reg else None
 
-        # Movement prediction head (optional)
-        self.movement_head = MovementPredictionHead(
-            patch_dim=D, pose_dim=9, n_heads=movement_n_heads,
-        ) if movement_pred else None
-
         # Flow matching inference steps
         self.n_inference_steps = 20
 
@@ -577,13 +445,10 @@ class JointModel(nn.Module):
         # SDF inputs (tool at INIT pose - optional)
         init_tool_sdf_gt: torch.Tensor = None,
         init_obj_sdf_gt: torch.Tensor = None,
-        # Flow matching inputs (tool at INIT pose)
+        # Diffusion inputs (tool at INIT pose)
         tool_pc_init: torch.Tensor = None,
         delta_pose_gt: torch.Tensor = None,
         init_pose_gt: torch.Tensor = None,
-        # Movement prediction inputs
-        obj_point_displacement: torch.Tensor = None,
-        tool_delta_pose: torch.Tensor = None,
         # Phase control
         enable_flow: bool = True,
     ) -> Tuple[torch.Tensor, dict]:
@@ -596,22 +461,18 @@ class JointModel(nn.Module):
 
         if self.sdf_head.head_mode == "point":
             tool_pred = self.sdf_head._predict_point(
-                tool_pc, enc_result_contact.tool_tokens,
-                enc_result_contact.tool_patch_idx,
-                enc_result_contact.tool_patch_centers,
-                self.sdf_head.tool_head,
+                tool_pc, enc_result_contact.tool_tokens, enc_result_contact.global_feat,
+                enc_result_contact.tool_patch_idx, self.sdf_head.tool_head,
             )
             obj_pred = self.sdf_head._predict_point(
-                obj_pc, enc_result_contact.obj_tokens,
-                enc_result_contact.obj_patch_idx,
-                enc_result_contact.obj_patch_centers,
-                self.sdf_head.obj_head,
+                obj_pc, enc_result_contact.obj_tokens, enc_result_contact.global_feat,
+                enc_result_contact.obj_patch_idx, self.sdf_head.obj_head,
             )
         else:
             tool_sdf_gt_agg = _aggregate_sdf(tool_sdf_gt, enc_result_contact.tool_patch_idx, self.sdf_head.patch_agg)
             obj_sdf_gt_agg = _aggregate_sdf(obj_sdf_gt, enc_result_contact.obj_patch_idx, self.sdf_head.patch_agg)
-            tool_pred = self.sdf_head._predict_patch(enc_result_contact.tool_tokens, self.sdf_head.tool_head)
-            obj_pred = self.sdf_head._predict_patch(enc_result_contact.obj_tokens, self.sdf_head.obj_head)
+            tool_pred = self.sdf_head._predict_patch(enc_result_contact.tool_tokens, enc_result_contact.global_feat, self.sdf_head.tool_head)
+            obj_pred = self.sdf_head._predict_patch(enc_result_contact.obj_tokens, enc_result_contact.global_feat, self.sdf_head.obj_head)
             tool_sdf_gt = tool_sdf_gt_agg
             obj_sdf_gt = obj_sdf_gt_agg
 
@@ -629,22 +490,18 @@ class JointModel(nn.Module):
 
             if self.sdf_head.head_mode == "point":
                 init_tool_pred = self.sdf_head._predict_point(
-                    tool_pc_init, enc_result_init.tool_tokens,
-                    enc_result_init.tool_patch_idx,
-                    enc_result_init.tool_patch_centers,
-                    self.sdf_head.tool_head,
+                    tool_pc_init, enc_result_init.tool_tokens, enc_result_init.global_feat,
+                    enc_result_init.tool_patch_idx, self.sdf_head.tool_head,
                 )
                 init_obj_pred = self.sdf_head._predict_point(
-                    obj_pc, enc_result_init.obj_tokens,
-                    enc_result_init.obj_patch_idx,
-                    enc_result_init.obj_patch_centers,
-                    self.sdf_head.obj_head,
+                    obj_pc, enc_result_init.obj_tokens, enc_result_init.global_feat,
+                    enc_result_init.obj_patch_idx, self.sdf_head.obj_head,
                 )
             else:
                 init_tool_sdf_gt_agg = _aggregate_sdf(init_tool_sdf_gt, enc_result_init.tool_patch_idx, self.sdf_head.patch_agg)
                 init_obj_sdf_gt_agg = _aggregate_sdf(init_obj_sdf_gt, enc_result_init.obj_patch_idx, self.sdf_head.patch_agg)
-                init_tool_pred = self.sdf_head._predict_patch(enc_result_init.tool_tokens, self.sdf_head.tool_head)
-                init_obj_pred = self.sdf_head._predict_patch(enc_result_init.obj_tokens, self.sdf_head.obj_head)
+                init_tool_pred = self.sdf_head._predict_patch(enc_result_init.tool_tokens, enc_result_init.global_feat, self.sdf_head.tool_head)
+                init_obj_pred = self.sdf_head._predict_patch(enc_result_init.obj_tokens, enc_result_init.global_feat, self.sdf_head.obj_head)
                 init_tool_sdf_gt = init_tool_sdf_gt_agg
                 init_obj_sdf_gt = init_obj_sdf_gt_agg
 
@@ -655,22 +512,7 @@ class JointModel(nn.Module):
             metrics["init_tool_sdf_loss"] = init_tool_loss.item()
             metrics["init_obj_sdf_loss"] = init_obj_loss.item()
 
-        # ---- Movement prediction task ----
-        if (self.movement_head is not None
-                and obj_point_displacement is not None
-                and tool_delta_pose is not None):
-            displacement_pred = self.movement_head(
-                obj_pc,
-                enc_result_contact.obj_tokens,
-                enc_result_contact.obj_patch_idx,
-                enc_result_contact.obj_patch_centers,
-                tool_delta_pose,
-            )  # (B, N, 3)
-            movement_loss = F.smooth_l1_loss(displacement_pred, obj_point_displacement)
-            total_loss = total_loss + self.movement_weight * movement_loss
-            metrics["movement_loss"] = movement_loss.item()
-
-        # ---- Flow matching + auxiliary regression ----
+        # ---- Diffusion + auxiliary regression ----
         has_init = tool_pc_init is not None
         has_delta = delta_pose_gt is not None
         has_init_pose = init_pose_gt is not None
@@ -761,6 +603,54 @@ class JointModel(nn.Module):
 
 
 # --------------------------------------------------------------------------- #
+# MovementPredictionHead — per-object-point displacement from tool action
+# --------------------------------------------------------------------------- #
+
+class MovementPredictionHead(nn.Module):
+    """Predict per-object-point 3D displacement given a tool action.
+
+    For each object point, concatenates:
+        [xyz_embed(3→D), global_feat(D), tool_delta_embed(9→D)]
+    then runs an MLP → 3D displacement prediction.
+    """
+
+    def __init__(self, feature_dim: int = 128, action_dim: int = 9,
+                 hidden: tuple[int, ...] = (256, 128)):
+        super().__init__()
+        D = feature_dim
+        self.xyz_embed = _make_mlp((3, D, D))
+        self.action_embed = _make_mlp((action_dim, D, D))
+        # Input: xyz(D) + global_feat(D) + action(D) = 3D
+        self.mlp = _make_mlp((3 * D,) + hidden + (3,))
+
+    def forward(
+        self,
+        obj_pc: torch.Tensor,           # (B, N, 3) object point coordinates
+        obj_patch_tokens: torch.Tensor,  # (B, P, D) unused (kept for API compat)
+        global_feat: torch.Tensor,       # (B, D) global scene feature
+        obj_patch_idx: torch.Tensor,     # (B, P, K) unused (kept for API compat)
+        tool_delta_action: torch.Tensor, # (B, 9) tool action (3D trans + 6D rot)
+    ) -> torch.Tensor:
+        """Returns: (B, N, 3) predicted per-point displacement."""
+        B, N, _ = obj_pc.shape
+        D = global_feat.shape[-1]
+
+        # 1. Point xyz embedding
+        pt_xyz = self.xyz_embed(obj_pc)  # (B, N, D)
+
+        # 2. Global feature broadcast
+        pt_global = global_feat.unsqueeze(1).expand(B, N, D)  # (B, N, D)
+
+        # 3. Tool action embedding, broadcast to all points
+        pt_action = self.action_embed(tool_delta_action)    # (B, D)
+        pt_action = pt_action.unsqueeze(1).expand(B, N, D)  # (B, N, D)
+
+        # 4. Concatenate and predict
+        feat = torch.cat([pt_xyz, pt_global, pt_action], dim=-1)  # (B, N, 3D)
+        return self.mlp(feat)  # (B, N, 3)
+
+
+# --------------------------------------------------------------------------- #
 # MovementModel — SDF + per-point movement prediction (no flow matching)
 # --------------------------------------------------------------------------- #
 
@@ -769,8 +659,8 @@ class MovementModel(nn.Module):
 
     Architecture:
         encoder: SDFPointCloudEncoder (shared)
-        sdf_head: SDFSegmentor (local-only, patch or point mode)
-        movement_head: MovementPredictionHead (local + cross-attn)
+        sdf_head: SDFSegmentor (patch or point mode)
+        movement_head: MovementPredictionHead
 
     Given tool+object at contact configuration and a tool action (ΔT),
     predicts how each object point moves (the object response ΔO).
@@ -790,7 +680,7 @@ class MovementModel(nn.Module):
         vit_heads: int = 4,
         freeze_encoder: bool = False,
         # Movement head
-        movement_n_heads: int = 4,
+        movement_hidden: tuple[int, ...] = (256, 128),
         # Loss weights
         sdf_weight: float = 1.0,
         movement_weight: float = 1.0,
@@ -826,11 +716,11 @@ class MovementModel(nn.Module):
         del self.sdf_head.encoder
         object.__setattr__(self.sdf_head, 'encoder', self.encoder)
 
-        # Movement prediction head (local patch + cross-attn)
+        # Movement prediction head
         self.movement_head = MovementPredictionHead(
-            patch_dim=D,
-            pose_dim=9,
-            n_heads=movement_n_heads,
+            feature_dim=D,
+            action_dim=9,  # 3D trans + 6D rot
+            hidden=movement_hidden,
         )
 
     def forward(self, *args, **kwargs):
@@ -860,20 +750,18 @@ class MovementModel(nn.Module):
         # ---- SDF task ----
         if self.sdf_head.head_mode == "point":
             tool_pred = self.sdf_head._predict_point(
-                tool_pc, enc.tool_tokens,
-                enc.tool_patch_idx, enc.tool_patch_centers,
-                self.sdf_head.tool_head,
+                tool_pc, enc.tool_tokens, enc.global_feat,
+                enc.tool_patch_idx, self.sdf_head.tool_head,
             )
             obj_pred = self.sdf_head._predict_point(
-                obj_pc, enc.obj_tokens,
-                enc.obj_patch_idx, enc.obj_patch_centers,
-                self.sdf_head.obj_head,
+                obj_pc, enc.obj_tokens, enc.global_feat,
+                enc.obj_patch_idx, self.sdf_head.obj_head,
             )
         else:
             tool_sdf_gt = _aggregate_sdf(tool_sdf_gt, enc.tool_patch_idx, self.sdf_head.patch_agg)
             obj_sdf_gt = _aggregate_sdf(obj_sdf_gt, enc.obj_patch_idx, self.sdf_head.patch_agg)
-            tool_pred = self.sdf_head._predict_patch(enc.tool_tokens, self.sdf_head.tool_head)
-            obj_pred = self.sdf_head._predict_patch(enc.obj_tokens, self.sdf_head.obj_head)
+            tool_pred = self.sdf_head._predict_patch(enc.tool_tokens, enc.global_feat, self.sdf_head.tool_head)
+            obj_pred = self.sdf_head._predict_patch(enc.obj_tokens, enc.global_feat, self.sdf_head.obj_head)
 
         tool_loss = F.smooth_l1_loss(tool_pred, tool_sdf_gt)
         obj_loss = F.smooth_l1_loss(obj_pred, obj_sdf_gt)
@@ -882,18 +770,18 @@ class MovementModel(nn.Module):
         metrics["tool_sdf_loss"] = tool_loss.item()
         metrics["obj_sdf_loss"] = obj_loss.item()
 
-        # ---- Movement prediction (local patch + cross-attn) ----
+        # ---- Movement prediction ----
         if tool_delta_action is not None and obj_displacement_gt is not None:
             disp_pred = self.movement_head(
-                pc=obj_pc,
-                patch_tokens=enc.obj_tokens,
-                patch_idx=enc.obj_patch_idx,
-                patch_centers=enc.obj_patch_centers,
-                tool_delta_pose=tool_delta_action,
+                obj_pc=obj_pc,
+                obj_patch_tokens=enc.obj_tokens,
+                global_feat=enc.global_feat,
+                obj_patch_idx=enc.obj_patch_idx,
+                tool_delta_action=tool_delta_action,
             )  # (B, N, 3)
             movement_loss = F.smooth_l1_loss(disp_pred, obj_displacement_gt)
             total_loss = total_loss + self.movement_weight * movement_loss
             metrics["movement_loss"] = movement_loss.item()
 
         metrics["total"] = total_loss.item()
-        return total_loss, metrics
+        return total_loss, metric
