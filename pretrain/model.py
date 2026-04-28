@@ -79,6 +79,11 @@ def _aggregate_sdf(
     return gathered.mean(-1)
 
 
+def _split_tokens(res, P: int):
+    """Split fused_tokens (B, 2P, D) into tool_tokens (B, P, D) and obj_tokens (B, P, D)."""
+    return res.fused_tokens[:, :P, :], res.fused_tokens[:, P:, :]
+
+
 # --------------------------------------------------------------------------- #
 # MLPVelocityNet — direct MLP for horizon=1 flow matching
 # --------------------------------------------------------------------------- #
@@ -373,18 +378,20 @@ class SDFSegmentor(nn.Module):
             return self.loss(tool_pc, obj_pc, tool_sdf_gt, obj_sdf_gt)
         # Inference path: just predict SDF values
         res = self.encoder.encode(tool_pc, obj_pc)
+        P = self.encoder.num_patches
+        tool_tok, obj_tok = _split_tokens(res, P)
         if self.head_mode == "point":
             tool_sdf = self._predict_point(
-                tool_pc, res.tool_tokens,
+                tool_pc, tool_tok,
                 res.tool_patch_idx, res.tool_patch_centers, self.tool_head,
             )
             obj_sdf = self._predict_point(
-                obj_pc, res.obj_tokens,
+                obj_pc, obj_tok,
                 res.obj_patch_idx, res.obj_patch_centers, self.obj_head,
             )
         else:
-            tool_sdf = self._predict_patch(res.tool_tokens, self.tool_head)
-            obj_sdf = self._predict_patch(res.obj_tokens, self.obj_head)
+            tool_sdf = self._predict_patch(tool_tok, self.tool_head)
+            obj_sdf = self._predict_patch(obj_tok, self.obj_head)
         return tool_sdf, obj_sdf
 
     def loss(
@@ -396,21 +403,23 @@ class SDFSegmentor(nn.Module):
         sdf_weight: float = 1.0,
     ) -> Tuple[torch.Tensor, dict]:
         res = self.encoder.encode(tool_pc, obj_pc)
+        P = self.encoder.num_patches
+        tool_tok, obj_tok = _split_tokens(res, P)
 
         if self.head_mode == "point":
             tool_pred = self._predict_point(
-                tool_pc, res.tool_tokens,
+                tool_pc, tool_tok,
                 res.tool_patch_idx, res.tool_patch_centers, self.tool_head,
             )
             obj_pred = self._predict_point(
-                obj_pc, res.obj_tokens,
+                obj_pc, obj_tok,
                 res.obj_patch_idx, res.obj_patch_centers, self.obj_head,
             )
         else:
             tool_sdf_gt = _aggregate_sdf(tool_sdf_gt, res.tool_patch_idx, self.patch_agg)
             obj_sdf_gt = _aggregate_sdf(obj_sdf_gt, res.obj_patch_idx, self.patch_agg)
-            tool_pred = self._predict_patch(res.tool_tokens, self.tool_head)
-            obj_pred = self._predict_patch(res.obj_tokens, self.obj_head)
+            tool_pred = self._predict_patch(tool_tok, self.tool_head)
+            obj_pred = self._predict_patch(obj_tok, self.obj_head)
 
         tool_loss = F.smooth_l1_loss(tool_pred, tool_sdf_gt)
         obj_loss = F.smooth_l1_loss(obj_pred, obj_sdf_gt)
@@ -551,9 +560,7 @@ class JointModel(nn.Module):
                         obj_pc: torch.Tensor) -> torch.Tensor:
         """Encode tool@init + object → condition tokens with position bias."""
         enc_result = self.encoder.encode(tool_pc_init, obj_pc)
-        cond = torch.cat(
-            [enc_result.tool_tokens, enc_result.obj_tokens], dim=1,
-        )  # (B, 32, D)
+        cond = enc_result.fused_tokens  # (B, 2P, D) — already [tool, obj] concatenated
 
         tool_centroid = tool_pc_init.mean(dim=1)
         obj_centroid = obj_pc.mean(dim=1)
@@ -593,16 +600,18 @@ class JointModel(nn.Module):
 
         # ---- SDF task at CONTACT pose ----
         enc_result_contact = self.encoder.encode(tool_pc, obj_pc)
+        P = self.encoder.num_patches
+        contact_tool_tok, contact_obj_tok = _split_tokens(enc_result_contact, P)
 
         if self.sdf_head.head_mode == "point":
             tool_pred = self.sdf_head._predict_point(
-                tool_pc, enc_result_contact.tool_tokens,
+                tool_pc, contact_tool_tok,
                 enc_result_contact.tool_patch_idx,
                 enc_result_contact.tool_patch_centers,
                 self.sdf_head.tool_head,
             )
             obj_pred = self.sdf_head._predict_point(
-                obj_pc, enc_result_contact.obj_tokens,
+                obj_pc, contact_obj_tok,
                 enc_result_contact.obj_patch_idx,
                 enc_result_contact.obj_patch_centers,
                 self.sdf_head.obj_head,
@@ -610,8 +619,8 @@ class JointModel(nn.Module):
         else:
             tool_sdf_gt_agg = _aggregate_sdf(tool_sdf_gt, enc_result_contact.tool_patch_idx, self.sdf_head.patch_agg)
             obj_sdf_gt_agg = _aggregate_sdf(obj_sdf_gt, enc_result_contact.obj_patch_idx, self.sdf_head.patch_agg)
-            tool_pred = self.sdf_head._predict_patch(enc_result_contact.tool_tokens, self.sdf_head.tool_head)
-            obj_pred = self.sdf_head._predict_patch(enc_result_contact.obj_tokens, self.sdf_head.obj_head)
+            tool_pred = self.sdf_head._predict_patch(contact_tool_tok, self.sdf_head.tool_head)
+            obj_pred = self.sdf_head._predict_patch(contact_obj_tok, self.sdf_head.obj_head)
             tool_sdf_gt = tool_sdf_gt_agg
             obj_sdf_gt = obj_sdf_gt_agg
 
@@ -626,16 +635,17 @@ class JointModel(nn.Module):
         has_init_sdf = init_tool_sdf_gt is not None and init_obj_sdf_gt is not None and tool_pc_init is not None
         if has_init_sdf:
             enc_result_init = self.encoder.encode(tool_pc_init, obj_pc)
+            init_tool_tok, init_obj_tok = _split_tokens(enc_result_init, P)
 
             if self.sdf_head.head_mode == "point":
                 init_tool_pred = self.sdf_head._predict_point(
-                    tool_pc_init, enc_result_init.tool_tokens,
+                    tool_pc_init, init_tool_tok,
                     enc_result_init.tool_patch_idx,
                     enc_result_init.tool_patch_centers,
                     self.sdf_head.tool_head,
                 )
                 init_obj_pred = self.sdf_head._predict_point(
-                    obj_pc, enc_result_init.obj_tokens,
+                    obj_pc, init_obj_tok,
                     enc_result_init.obj_patch_idx,
                     enc_result_init.obj_patch_centers,
                     self.sdf_head.obj_head,
@@ -643,8 +653,8 @@ class JointModel(nn.Module):
             else:
                 init_tool_sdf_gt_agg = _aggregate_sdf(init_tool_sdf_gt, enc_result_init.tool_patch_idx, self.sdf_head.patch_agg)
                 init_obj_sdf_gt_agg = _aggregate_sdf(init_obj_sdf_gt, enc_result_init.obj_patch_idx, self.sdf_head.patch_agg)
-                init_tool_pred = self.sdf_head._predict_patch(enc_result_init.tool_tokens, self.sdf_head.tool_head)
-                init_obj_pred = self.sdf_head._predict_patch(enc_result_init.obj_tokens, self.sdf_head.obj_head)
+                init_tool_pred = self.sdf_head._predict_patch(init_tool_tok, self.sdf_head.tool_head)
+                init_obj_pred = self.sdf_head._predict_patch(init_obj_tok, self.sdf_head.obj_head)
                 init_tool_sdf_gt = init_tool_sdf_gt_agg
                 init_obj_sdf_gt = init_obj_sdf_gt_agg
 
@@ -661,7 +671,7 @@ class JointModel(nn.Module):
                 and tool_delta_pose is not None):
             displacement_pred = self.movement_head(
                 obj_pc,
-                enc_result_contact.obj_tokens,
+                contact_obj_tok,
                 enc_result_contact.obj_patch_idx,
                 enc_result_contact.obj_patch_centers,
                 tool_delta_pose,
@@ -856,24 +866,26 @@ class MovementModel(nn.Module):
 
         # ---- Encode ----
         enc = self.encoder.encode(tool_pc, obj_pc)
+        P = self.encoder.num_patches
+        tool_tok, obj_tok = _split_tokens(enc, P)
 
         # ---- SDF task ----
         if self.sdf_head.head_mode == "point":
             tool_pred = self.sdf_head._predict_point(
-                tool_pc, enc.tool_tokens,
+                tool_pc, tool_tok,
                 enc.tool_patch_idx, enc.tool_patch_centers,
                 self.sdf_head.tool_head,
             )
             obj_pred = self.sdf_head._predict_point(
-                obj_pc, enc.obj_tokens,
+                obj_pc, obj_tok,
                 enc.obj_patch_idx, enc.obj_patch_centers,
                 self.sdf_head.obj_head,
             )
         else:
             tool_sdf_gt = _aggregate_sdf(tool_sdf_gt, enc.tool_patch_idx, self.sdf_head.patch_agg)
             obj_sdf_gt = _aggregate_sdf(obj_sdf_gt, enc.obj_patch_idx, self.sdf_head.patch_agg)
-            tool_pred = self.sdf_head._predict_patch(enc.tool_tokens, self.sdf_head.tool_head)
-            obj_pred = self.sdf_head._predict_patch(enc.obj_tokens, self.sdf_head.obj_head)
+            tool_pred = self.sdf_head._predict_patch(tool_tok, self.sdf_head.tool_head)
+            obj_pred = self.sdf_head._predict_patch(obj_tok, self.sdf_head.obj_head)
 
         tool_loss = F.smooth_l1_loss(tool_pred, tool_sdf_gt)
         obj_loss = F.smooth_l1_loss(obj_pred, obj_sdf_gt)
@@ -886,7 +898,7 @@ class MovementModel(nn.Module):
         if tool_delta_action is not None and obj_displacement_gt is not None:
             disp_pred = self.movement_head(
                 pc=obj_pc,
-                patch_tokens=enc.obj_tokens,
+                patch_tokens=obj_tok,
                 patch_idx=enc.obj_patch_idx,
                 patch_centers=enc.obj_patch_centers,
                 tool_delta_pose=tool_delta_action,
