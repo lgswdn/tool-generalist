@@ -55,7 +55,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from config import TrainConfig, DEFAULT_CONFIG
 from dataset import make_split
-from model import SDFSegmentor, JointModel, MovementModel
+from model import SDFSegmentor, DiffusionModel, MovementModel
 
 
 # --------------------------------------------------------------------------- #
@@ -161,15 +161,20 @@ def run_epoch(
             if isinstance(raw_model, MovementModel):
                 fwd_kwargs["tool_delta_action"] = tool_delta_pose
                 fwd_kwargs["obj_displacement_gt"] = obj_point_displacement
-            elif isinstance(raw_model, JointModel):
+                fwd_kwargs["tool_pc_init"] = tool_pc_init
+                fwd_kwargs["init_tool_sdf_gt"] = init_tool_sdf_gt
+                fwd_kwargs["init_obj_sdf_gt"] = init_obj_sdf_gt
+            elif isinstance(raw_model, DiffusionModel):
                 fwd_kwargs["tool_pc_init"] = tool_pc_init
                 fwd_kwargs["delta_pose_gt"] = delta_pose
                 fwd_kwargs["init_pose_gt"] = init_pose
                 fwd_kwargs["enable_flow"] = enable_flow
                 fwd_kwargs["init_tool_sdf_gt"] = init_tool_sdf_gt
                 fwd_kwargs["init_obj_sdf_gt"] = init_obj_sdf_gt
-                fwd_kwargs["obj_point_displacement"] = obj_point_displacement
-                fwd_kwargs["tool_delta_pose"] = tool_delta_pose
+            else:  # SDFSegmentor
+                fwd_kwargs["tool_pc_init"] = tool_pc_init
+                fwd_kwargs["init_tool_sdf_gt"] = init_tool_sdf_gt
+                fwd_kwargs["init_obj_sdf_gt"] = init_obj_sdf_gt
 
             if scaler is not None and train:
                 with torch.cuda.amp.autocast():
@@ -251,12 +256,14 @@ def run_epoch(
             # Record history (keep last 10 batches for NaN diagnosis)
             if is_main():
                 dp_max = delta_pose.abs().max().item() if delta_pose is not None else 0
+                mvmt_abs = metrics.get('movement_gt_mean_abs', 0)
                 entry = (f"batch={n:03d} loss={loss.item():.4f} "
                          f"flow={metrics.get('flow_loss', 0):.4f} "
                          f"sdf_t={metrics.get('tool_sdf_loss', 0):.4f} "
                          f"sdf_o={metrics.get('obj_sdf_loss', 0):.4f} "
                          f"aux={metrics.get('aux_loss', 0):.4f} "
                          f"mvmt={metrics.get('movement_loss', 0):.4f} "
+                         f"mvmt_abs={mvmt_abs:.4f} "
                          f"grad={grad_norm:.2f} dp_max={dp_max:.3f}")
                 _debug_history.append(entry)
 
@@ -293,8 +300,8 @@ def main():
     parser.add_argument("--warmup-epochs", type=int, default=-1,
                         help="Override warmup epochs (-1=use config)")
     parser.add_argument("--task", type=str, default="",
-                        choices=["", "joint", "movement", "sdf"],
-                        help="Task: 'joint' (SDF+flow), 'movement' (SDF+movement), 'sdf' (SDF-only)")
+                        choices=["", "diffusion", "movement", "sdf"],
+                        help="Task: 'diffusion' (SDF+flow), 'movement' (SDF+movement), 'sdf' (SDF-only)")
     parser.add_argument("--head-mode", type=str, default="",
                         choices=["", "point", "patch"],
                         help="SDF head mode (default from config)")
@@ -398,7 +405,7 @@ def main():
         ).to(device)
         model_name = "MovementModel"
     elif cfg.diffusion:
-        model = JointModel(
+        model = DiffusionModel(
             head_mode=cfg.head_mode,
             patch_agg=cfg.patch_agg,
             head_hidden=cfg.head_hidden,
@@ -415,14 +422,11 @@ def main():
             p_drop_attn=cfg.p_drop_attn,
             use_mlp_head=cfg.use_mlp_head,
             aux_reg=cfg.aux_reg,
-            movement_pred=cfg.movement_pred,
-            movement_n_heads=cfg.movement_n_heads,
             sdf_weight=cfg.sdf_weight,
             diffusion_weight=cfg.diffusion_weight,
             aux_weight=cfg.aux_weight,
-            movement_weight=cfg.movement_weight,
         ).to(device)
-        model_name = "JointModel"
+        model_name = "DiffusionModel"
     else:
         model = SDFSegmentor(
             head_mode=cfg.head_mode,
@@ -514,7 +518,8 @@ def main():
             # Print metrics
             metric_keys = ["tool_sdf_loss", "obj_sdf_loss",
                            "init_tool_sdf_loss", "init_obj_sdf_loss",
-                           "flow_loss", "aux_loss", "movement_loss"]
+                           "flow_loss", "aux_loss", "movement_loss",
+                           "movement_gt_mean_abs", "movement_gt_max_abs"]
             if do_val:
                 print_str = f"{phase} Epoch {epoch+1:04d}/{cfg.epochs}  train={train_loss:.4f}  val={val_loss:.4f}  "
                 for k in metric_keys:

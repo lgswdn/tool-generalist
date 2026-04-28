@@ -375,7 +375,7 @@ class SDFSegmentor(nn.Module):
     ) -> Tuple[torch.Tensor, dict]:
         """Route through loss() so DDP gradient sync hooks fire."""
         if tool_sdf_gt is not None and obj_sdf_gt is not None:
-            return self.loss(tool_pc, obj_pc, tool_sdf_gt, obj_sdf_gt)
+            return self.loss(tool_pc, obj_pc, tool_sdf_gt, obj_sdf_gt, **kwargs)
         # Inference path: just predict SDF values
         res = self.encoder.encode(tool_pc, obj_pc)
         P = self.encoder.num_patches
@@ -400,12 +400,18 @@ class SDFSegmentor(nn.Module):
         obj_pc: torch.Tensor,
         tool_sdf_gt: torch.Tensor,
         obj_sdf_gt: torch.Tensor,
+        # SDF inputs at INIT pose (optional)
+        tool_pc_init: torch.Tensor = None,
+        init_tool_sdf_gt: torch.Tensor = None,
+        init_obj_sdf_gt: torch.Tensor = None,
         sdf_weight: float = 1.0,
     ) -> Tuple[torch.Tensor, dict]:
+        """Compute SDF loss at both contact and init poses (if available)."""
         res = self.encoder.encode(tool_pc, obj_pc)
         P = self.encoder.num_patches
         tool_tok, obj_tok = _split_tokens(res, P)
 
+        # ---- SDF at CONTACT pose ----
         if self.head_mode == "point":
             tool_pred = self._predict_point(
                 tool_pc, tool_tok,
@@ -416,37 +422,71 @@ class SDFSegmentor(nn.Module):
                 res.obj_patch_idx, res.obj_patch_centers, self.obj_head,
             )
         else:
-            tool_sdf_gt = _aggregate_sdf(tool_sdf_gt, res.tool_patch_idx, self.patch_agg)
-            obj_sdf_gt = _aggregate_sdf(obj_sdf_gt, res.obj_patch_idx, self.patch_agg)
+            tool_sdf_gt_agg = _aggregate_sdf(tool_sdf_gt, res.tool_patch_idx, self.patch_agg)
+            obj_sdf_gt_agg = _aggregate_sdf(obj_sdf_gt, res.obj_patch_idx, self.patch_agg)
             tool_pred = self._predict_patch(tool_tok, self.tool_head)
             obj_pred = self._predict_patch(obj_tok, self.obj_head)
+            tool_sdf_gt = tool_sdf_gt_agg
+            obj_sdf_gt = obj_sdf_gt_agg
 
         tool_loss = F.smooth_l1_loss(tool_pred, tool_sdf_gt)
         obj_loss = F.smooth_l1_loss(obj_pred, obj_sdf_gt)
         total = sdf_weight * (tool_loss + obj_loss)
-
-        return total, {
+        metrics = {
             "tool_sdf_loss": tool_loss.item(),
             "obj_sdf_loss": obj_loss.item(),
         }
 
+        # ---- SDF at INIT pose (optional) ----
+        has_init_sdf = (
+            tool_pc_init is not None
+            and init_tool_sdf_gt is not None
+            and init_obj_sdf_gt is not None
+        )
+        if has_init_sdf:
+            res_init = self.encoder.encode(tool_pc_init, obj_pc)
+            init_tool_tok, init_obj_tok = _split_tokens(res_init, P)
+
+            if self.head_mode == "point":
+                init_tool_pred = self._predict_point(
+                    tool_pc_init, init_tool_tok,
+                    res_init.tool_patch_idx, res_init.tool_patch_centers, self.tool_head,
+                )
+                init_obj_pred = self._predict_point(
+                    obj_pc, init_obj_tok,
+                    res_init.obj_patch_idx, res_init.obj_patch_centers, self.obj_head,
+                )
+            else:
+                init_tool_sdf_gt_agg = _aggregate_sdf(init_tool_sdf_gt, res_init.tool_patch_idx, self.patch_agg)
+                init_obj_sdf_gt_agg = _aggregate_sdf(init_obj_sdf_gt, res_init.obj_patch_idx, self.patch_agg)
+                init_tool_pred = self._predict_patch(init_tool_tok, self.tool_head)
+                init_obj_pred = self._predict_patch(init_obj_tok, self.obj_head)
+                init_tool_sdf_gt = init_tool_sdf_gt_agg
+                init_obj_sdf_gt = init_obj_sdf_gt_agg
+
+            init_tool_loss = F.smooth_l1_loss(init_tool_pred, init_tool_sdf_gt)
+            init_obj_loss = F.smooth_l1_loss(init_obj_pred, init_obj_sdf_gt)
+            total = total + sdf_weight * (init_tool_loss + init_obj_loss)
+            metrics["init_tool_sdf_loss"] = init_tool_loss.item()
+            metrics["init_obj_sdf_loss"] = init_obj_loss.item()
+
+        return total, metrics
+
 
 # --------------------------------------------------------------------------- #
-# JointModel - Combined SDF + Flow Matching + Movement training
+# DiffusionModel - Combined SDF + Flow Matching training
 # --------------------------------------------------------------------------- #
 
-class JointModel(nn.Module):
-    """Joint training of SDF prediction, pose flow matching, and movement prediction.
+class DiffusionModel(nn.Module):
+    """Joint training of SDF prediction + pose flow matching (no movement).
 
     Uses shared encoder with:
         - SDFSegmentor (local-only SDF prediction)
-        - MovementPredictionHead (per-point displacement, optional)
         - Velocity net: MLPVelocityNet (default) or TransformerForDiffusion
         - AuxRegressionHead (optional, for regression warmup)
 
     The velocity net (flow matching) uses ALL patch tokens as conditioning.
     SDF heads use only local patch features (no global_feat).
-    Movement head uses local patch features + cross-attn with tool delta pose.
     """
 
     def __init__(
@@ -471,20 +511,15 @@ class JointModel(nn.Module):
         use_mlp_head: bool = True,
         # Auxiliary regression
         aux_reg: bool = True,
-        # Movement prediction
-        movement_pred: bool = True,
-        movement_n_heads: int = 4,
         # Loss weights
         sdf_weight: float = 1.0,
         diffusion_weight: float = 1.0,
         aux_weight: float = 1.0,
-        movement_weight: float = 1.0,
     ):
         super().__init__()
         self.sdf_weight = sdf_weight
         self.diffusion_weight = diffusion_weight
         self.aux_weight = aux_weight
-        self.movement_weight = movement_weight
         self.use_mlp_head = use_mlp_head
 
         # Shared encoder
@@ -548,11 +583,6 @@ class JointModel(nn.Module):
         # Auxiliary regression head (optional)
         self.aux_reg_head = AuxRegressionHead(cond_dim=D) if aux_reg else None
 
-        # Movement prediction head (optional)
-        self.movement_head = MovementPredictionHead(
-            patch_dim=D, pose_dim=9, n_heads=movement_n_heads,
-        ) if movement_pred else None
-
         # Flow matching inference steps
         self.n_inference_steps = 20
 
@@ -588,13 +618,10 @@ class JointModel(nn.Module):
         tool_pc_init: torch.Tensor = None,
         delta_pose_gt: torch.Tensor = None,
         init_pose_gt: torch.Tensor = None,
-        # Movement prediction inputs
-        obj_point_displacement: torch.Tensor = None,
-        tool_delta_pose: torch.Tensor = None,
         # Phase control
         enable_flow: bool = True,
     ) -> Tuple[torch.Tensor, dict]:
-        """Joint loss computation."""
+        """Joint SDF + flow matching loss computation."""
         metrics = {}
         total_loss = torch.tensor(0.0, device=tool_pc.device)
 
@@ -664,21 +691,6 @@ class JointModel(nn.Module):
             total_loss = total_loss + self.sdf_weight * init_sdf_loss
             metrics["init_tool_sdf_loss"] = init_tool_loss.item()
             metrics["init_obj_sdf_loss"] = init_obj_loss.item()
-
-        # ---- Movement prediction task ----
-        if (self.movement_head is not None
-                and obj_point_displacement is not None
-                and tool_delta_pose is not None):
-            displacement_pred = self.movement_head(
-                obj_pc,
-                contact_obj_tok,
-                enc_result_contact.obj_patch_idx,
-                enc_result_contact.obj_patch_centers,
-                tool_delta_pose,
-            )  # (B, N, 3)
-            movement_loss = F.smooth_l1_loss(displacement_pred, obj_point_displacement)
-            total_loss = total_loss + self.movement_weight * movement_loss
-            metrics["movement_loss"] = movement_loss.item()
 
         # ---- Flow matching + auxiliary regression ----
         has_init = tool_pc_init is not None
@@ -770,6 +782,10 @@ class JointModel(nn.Module):
         return x.squeeze(1)  # (B, 9)
 
 
+# Backward compat alias
+JointModel = DiffusionModel
+
+
 # --------------------------------------------------------------------------- #
 # MovementModel — SDF + per-point movement prediction (no flow matching)
 # --------------------------------------------------------------------------- #
@@ -854,6 +870,10 @@ class MovementModel(nn.Module):
         obj_pc: torch.Tensor,
         tool_sdf_gt: torch.Tensor,
         obj_sdf_gt: torch.Tensor,
+        # SDF inputs at INIT pose (optional)
+        tool_pc_init: torch.Tensor = None,
+        init_tool_sdf_gt: torch.Tensor = None,
+        init_obj_sdf_gt: torch.Tensor = None,
         # Movement inputs
         tool_delta_action: torch.Tensor = None,
         obj_displacement_gt: torch.Tensor = None,
@@ -864,12 +884,12 @@ class MovementModel(nn.Module):
         metrics = {}
         total_loss = torch.tensor(0.0, device=tool_pc.device)
 
-        # ---- Encode ----
+        # ---- Encode at CONTACT pose ----
         enc = self.encoder.encode(tool_pc, obj_pc)
         P = self.encoder.num_patches
         tool_tok, obj_tok = _split_tokens(enc, P)
 
-        # ---- SDF task ----
+        # ---- SDF task at CONTACT pose ----
         if self.sdf_head.head_mode == "point":
             tool_pred = self.sdf_head._predict_point(
                 tool_pc, tool_tok,
@@ -882,10 +902,12 @@ class MovementModel(nn.Module):
                 self.sdf_head.obj_head,
             )
         else:
-            tool_sdf_gt = _aggregate_sdf(tool_sdf_gt, enc.tool_patch_idx, self.sdf_head.patch_agg)
-            obj_sdf_gt = _aggregate_sdf(obj_sdf_gt, enc.obj_patch_idx, self.sdf_head.patch_agg)
+            tool_sdf_gt_agg = _aggregate_sdf(tool_sdf_gt, enc.tool_patch_idx, self.sdf_head.patch_agg)
+            obj_sdf_gt_agg = _aggregate_sdf(obj_sdf_gt, enc.obj_patch_idx, self.sdf_head.patch_agg)
             tool_pred = self.sdf_head._predict_patch(tool_tok, self.sdf_head.tool_head)
             obj_pred = self.sdf_head._predict_patch(obj_tok, self.sdf_head.obj_head)
+            tool_sdf_gt = tool_sdf_gt_agg
+            obj_sdf_gt = obj_sdf_gt_agg
 
         tool_loss = F.smooth_l1_loss(tool_pred, tool_sdf_gt)
         obj_loss = F.smooth_l1_loss(obj_pred, obj_sdf_gt)
@@ -893,6 +915,42 @@ class MovementModel(nn.Module):
         total_loss = total_loss + self.sdf_weight * sdf_loss
         metrics["tool_sdf_loss"] = tool_loss.item()
         metrics["obj_sdf_loss"] = obj_loss.item()
+
+        # ---- SDF task at INIT pose (optional) ----
+        has_init_sdf = (
+            tool_pc_init is not None
+            and init_tool_sdf_gt is not None
+            and init_obj_sdf_gt is not None
+        )
+        if has_init_sdf:
+            enc_init = self.encoder.encode(tool_pc_init, obj_pc)
+            init_tool_tok, init_obj_tok = _split_tokens(enc_init, P)
+
+            if self.sdf_head.head_mode == "point":
+                init_tool_pred = self.sdf_head._predict_point(
+                    tool_pc_init, init_tool_tok,
+                    enc_init.tool_patch_idx, enc_init.tool_patch_centers,
+                    self.sdf_head.tool_head,
+                )
+                init_obj_pred = self.sdf_head._predict_point(
+                    obj_pc, init_obj_tok,
+                    enc_init.obj_patch_idx, enc_init.obj_patch_centers,
+                    self.sdf_head.obj_head,
+                )
+            else:
+                init_tool_sdf_gt_agg = _aggregate_sdf(init_tool_sdf_gt, enc_init.tool_patch_idx, self.sdf_head.patch_agg)
+                init_obj_sdf_gt_agg = _aggregate_sdf(init_obj_sdf_gt, enc_init.obj_patch_idx, self.sdf_head.patch_agg)
+                init_tool_pred = self.sdf_head._predict_patch(init_tool_tok, self.sdf_head.tool_head)
+                init_obj_pred = self.sdf_head._predict_patch(init_obj_tok, self.sdf_head.obj_head)
+                init_tool_sdf_gt = init_tool_sdf_gt_agg
+                init_obj_sdf_gt = init_obj_sdf_gt_agg
+
+            init_tool_loss = F.smooth_l1_loss(init_tool_pred, init_tool_sdf_gt)
+            init_obj_loss = F.smooth_l1_loss(init_obj_pred, init_obj_sdf_gt)
+            init_sdf_loss = init_tool_loss + init_obj_loss
+            total_loss = total_loss + self.sdf_weight * init_sdf_loss
+            metrics["init_tool_sdf_loss"] = init_tool_loss.item()
+            metrics["init_obj_sdf_loss"] = init_obj_loss.item()
 
         # ---- Movement prediction (local patch + cross-attn) ----
         if tool_delta_action is not None and obj_displacement_gt is not None:
@@ -906,6 +964,9 @@ class MovementModel(nn.Module):
             movement_loss = F.smooth_l1_loss(disp_pred, obj_displacement_gt)
             total_loss = total_loss + self.movement_weight * movement_loss
             metrics["movement_loss"] = movement_loss.item()
+            # Log average absolute displacement magnitude for diagnostics
+            metrics["movement_gt_mean_abs"] = obj_displacement_gt.abs().mean().item()
+            metrics["movement_gt_max_abs"] = obj_displacement_gt.abs().max().item()
 
         metrics["total"] = total_loss.item()
         return total_loss, metrics

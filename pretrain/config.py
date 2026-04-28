@@ -62,12 +62,12 @@ class TrainConfig:
 
     # Movement prediction
     movement_pred: bool = True
-    movement_n_heads: int = 4
+    movement_n_heads: int = 2
 
     # Loss weights
     sdf_weight: float = 1.0
     diffusion_weight: float = 1.0
-    movement_weight: float = 1.0
+    movement_weight: float = 10.0
 
 
 # Default config instance
