@@ -357,6 +357,11 @@ def main():
         cfg.data_dir, val_ratio=cfg.val_ratio, max_files=cfg.max_files,
     )
     if is_main():
+        skipped = train_ds.get_skipped_files() + val_ds.get_skipped_files()
+        if skipped:
+            print(f"⚠ Skipped {len(skipped)} corrupted files:")
+            for f in skipped:
+                print(f"    {f}")
         print(f"Train: {len(train_ds)}  Val: {len(val_ds)}  GPUs: {world_size}")
         print(f"Config: task={cfg.task}, head_mode={cfg.head_mode}, "
               f"patch_agg={cfg.patch_agg}, diffusion={cfg.diffusion}")

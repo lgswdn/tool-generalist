@@ -24,6 +24,7 @@ the dense supervision signal for mutual tool↔object encoder training.
 from __future__ import annotations
 
 import random
+import warnings
 from pathlib import Path
 from typing import List, Tuple
 
@@ -66,16 +67,26 @@ class ContactDataset(Dataset):
         # Expand: (pt_file, config_index) pairs
         self._index: List[Tuple[str, int]] = []
         self._pt_cache: dict = {}
+        self._skipped_files: List[str] = []  # Track corrupted files
 
         for path in pt_files:
-            data = torch.load(path, map_location="cpu", weights_only=False)
-            n = data["tool_translations"].shape[0]
-            for i in range(n):
-                self._index.append((path, i))
-            self._pt_cache[path] = data
+            try:
+                data = torch.load(path, map_location="cpu", weights_only=False)
+                n = data["tool_translations"].shape[0]
+                for i in range(n):
+                    self._index.append((path, i))
+                self._pt_cache[path] = data
+            except (RuntimeError, IOError, OSError) as e:
+                # Corrupted or unreadable .pt file — skip with warning
+                warnings.warn(f"Skipping corrupted file {path}: {e}")
+                self._skipped_files.append(path)
 
     def __len__(self) -> int:
         return len(self._index)
+
+    def get_skipped_files(self) -> List[str]:
+        """Return list of corrupted files that were skipped during initialization."""
+        return self._skipped_files
 
     def __getitem__(self, idx: int):
         pt_path, cfg_i = self._index[idx]
