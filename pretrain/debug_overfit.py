@@ -351,15 +351,20 @@ def run_full_overfit(model, device, cfg, args):
                 pos_bias = m.cond_pos_proj(torch.cat([tc, oc], -1))
                 cond = cond + pos_bias.unsqueeze(1)
 
-            # ---- Diffusion forward ----
+            # ---- Flow matching forward ----
             in_warmup = (args.warmup_reg > 0 and epoch < args.warmup_reg)
             if not args.reg_only and not in_warmup:
-                noise = torch.randn_like(clean_data)
-                timesteps = torch.randint(0, m.noise_scheduler.config.num_train_timesteps,
-                                          (B,), device=device, dtype=torch.long)
-                noisy_data = m.noise_scheduler.add_noise(clean_data, noise, timesteps)
-                noise_pred = predictor(sample=noisy_data, timestep=timesteps, cond=cond)
-                diff_loss = F.mse_loss(noise_pred, noise)
+                eps = torch.randn_like(clean_data)
+                # Logit-normal time sampling (SD3 recipe)
+                sigma_min = 1e-4
+                u = torch.randn(B, device=device) * 0.5
+                t = torch.sigmoid(u)
+                t = t * (1.0 - sigma_min) + sigma_min
+                t_expand = t[:, None, None]
+                x_t = (1.0 - t_expand) * clean_data + t_expand * eps
+                v_target = eps - clean_data
+                v_pred = predictor(sample=x_t, timestep=t, cond=cond)
+                diff_loss = F.mse_loss(v_pred, v_target)
             else:
                 diff_loss = torch.tensor(0.0, device=device)
 
@@ -494,15 +499,9 @@ def main():
     params_total = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"\nModel params: {params_total:,}")
 
-    # Override diffusion timesteps
+    # --diff-steps is not applicable for flow matching (continuous t)
     if args.diff_steps > 0:
-        from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
-        model.noise_scheduler = DDPMScheduler(
-            num_train_timesteps=args.diff_steps,
-            beta_schedule='squaredcos_cap_v2',
-            clip_sample=True,
-        )
-        print(f"  Overrode diffusion timesteps: {args.diff_steps}")
+        print(f"  Note: --diff-steps ignored (flow matching uses continuous t)")
 
     if args.full:
         run_full_overfit(model, device, cfg, args)

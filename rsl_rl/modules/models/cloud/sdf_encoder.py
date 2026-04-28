@@ -1,7 +1,7 @@
 """sdf_encoder.py — Joint ViT Point Cloud Encoder (geometry pretraining + RL backbone).
 
 Designed to replace ICPNet in the SDF segmentation pretraining pipeline and to serve
-as the geometry backbone in the downstream RL policy (ActorCriticMultiICP-style).
+as the geometry backbone in the downstream RL policy (ActorCriticMomentum-style).
 
 Architecture
 ────────────
@@ -15,13 +15,14 @@ Architecture
   5. Type embedding        →  add learnable (tool=0 / object=1) per-patch embedding
   6. CLS token prepended   →  [B, 1+2P, D]
   7. Joint ViT             →  self-attn over all tokens (implicit cross-stream reasoning)
-  8. Split outputs:
-       global_feat  = CLS token [B, D]
-       tool_tokens  = first P tokens [B, P, D]
-       obj_tokens   = last  P tokens [B, P, D]
+  8. Strip CLS token       →  fused_tokens [B, 2P, D] (no global_feat returned)
 
-For RL use: freeze the encoder, consume {global_feat, tool_tokens, obj_tokens} in the
+Token ordering after ViT: [tool_patches (P), obj_patches (P)]
+First P tokens are tool patches, last P tokens are object patches.
+
+For RL use: freeze the encoder, consume fused_tokens (all patch tokens) in the
 actor-critic's feature-fusion stage (e.g. SD-Cross attention with robot state).
+Cross-attention fusion happens AFTER the encoder, not by extracting global_feat.
 
 Public API
 ──────────
@@ -86,9 +87,7 @@ class SDFEncoderCfg:
 class SDFEncodeResult(NamedTuple):
     """Output of SDFPointCloudEncoder.encode()."""
 
-    tool_tokens:  torch.Tensor   # (B, P, D) — tool patch tokens after joint ViT
-    obj_tokens:   torch.Tensor   # (B, P, D) — object patch tokens after joint ViT
-    global_feat:  torch.Tensor   # (B, D)    — CLS token (joint scene summary)
+    fused_tokens: torch.Tensor   # (B, 2P, D) — all patch tokens after joint ViT (no CLS)
     tool_patch_idx: torch.Tensor # (B, P, K) — point indices into tool_pc
     obj_patch_idx:  torch.Tensor # (B, P, K) — point indices into obj_pc
 
@@ -342,24 +341,15 @@ class SDFPointCloudEncoder(nn.Module):
             x = blk(x)
         x = self.norm(x)
 
-        # 8. Split
-        if self.cls_token is not None:
-            global_feat = x[:, 0,     :]            # (B, D)
-            tool_tokens = x[:, 1:1+P, :]            # (B, P, D)
-            obj_tokens  = x[:, 1+P:,  :]            # (B, P, D)
-        else:
-            global_feat = x.mean(dim=1)             # (B, D) — mean-pool fallback
-            tool_tokens = x[:, :P, :]
-            obj_tokens  = x[:, P:, :]
+        # 8. Strip CLS token if present (like momentum encoder)
+        fused_tokens = x[:, 1:, :] if self.cls_token is not None else x  # (B, 2P, D)
 
         # Patch indices split (subtract offset for obj so they're w.r.t. obj_pc)
         tool_patch_idx = patch_idx[:, :P, :]        # (B, P, K) — into tool_pc
         obj_patch_idx  = patch_idx[:, P:, :] - N    # (B, P, K) — into obj_pc
 
         return SDFEncodeResult(
-            tool_tokens=tool_tokens,
-            obj_tokens=obj_tokens,
-            global_feat=global_feat,
+            fused_tokens=fused_tokens,
             tool_patch_idx=tool_patch_idx,
             obj_patch_idx=obj_patch_idx,
         )

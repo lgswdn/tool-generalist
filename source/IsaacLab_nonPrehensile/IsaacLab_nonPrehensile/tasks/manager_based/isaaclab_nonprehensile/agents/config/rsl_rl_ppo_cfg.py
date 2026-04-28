@@ -208,7 +208,7 @@ class SDFActorCriticCfg:
     vit_heads: int = 4
 
     # Encoder weights (pretrained from SDF pretraining)
-    encoder_weights_path: str | None = "/mnt/home/zhengyixin/tool-generalist/pretrain/checkpoints_fixed_sdf/best.pt"
+    encoder_weights_path: str | None = "/mnt/project/world_model/tool_generalist/model/encoder/teardrop_sdf_patch/best.pt"
     freeze_encoder: bool = True
 
     # Network architecture

@@ -106,8 +106,16 @@ class ContactDataset(Dataset):
             tool_pc_init = P_tool @ R_tool_init.T + t_tool_init  # (P, 3)
 
         # ---- SDF arrays (per-config) -----------------------------------------
+        # SDF at contact pose
         tool_pts_sdf = data["tool_pts_sdf"][cfg_i]  # (P,)  signed
         obj_pts_sdf  = data["obj_pts_sdf"][cfg_i]   # (Q,)  signed
+
+        # SDF at initial pose (if available)
+        init_tool_pts_sdf = None
+        init_obj_pts_sdf = None
+        if "init_tool_pts_sdf" in data and "init_obj_pts_sdf" in data:
+            init_tool_pts_sdf = data["init_tool_pts_sdf"][cfg_i]  # (P,)
+            init_obj_pts_sdf = data["init_obj_pts_sdf"][cfg_i]   # (Q,)
 
         # ---- Contact geometry (sparse) ---------------------------------------
         # Use world-frame contacts (new key name)
@@ -132,11 +140,10 @@ class ContactDataset(Dataset):
             delta_R = contact_R @ init_R.T  # (3, 3)
             delta_R_6d = delta_R[:, :2].reshape(6)  # (6,)
 
-            # Normalize to unit variance (translation std=0.13, rotation std=0.58)
-            delta_t_norm = delta_t / 0.13
-            delta_R_6d_norm = delta_R_6d / 0.58
+            delta_t_norm = delta_t / 0.1287
+            delta_R_6d_norm = delta_R_6d / 0.5773
 
-            # Full normalized delta pose (9D)
+            # Full delta pose (9D) 
             delta_pose = torch.cat([delta_t_norm, delta_R_6d_norm], dim=0)  # (9,)
 
         # ---- Init pose (9D: translation + 6D rotation) ----
@@ -160,9 +167,12 @@ class ContactDataset(Dataset):
             # Canonical clouds (pose-invariant geometry)
             "tool_pts_canonical":  P_tool.float(),           # (P, 3)
             "obj_pts_canonical":   P_obj.float(),            # (Q, 3)
-            # Dense SDF supervision
+            # Dense SDF supervision at contact pose
             "tool_pts_sdf":        tool_pts_sdf.float(),     # (P,)
             "obj_pts_sdf":         obj_pts_sdf.float(),      # (Q,)
+            # Dense SDF supervision at initial pose (optional)
+            "init_tool_pts_sdf":   init_tool_pts_sdf.float() if init_tool_pts_sdf is not None else None,  # (P,)
+            "init_obj_pts_sdf":    init_obj_pts_sdf.float() if init_obj_pts_sdf is not None else None,  # (Q,)
             # Sparse contact geometry
             "contact_pts":         contact_pts.float(),      # (5, 3)
             "contact_normals":     contact_normals.float(),  # (5, 3)

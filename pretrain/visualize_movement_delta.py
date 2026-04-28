@@ -105,11 +105,18 @@ def apply_object_pose(mesh: trimesh.Trimesh, R_obj: np.ndarray, z_shift: float) 
 def apply_delta_to_object(
     mesh: trimesh.Trimesh,
     delta_R: np.ndarray,     # (3, 3) ΔO rotation
-    delta_t: np.ndarray,     # (3,)   ΔO translation
+    delta_t: np.ndarray,     # (3,)   ΔO translation (computed from rotation)
     pivot: np.ndarray,       # (3,)   pivot point (P_anchor_new)
 ) -> trimesh.Trimesh:
-    """Apply SE(3) delta to object mesh, pivoting around anchor point."""
+    """Apply SE(3) delta to object mesh, pivoting around anchor point.
+
+    The transform is: obj_new = delta_R @ (obj - pivot) + pivot + delta_t
+
+    This matches gen_movement_delta.py where delta_t is computed analytically:
+        delta_t = -delta_R @ (contact_pts_original - pivot)
+    """
     m = mesh.copy()
+    # Apply rotation around pivot, then add translation
     m.vertices = (m.vertices - pivot) @ delta_R.T + pivot + delta_t
     return m
 
@@ -280,9 +287,9 @@ def main():
     )
     parser.add_argument("--input", type=str, help="Single .pt file")
     parser.add_argument("--input-dir", type=str, help="Directory of .pt files")
-    parser.add_argument("--num-samples", type=int, default=3,
+    parser.add_argument("--num-samples", type=int, default=10,
                         help="Number of random samples to visualise (default: 3)")
-    parser.add_argument("--save", type=str, default=None,
+    parser.add_argument("--save", type=str, default="movement.png",
                         help="Save figure to path instead of interactive display")
     parser.add_argument("--seed", type=int, default=None,
                         help="Random seed for sample selection")
@@ -466,10 +473,14 @@ def main():
             fig.add_subplot(n_rows, 4, row * 4 + 4, projection="3d"),
         ]
 
+        # Compute rotation angles
+        delta_obj_rot_angle = rotation_angle(delta_obj_R) * 180 / np.pi  # in degrees
+        delta_tool_rot_angle = rotation_angle(delta_tool_R) * 180 / np.pi
+
         title = (
             f"{Path(tool_path).stem}  ×  {Path(obj_path).stem}\n"
-            f"|Δt_T|={np.linalg.norm(delta_tool_t)*1000:.1f}mm   "
-            f"|Δt_O|={np.linalg.norm(delta_obj_t)*1000:.1f}mm"
+            f"|Δt_T|={np.linalg.norm(delta_tool_t)*1000:.1f}mm  ΔR_T={delta_tool_rot_angle:.1f}°   "
+            f"|Δt_O|={np.linalg.norm(delta_obj_t)*1000:.1f}mm  ΔR_O={delta_obj_rot_angle:.1f}°"
         )
 
         render_one_sample(
@@ -480,8 +491,8 @@ def main():
             delta_obj_R, delta_obj_t,
             anchor_new, title=title,
         )
-        print(f"  |ΔT| = {np.linalg.norm(delta_tool_t)*1000:.1f} mm,  "
-              f"|ΔO| = {np.linalg.norm(delta_obj_t)*1000:.1f} mm")
+        print(f"  |ΔT| = {np.linalg.norm(delta_tool_t)*1000:.1f} mm, ΔR_T = {delta_tool_rot_angle:.1f}°  "
+              f"|ΔO| = {np.linalg.norm(delta_obj_t)*1000:.1f} mm, ΔR_O = {delta_obj_rot_angle:.1f}°")
 
     plt.tight_layout(rect=[0, 0, 1, 0.97])
 

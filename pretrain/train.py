@@ -26,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import collections
 import os
 import sys
 import time
@@ -51,7 +52,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from config import TrainConfig, DEFAULT_CONFIG
 from dataset import make_split
-from model import SDFSegmentor, JointModel
+from model import SDFSegmentor, JointModel, MovementModel
 
 
 # --------------------------------------------------------------------------- #
@@ -104,18 +105,15 @@ def run_epoch(
     optimizer,
     device:    torch.device,
     train:     bool,
-    warmup:    bool = False,
     scaler:    torch.cuda.amp.GradScaler = None,
+    enable_flow: bool = True,
 ) -> tuple[float, dict]:
-    """Run one epoch of training or validation.
-
-    Args:
-        warmup: If True, skip diffusion loss (regression-only phase).
-    """
+    """Run one epoch of training or validation."""
     model.train(train)
     total_loss = 0.0
     agg: dict[str, float] = {}
     n = 0
+    _debug_history = collections.deque(maxlen=10)  # last 10 batches for NaN diagnosis
     ctx = torch.enable_grad() if train else torch.no_grad()
 
     with ctx:
@@ -124,6 +122,27 @@ def run_epoch(
             obj_pc  = batch["obj_pc"].to(device)
             tool_sdf_gt = batch["tool_pts_sdf"].to(device)
             obj_sdf_gt  = batch["obj_pts_sdf"].to(device)
+
+            # Initial pose SDF (optional)
+            init_tool_sdf_gt = batch.get("init_tool_pts_sdf")
+            init_obj_sdf_gt = batch.get("init_obj_pts_sdf")
+
+            if init_tool_sdf_gt is not None:
+                if isinstance(init_tool_sdf_gt, list):
+                    if any(s is None for s in init_tool_sdf_gt):
+                        init_tool_sdf_gt = None
+                    else:
+                        init_tool_sdf_gt = torch.stack(init_tool_sdf_gt).to(device)
+                else:
+                    init_tool_sdf_gt = init_tool_sdf_gt.to(device)
+            if init_obj_sdf_gt is not None:
+                if isinstance(init_obj_sdf_gt, list):
+                    if any(s is None for s in init_obj_sdf_gt):
+                        init_obj_sdf_gt = None
+                    else:
+                        init_obj_sdf_gt = torch.stack(init_obj_sdf_gt).to(device)
+                else:
+                    init_obj_sdf_gt = init_obj_sdf_gt.to(device)
 
             # Diffusion inputs (optional)
             tool_pc_init = batch.get("tool_pc_init")
@@ -155,33 +174,132 @@ def run_epoch(
                 else:
                     init_pose = init_pose.to(device)
 
-            m = model.module if isinstance(model, DDP) else model
+            # Movement inputs (optional)
+            tool_delta_action = batch.get("tool_delta_action")
+            obj_displacement  = batch.get("obj_displacement")
 
-            # Forward + loss
+            if tool_delta_action is not None:
+                if isinstance(tool_delta_action, list):
+                    if any(a is None for a in tool_delta_action):
+                        tool_delta_action = None
+                    else:
+                        tool_delta_action = torch.stack(tool_delta_action).to(device)
+                else:
+                    tool_delta_action = tool_delta_action.to(device)
+            if obj_displacement is not None:
+                if isinstance(obj_displacement, list):
+                    if any(d is None for d in obj_displacement):
+                        obj_displacement = None
+                    else:
+                        obj_displacement = torch.stack(obj_displacement).to(device)
+                else:
+                    obj_displacement = obj_displacement.to(device)
+
+            # Forward — call model() (not model.module.loss()) so DDP hooks fire
+            # Build kwargs based on model type
+            fwd_kwargs = {}
+            raw_model = model.module if isinstance(model, DDP) else model
+            if isinstance(raw_model, MovementModel):
+                fwd_kwargs["tool_delta_action"] = tool_delta_action
+                fwd_kwargs["obj_displacement_gt"] = obj_displacement
+            elif isinstance(raw_model, JointModel):
+                fwd_kwargs["tool_pc_init"] = tool_pc_init
+                fwd_kwargs["delta_pose_gt"] = delta_pose
+                fwd_kwargs["init_pose_gt"] = init_pose
+                fwd_kwargs["enable_flow"] = enable_flow
+                fwd_kwargs["init_tool_sdf_gt"] = init_tool_sdf_gt
+                fwd_kwargs["init_obj_sdf_gt"] = init_obj_sdf_gt
+
             if scaler is not None and train:
                 with torch.cuda.amp.autocast():
-                    loss, metrics = m.loss(
+                    loss, metrics = model(
                         tool_pc, obj_pc, tool_sdf_gt, obj_sdf_gt,
-                        tool_pc_init=tool_pc_init, delta_pose_gt=delta_pose,
-                        init_pose_gt=init_pose, warmup=warmup,
+                        **fwd_kwargs,
                     )
-                optimizer.zero_grad()
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                scaler.step(optimizer)
-                scaler.update()
             else:
-                loss, metrics = m.loss(
+                loss, metrics = model(
                     tool_pc, obj_pc, tool_sdf_gt, obj_sdf_gt,
-                    tool_pc_init=tool_pc_init, delta_pose_gt=delta_pose,
-                    init_pose_gt=init_pose, warmup=warmup,
+                    **fwd_kwargs,
                 )
-                if train:
-                    optimizer.zero_grad()
+
+            # NaN guard: dump context and STOP on first NaN
+            if torch.isnan(loss) or torch.isinf(loss):
+                if is_main():
+                    print(f"\n{'='*60}")
+                    print(f"⚠ FIRST NaN at batch {n} — dumping last {len(_debug_history)} good batches:")
+                    for entry in _debug_history:
+                        print(f"  {entry}")
+                    print(f"{'='*60}")
+                    print(f"NaN batch data stats:")
+                    if delta_pose is not None:
+                        print(f"  delta_pose: nan={torch.isnan(delta_pose).sum()} "
+                              f"inf={torch.isinf(delta_pose).sum()} "
+                              f"abs_max={delta_pose.abs().max():.4f} "
+                              f"mean={delta_pose.mean():.4f} std={delta_pose.std():.4f}")
+                    if tool_pc_init is not None:
+                        print(f"  tool_pc_init: nan={torch.isnan(tool_pc_init).sum()} "
+                              f"abs_max={tool_pc_init.abs().max():.4f}")
+                    print(f"  tool_pc: abs_max={tool_pc.abs().max():.4f}")
+                    print(f"  obj_pc:  abs_max={obj_pc.abs().max():.4f}")
+                    # Which params went NaN?
+                    nan_params = []
+                    ok_params_max = []
+                    for pname, p in m.named_parameters():
+                        if torch.isnan(p).any() or torch.isinf(p).any():
+                            nan_params.append(pname)
+                        elif p.requires_grad:
+                            ok_params_max.append((pname, p.abs().max().item()))
+                    if nan_params:
+                        print(f"  NaN params ({len(nan_params)}):")
+                        for pn in nan_params:
+                            print(f"    {pn}")
+                    # Show top-5 largest OK params
+                    ok_params_max.sort(key=lambda x: -x[1])
+                    print(f"  Top-5 largest OK param abs values:")
+                    for pn, v in ok_params_max[:5]:
+                        print(f"    {pn}: {v:.4f}")
+                raise RuntimeError("NaN detected — stopping for diagnosis")
+
+            # Backward + step
+            if train:
+                optimizer.zero_grad()
+                if scaler is not None:
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                    # Sanitize: zero out any NaN/Inf per-parameter grads
+                    for p in model.parameters():
+                        if p.grad is not None and not torch.isfinite(p.grad).all():
+                            p.grad.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
                     loss.backward()
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    # Sanitize: zero out any NaN/Inf per-parameter grads
+                    # instead of skipping the entire step (which causes
+                    # cascading failures on large datasets).
+                    n_sanitized = 0
+                    for p in model.parameters():
+                        if p.grad is not None and not torch.isfinite(p.grad).all():
+                            p.grad.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
+                            n_sanitized += 1
+                    if n_sanitized > 0 and is_main():
+                        print(f"  ⚠ sanitized {n_sanitized} param grads at batch {n}")
+                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
                     optimizer.step()
+            else:
+                grad_norm = 0.0
+
+            # Record history (keep last 10 batches for NaN diagnosis)
+            if is_main():
+                dp_max = delta_pose.abs().max().item() if delta_pose is not None else 0
+                entry = (f"batch={n:03d} loss={loss.item():.4f} "
+                         f"flow={metrics.get('flow_loss', 0):.4f} "
+                         f"sdf_t={metrics.get('tool_sdf_loss', 0):.4f} "
+                         f"sdf_o={metrics.get('obj_sdf_loss', 0):.4f} "
+                         f"aux={metrics.get('aux_loss', 0):.4f} "
+                         f"grad={grad_norm:.2f} dp_max={dp_max:.3f}")
+                _debug_history.append(entry)
 
             total_loss += loss.item()
             for k, v in metrics.items():
@@ -199,6 +317,8 @@ def run_epoch(
 def main():
     parser = argparse.ArgumentParser(description="Train SDF + Diffusion encoder")
     parser.add_argument("--data-dir", required=True, help="Data directory with .pt files")
+    parser.add_argument("--out-dir", type=str, default="",
+                        help="Override checkpoint output directory")
     parser.add_argument("--config", default="config.py", help="Path to custom config.py")
     parser.add_argument("--resume", default="", help="Checkpoint to resume from")
     parser.add_argument("--wandb", action="store_true", help="Enable Wandb logging")
@@ -209,8 +329,19 @@ def main():
                         help="Override learning rate (0=use config)")
     parser.add_argument("--epochs", type=int, default=0,
                         help="Override epochs (0=use config)")
+    parser.add_argument("--total-steps", type=int, default=0,
+                        help="Fixed step budget (overrides epochs; 0=use epochs)")
     parser.add_argument("--warmup-epochs", type=int, default=-1,
                         help="Override warmup epochs (-1=use config)")
+    parser.add_argument("--task", type=str, default="",
+                        choices=["", "joint", "movement", "sdf"],
+                        help="Task: 'joint' (SDF+flow), 'movement' (SDF+movement), 'sdf' (SDF-only)")
+    parser.add_argument("--head-mode", type=str, default="",
+                        choices=["", "point", "patch"],
+                        help="SDF head mode (default from config)")
+    parser.add_argument("--patch-agg", type=str, default="",
+                        choices=["", "mean", "min", "max"],
+                        help="Patch aggregation for SDF (default from config)")
     args = parser.parse_args()
 
     # Load config
@@ -225,6 +356,8 @@ def main():
 
     # Override from CLI
     cfg.data_dir = args.data_dir
+    if args.out_dir:
+        cfg.out_dir = args.out_dir
     if args.resume:
         cfg.resume = args.resume
     if args.wandb:
@@ -237,16 +370,28 @@ def main():
         cfg.lr = args.lr
     if args.epochs > 0:
         cfg.epochs = args.epochs
+    if args.total_steps > 0:
+        cfg.total_steps = args.total_steps
     if args.warmup_epochs >= 0:
         cfg.warmup_epochs = args.warmup_epochs
+    if args.task:
+        cfg.task = args.task
+    if args.head_mode:
+        cfg.head_mode = args.head_mode
+    if args.patch_agg:
+        cfg.patch_agg = args.patch_agg
+    # task shortcut: 'sdf' disables diffusion
+    if cfg.task == "sdf":
+        cfg.diffusion = False
 
     rank, local_rank = setup_ddp()
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
     world_size = int(os.environ.get("WORLD_SIZE", 1))
 
-    # Linear LR scaling: keep effective LR/sample constant across GPU counts
-    effective_lr = cfg.lr * world_size
-    effective_batch = cfg.batch_size * world_size
+    # No LR scaling needed: batch_size is the GLOBAL batch size,
+    # split evenly across GPUs so each step is identical to 1-GPU training.
+    effective_lr = cfg.lr
+    per_gpu_batch = cfg.batch_size // world_size
 
     # ---- Data ----
     train_ds, val_ds = make_split(
@@ -254,26 +399,40 @@ def main():
     )
     if is_main():
         print(f"Train: {len(train_ds)}  Val: {len(val_ds)}  GPUs: {world_size}")
-        print(f"Config: diffusion={cfg.diffusion}, mlp_head={cfg.use_mlp_head}, "
-              f"aux_reg={cfg.aux_reg}, warmup={cfg.warmup_epochs}ep")
-        print(f"        amp={cfg.amp}, batch/gpu={cfg.batch_size}, "
-              f"effective_batch={effective_batch}, "
-              f"base_lr={cfg.lr:.1e}, effective_lr={effective_lr:.1e}, "
-              f"epochs={cfg.epochs}")
+        print(f"Config: task={cfg.task}, head_mode={cfg.head_mode}, "
+              f"patch_agg={cfg.patch_agg}, diffusion={cfg.diffusion}")
+        print(f"        amp={cfg.amp}, global_batch={cfg.batch_size}, "
+              f"per_gpu_batch={per_gpu_batch}, "
+              f"lr={effective_lr:.1e}, epochs={cfg.epochs}")
 
     train_sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
     train_loader = DataLoader(
-        train_ds, batch_size=cfg.batch_size,
+        train_ds, batch_size=per_gpu_batch,
         sampler=train_sampler, shuffle=(train_sampler is None),
         num_workers=cfg.num_workers, pin_memory=True,
     )
     val_loader = DataLoader(
-        val_ds, batch_size=cfg.batch_size,
+        val_ds, batch_size=per_gpu_batch,
         shuffle=False, num_workers=cfg.num_workers, pin_memory=True,
     )
 
     # ---- Model ----
-    if cfg.diffusion:
+    if cfg.task == "movement":
+        model = MovementModel(
+            head_mode=cfg.head_mode,
+            patch_agg=cfg.patch_agg,
+            head_hidden=cfg.head_hidden,
+            num_pts=cfg.num_pts,
+            patch_size=cfg.patch_size,
+            encoder_channel=cfg.encoder_channel,
+            vit_depth=cfg.vit_depth,
+            vit_heads=cfg.vit_heads,
+            freeze_encoder=cfg.freeze_encoder,
+            sdf_weight=cfg.sdf_weight,
+            movement_weight=cfg.movement_weight,
+        ).to(device)
+        model_name = "MovementModel"
+    elif cfg.diffusion:
         model = JointModel(
             head_mode=cfg.head_mode,
             patch_agg=cfg.patch_agg,
@@ -327,7 +486,17 @@ def main():
         filter(lambda p: p.requires_grad, model.parameters()),
         lr=effective_lr, weight_decay=1e-4,
     )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.epochs)
+    # Per-epoch cosine LR decay.
+    # When total_steps is set, epochs is derived so training budget
+    # auto-adjusts to dataset size.
+    steps_per_epoch = len(train_loader)
+    if cfg.total_steps > 0:
+        cfg.epochs = (cfg.total_steps + steps_per_epoch - 1) // steps_per_epoch  # ceil
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=cfg.epochs, eta_min=1e-6,
+    )
+    if is_main():
+        print(f"        steps/epoch={steps_per_epoch}, epochs={cfg.epochs}")
 
     scaler = torch.cuda.amp.GradScaler() if cfg.amp else None
     if cfg.amp and is_main():
@@ -350,13 +519,13 @@ def main():
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
 
-        # Determine phase
-        in_warmup = cfg.diffusion and epoch < cfg.warmup_epochs
+        # 2-phase protocol: warmup (SDF+aux only) → joint (SDF+aux+flow)
+        enable_flow = (epoch >= cfg.warmup_epochs)
 
         t0 = time.time()
         train_loss, train_m = run_epoch(
             model, train_loader, optimizer, device,
-            train=True, warmup=in_warmup, scaler=scaler,
+            train=True, scaler=scaler, enable_flow=enable_flow,
         )
 
         # Validate every 20 epochs
@@ -365,17 +534,17 @@ def main():
         if do_val:
             val_loss, val_m = run_epoch(
                 model, val_loader, optimizer, device,
-                train=False, warmup=in_warmup, scaler=scaler,
+                train=False, scaler=scaler, enable_flow=enable_flow,
             )
         scheduler.step()
 
         if is_main():
             dt = time.time() - t0
-            lr = scheduler.get_last_lr()[0]
-            phase = "[WARMUP]" if in_warmup else "[JOINT] "
+            lr = optimizer.param_groups[0]['lr']
+            phase = "[WARMUP]" if not enable_flow else "[JOINT] "
 
             # Print metrics
-            metric_keys = ["tool_sdf_loss", "obj_sdf_loss", "diffusion_loss", "aux_loss"]
+            metric_keys = ["tool_sdf_loss", "obj_sdf_loss", "init_tool_sdf_loss", "init_obj_sdf_loss", "flow_loss", "aux_loss", "movement_loss"]
             if do_val:
                 print_str = f"{phase} Epoch {epoch+1:04d}/{cfg.epochs}  train={train_loss:.4f}  val={val_loss:.4f}  "
                 for k in metric_keys:
@@ -391,16 +560,10 @@ def main():
             print_str += f"lr={lr:.2e}  t={dt:.1f}s"
             print(print_str)
 
-            # Log warmup→joint transition
-            if epoch == cfg.warmup_epochs and cfg.warmup_epochs > 0:
-                print(f"\n{'='*60}")
-                print(f">>> WARMUP COMPLETE — switching to joint training")
-                print(f"{'='*60}\n")
-
             # Wandb
             if cfg.wandb and HAS_WANDB:
                 log_dict = {"epoch": epoch+1, "train/loss": train_loss, "lr": lr,
-                            "time": dt, "phase": 0 if in_warmup else 1}
+                            "time": dt}
                 if do_val:
                     log_dict["val/loss"] = val_loss
                     for k, v in val_m.items():
