@@ -37,6 +37,11 @@ from torch.utils.data import Dataset
 NUM_TOOL_PTS = 512  # matches ICPNet expected input size
 NUM_OBJ_PTS  = 512
 
+# Normalization scale for per-point displacement targets (in metres).
+# Raw displacements are ~4mm avg, ~3cm max → dividing by 0.01 gives ~0.4 avg, ~3.0 max,
+# matching the dynamic range of SDF targets and preventing trivial zero-prediction.
+DISPLACEMENT_NORM_SCALE = 0.01  # 1 cm
+
 
 # --------------------------------------------------------------------------- #
 # Dataset
@@ -179,6 +184,9 @@ class ContactDataset(Dataset):
                 # obj_new = delta_R_obj @ (obj_pc - pivot) + pivot + delta_t_obj
                 obj_pc_new = (obj_pc - pivot) @ delta_R_obj.T + pivot + delta_t_obj
                 obj_point_displacement = obj_pc_new - obj_pc         # (Q, 3)
+
+                # Normalize: raw displacements are ~4mm avg; scale to ~0.4 avg
+                obj_point_displacement = obj_point_displacement / DISPLACEMENT_NORM_SCALE
 
                 # Tool delta pose as 9D conditioning: trans(3) + rot6d(6)
                 delta_t_tool = data["delta_tool_translations"][cfg_i]  # (3,)
