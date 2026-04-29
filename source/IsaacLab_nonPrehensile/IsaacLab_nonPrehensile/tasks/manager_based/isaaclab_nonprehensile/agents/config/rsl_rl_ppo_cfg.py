@@ -208,7 +208,7 @@ class SDFActorCriticCfg:
     vit_heads: int = 4
 
     # Encoder weights (pretrained from SDF pretraining)
-    encoder_weights_path: str | None = "/mnt/project/world_model/tool_generalist/model/encoder/teardrop_sdf_patch/best.pt"
+    encoder_weights_path: str | None = "/path/to/best.pt"
     freeze_encoder: bool = True
 
     # StateDependentCrossFeatNet settings
@@ -270,3 +270,75 @@ class SDFPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         desired_kl=0.016,
         max_grad_norm=1.0,
     )
+
+
+# =============================================================================
+# SDF Variant Registry — experiment variants with shared encoder
+# =============================================================================
+# Each entry: "suffix" -> {policy overrides} or {"policy": {...}, "runner": {...}}
+# Registered as gym task "tool-sdf-<suffix>"
+#
+# Usage:
+#   python train.py --task tool-sdf-frozen-v0
+#   python train.py --task tool-sdf-learnable-query-v0
+#   python train.py --task tool-sdf-finetune-v0
+#
+# To add a new experiment, just add an entry here — no new classes needed.
+# =============================================================================
+
+SDF_VARIANTS: dict[str, dict] = {
+    "teardrop-point-v0": {
+        "policy": {
+            "encoder_weights_path": "/mnt/project/world_model/tool_generalist/model/encoder/teardrop_sdf_point/best.pt",
+        },
+        "runner": {
+            "experiment_name": "teardrop_sdf_point",
+        },
+    },
+    "teardrop-patch-v0": {
+        "policy": {
+            "encoder_weights_path": "/mnt/project/world_model/tool_generalist/model/encoder/teardrop_sdf_point/best.pt",
+        },
+        "runner": {
+            "experiment_name": "teardrop_sdf_patch",
+        },
+    },
+}
+
+
+def make_sdf_variant(suffix: str, overrides: dict):
+    """Create a (RunnerCfg class, gym_id) pair from overrides on the base SDF config.
+
+    ``overrides`` can be:
+      - A flat dict of SDFActorCriticCfg field overrides (shorthand)
+      - {"policy": {...}, "runner": {...}} for full control
+
+    Returns (RunnerCfgClass, gym_id_string).
+    """
+    policy_ov = overrides.get("policy", overrides if "runner" not in overrides else {})
+    runner_ov = overrides.get("runner", {})
+
+    # --- Build policy config ---
+    policy_cfg = SDFActorCriticCfg()
+    for k, v in policy_ov.items():
+        setattr(policy_cfg, k, v)
+
+    # --- Build runner config class (dynamic @configclass) ---
+    runner_attrs = {
+        "policy": policy_cfg,
+        "experiment_name": runner_ov.get(
+            "experiment_name", f"franka_sdf_{suffix.replace('-', '_')}"
+        ),
+    }
+    # Apply any other runner-level overrides
+    for k, v in runner_ov.items():
+        if k != "experiment_name":
+            runner_attrs[k] = v
+
+    cls_name = f"SDFPPORunnerCfg_{'_'.join(suffix.split('-'))}"
+    VariantRunnerCfg = configclass(
+        type(cls_name, (SDFPPORunnerCfg,), runner_attrs)
+    )
+
+    gym_id = f"tool-sdf-{suffix}"
+    return VariantRunnerCfg, gym_id

@@ -46,9 +46,9 @@ except ImportError:
 class Config:
     pull_distance_min: float = 0.01  # 1cm min pull away
     pull_distance_max: float = 0.05  # 5cm max pull away
-    perturbation_scale: float = 0.8  # spread around outward direction
+    perturbation_scale: float = 0.3  # spread around outward direction
     rot_angle_max_deg: float = 15.0  # max rotation perturbation
-    collision_threshold: float = 0.002  # max allowed penetration
+    collision_threshold: float = 0.001  # max allowed penetration
     device: str = "cuda:0"
     batch_size: int = 128
     seed: int = 42

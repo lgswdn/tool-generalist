@@ -186,38 +186,34 @@ class MovementPredictionHead(nn.Module):
 
     For each object surface point, predicts its displacement when the tool
     pushes. Uses only the point's OWN patch feature (local) plus the point's
-    relative coordinate within that patch, fused with tool delta pose via
-    cross-attention.
+    relative coordinate within that patch, concatenated with tool delta pose
+    and passed through an MLP.
 
     Architecture:
         query  = patch_token + rel_xyz_embed(point − patch_center)  (B, N, D)
-        kv     = tool_delta_pose_projected                          (B, 1, D)
-        fused  = cross_attn(query, kv, kv)                          (B, N, D)
-        output = MLP(fused) → displacement                          (B, N, 3)
+        pose   = tool_delta_pose_projected                          (B, D)
+        feat   = concat([query, pose])                              (B, N, 2D)
+        output = MLP(feat) → displacement                           (B, N, 3)
     """
 
-    def __init__(self, patch_dim: int = 128, pose_dim: int = 9, n_heads: int = 4):
+    def __init__(self, patch_dim: int = 128, pose_dim: int = 9,
+                 head_hidden: tuple[int, ...] = (128, 64)):
         super().__init__()
         self.patch_dim = patch_dim
 
         # Embed relative xyz to patch feature space
         self.xyz_embed = _make_mlp((3, patch_dim, patch_dim))
 
-        # Project tool delta pose to key/value space
+        # Project tool delta pose to feature space
         self.pose_proj = nn.Sequential(
             nn.Linear(pose_dim, patch_dim),
             nn.LayerNorm(patch_dim),
             nn.GELU(),
         )
 
-        # Cross-attention: query = per-point feature, kv = tool delta pose
-        self.cross_attn = nn.MultiheadAttention(
-            patch_dim, n_heads, batch_first=True,
-        )
-        self.cross_norm = nn.LayerNorm(patch_dim)
-
-        # Output MLP: fused feature → 3D displacement
-        self.head = _make_mlp((patch_dim, patch_dim // 2, 3))
+        # Output MLP: concat(query, pose) → 3D displacement
+        # Input is 2*D (query + pose), output is 3
+        self.head = _make_mlp((2 * patch_dim,) + head_hidden + (3,))
 
     def forward(
         self,
@@ -256,17 +252,13 @@ class MovementPredictionHead(nn.Module):
         # ---- 4. Per-point query = patch_token + rel_xyz_embed ----
         query = pt_patch + pt_rel_embed              # (B, N, D)
 
-        # ---- 5. Tool delta pose as key/value ----
-        kv = self.pose_proj(tool_delta_pose)         # (B, D)
-        kv = kv.unsqueeze(1)                         # (B, 1, D)
+        # ---- 5. Project tool delta pose and broadcast to all points ----
+        pose_feat = self.pose_proj(tool_delta_pose)  # (B, D)
+        pose_feat = pose_feat.unsqueeze(1).expand(B, N, D)  # (B, N, D)
 
-        # ---- 6. Cross-attention (all points attend to single tool pose token) ----
-        # query (B, N, D) attends to kv (B, 1, D) — efficient batched attention
-        fused, _ = self.cross_attn(query, kv, kv)    # (B, N, D)
-        fused = self.cross_norm(query + fused)        # residual + norm
-
-        # ---- 7. Predict displacement ----
-        return self.head(fused)                       # (B, N, 3)
+        # ---- 6. Concatenate and predict ----
+        feat = torch.cat([query, pose_feat], dim=-1)  # (B, N, 2D)
+        return self.head(feat)                        # (B, N, 3)
 
 
 # --------------------------------------------------------------------------- #
@@ -816,7 +808,7 @@ class MovementModel(nn.Module):
         vit_heads: int = 4,
         freeze_encoder: bool = False,
         # Movement head
-        movement_n_heads: int = 4,
+        movement_head_hidden: tuple[int, ...] = (128, 64),
         # Loss weights
         sdf_weight: float = 1.0,
         movement_weight: float = 1.0,
@@ -852,11 +844,11 @@ class MovementModel(nn.Module):
         del self.sdf_head.encoder
         object.__setattr__(self.sdf_head, 'encoder', self.encoder)
 
-        # Movement prediction head (local patch + cross-attn)
+        # Movement prediction head (MLP-based)
         self.movement_head = MovementPredictionHead(
             patch_dim=D,
             pose_dim=9,
-            n_heads=movement_n_heads,
+            head_hidden=movement_head_hidden,
         )
 
     def forward(self, *args, **kwargs):

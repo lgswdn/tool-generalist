@@ -156,8 +156,8 @@ class ContactDataset(Dataset):
             delta_R = contact_R @ init_R.T  # (3, 3)
             delta_R_6d = delta_R[:, :2].reshape(6)  # (6,)
 
-            delta_t_norm = delta_t / 0.1287
-            delta_R_6d_norm = delta_R_6d / 0.5773
+            delta_t_norm = delta_t / 0.0987
+            delta_R_6d_norm = delta_R_6d / 0.8757
 
             # Full delta pose (9D) 
             delta_pose = torch.cat([delta_t_norm, delta_R_6d_norm], dim=0)  # (9,)

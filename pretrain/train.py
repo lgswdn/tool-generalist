@@ -29,7 +29,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import collections
 import os
 import sys
 import time
@@ -99,18 +98,31 @@ def load_ckpt(path: str, model: torch.nn.Module, optimizer=None):
 
 
 # --------------------------------------------------------------------------- #
-# Safe-to-device helper
+# Custom collate: avoid default_collate's list-of-None overhead
 # --------------------------------------------------------------------------- #
 
+_OPTIONAL_KEYS = {
+    "tool_pc_init", "init_tool_pts_sdf", "init_obj_pts_sdf",
+    "delta_pose", "init_pose",
+    "obj_point_displacement", "tool_delta_pose",
+}
+
+def _collate_fn(batch: list[dict]) -> dict:
+    """Stack tensors; for optional keys where any sample is None, set to None."""
+    out = {}
+    for key in batch[0]:
+        vals = [b[key] for b in batch]
+        if key in _OPTIONAL_KEYS:
+            if vals[0] is None:  # fast path: if first is None, all are
+                out[key] = None
+                continue
+        out[key] = torch.stack(vals)
+    return out
+
+
 def _safe_to_device(val, device):
-    """Handle None, list-of-None, or tensor → device."""
-    if val is None:
-        return None
-    if isinstance(val, list):
-        if any(v is None for v in val):
-            return None
-        return torch.stack(val).to(device)
-    return val.to(device)
+    """Move tensor to device, pass None through."""
+    return val.to(device) if val is not None else None
 
 
 # --------------------------------------------------------------------------- #
@@ -131,7 +143,6 @@ def run_epoch(
     total_loss = 0.0
     agg: dict[str, float] = {}
     n = 0
-    _debug_history = collections.deque(maxlen=10)  # last 10 batches for NaN diagnosis
     ctx = torch.enable_grad() if train else torch.no_grad()
 
     with ctx:
@@ -192,9 +203,7 @@ def run_epoch(
             if torch.isnan(loss) or torch.isinf(loss):
                 if is_main():
                     print(f"\n{'='*60}")
-                    print(f"⚠ FIRST NaN at batch {n} — dumping last {len(_debug_history)} good batches:")
-                    for entry in _debug_history:
-                        print(f"  {entry}")
+                    print(f"⚠ FIRST NaN at batch {n}")
                     print(f"{'='*60}")
                     print(f"NaN batch data stats:")
                     if delta_pose is not None:
@@ -227,45 +236,17 @@ def run_epoch(
 
             # Backward + step
             if train:
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
                 if scaler is not None:
                     scaler.scale(loss).backward()
                     scaler.unscale_(optimizer)
-                    # Sanitize: zero out any NaN/Inf per-parameter grads
-                    for p in model.parameters():
-                        if p.grad is not None and not torch.isfinite(p.grad).all():
-                            p.grad.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
                     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
                     scaler.step(optimizer)
                     scaler.update()
                 else:
                     loss.backward()
-                    # Sanitize: zero out any NaN/Inf per-parameter grads
-                    n_sanitized = 0
-                    for p in model.parameters():
-                        if p.grad is not None and not torch.isfinite(p.grad).all():
-                            p.grad.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
-                            n_sanitized += 1
-                    if n_sanitized > 0 and is_main():
-                        print(f"  ⚠ sanitized {n_sanitized} param grads at batch {n}")
                     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
                     optimizer.step()
-            else:
-                grad_norm = 0.0
-
-            # Record history (keep last 10 batches for NaN diagnosis)
-            if is_main():
-                dp_max = delta_pose.abs().max().item() if delta_pose is not None else 0
-                mvmt_abs = metrics.get('movement_gt_mean_abs', 0)
-                entry = (f"batch={n:03d} loss={loss.item():.4f} "
-                         f"flow={metrics.get('flow_loss', 0):.4f} "
-                         f"sdf_t={metrics.get('tool_sdf_loss', 0):.4f} "
-                         f"sdf_o={metrics.get('obj_sdf_loss', 0):.4f} "
-                         f"aux={metrics.get('aux_loss', 0):.4f} "
-                         f"mvmt={metrics.get('movement_loss', 0):.4f} "
-                         f"mvmt_abs={mvmt_abs:.4f} "
-                         f"grad={grad_norm:.2f} dp_max={dp_max:.3f}")
-                _debug_history.append(entry)
 
             total_loss += loss.item()
             for k, v in metrics.items():
@@ -381,10 +362,16 @@ def main():
         train_ds, batch_size=per_gpu_batch,
         sampler=train_sampler, shuffle=(train_sampler is None),
         num_workers=cfg.num_workers, pin_memory=True,
+        collate_fn=_collate_fn,
+        persistent_workers=(cfg.num_workers > 0),
     )
+    val_sampler = DistributedSampler(val_ds, shuffle=False) if dist.is_initialized() else None
     val_loader = DataLoader(
         val_ds, batch_size=per_gpu_batch,
-        shuffle=False, num_workers=cfg.num_workers, pin_memory=True,
+        sampler=val_sampler, shuffle=False,
+        num_workers=cfg.num_workers, pin_memory=True,
+        collate_fn=_collate_fn,
+        persistent_workers=(cfg.num_workers > 0),
     )
 
     # ---- Model ----
@@ -399,7 +386,7 @@ def main():
             vit_depth=cfg.vit_depth,
             vit_heads=cfg.vit_heads,
             freeze_encoder=cfg.freeze_encoder,
-            movement_n_heads=cfg.movement_n_heads,
+            movement_head_hidden=cfg.movement_head_hidden,
             sdf_weight=cfg.sdf_weight,
             movement_weight=cfg.movement_weight,
         ).to(device)
@@ -500,8 +487,8 @@ def main():
             train=True, scaler=scaler, enable_flow=enable_flow,
         )
 
-        # Validate every 20 epochs
-        val_freq = 20
+        # Validate every epoch
+        val_freq = 1
         do_val = (epoch + 1) % val_freq == 0 or epoch == cfg.epochs - 1
         if do_val:
             val_loss, val_m = run_epoch(

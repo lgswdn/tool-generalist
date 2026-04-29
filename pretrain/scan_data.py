@@ -18,7 +18,11 @@ all_delta_R_abs_max = []
 all_delta_pose_norm_abs_max = []
 
 for fi, f in enumerate(files):
-    data = torch.load(f, map_location="cpu", weights_only=False)
+    try:
+        data = torch.load(f, map_location="cpu", weights_only=False)
+    except Exception as e:
+        print("one ee")
+        continue
     fname = Path(f).name
     issues = []
 

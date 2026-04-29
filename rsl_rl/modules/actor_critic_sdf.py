@@ -133,10 +133,10 @@ class ActorCriticSDF(nn.Module):
         P = self.encoder.num_patches   # Patches per cloud
         self.token_dim = D
 
-        # Token layout from SDF encoder:
-        #   CLS (1) + tool_tokens (P) + obj_tokens (P)
-        self.num_cls_tokens = 1 if enc_cfg.use_cls_token else 0
-        self.total_num_tokens = self.num_cls_tokens + 2 * P
+        # Token layout from SDF encoder (CLS is stripped internally):
+        #   tool_tokens (P) + obj_tokens (P) = 2P total
+        self.num_cls_tokens = 0
+        self.total_num_tokens = 2 * P
         self.num_patches_per_cloud = P
 
         print(f"[ActorCriticSDF] Encoder config: D={D}, P={P}, vit_depth={vit_depth}, vit_heads={vit_heads}")
@@ -169,12 +169,12 @@ class ActorCriticSDF(nn.Module):
                     )
             sd_num_query_all = sd_num_query - sd_num_query_object
 
-            # Object-only tokens: CLS (if present) + obj_tokens (P)
-            object_only_num_tokens = self.num_cls_tokens + P
+            # Object-only tokens: obj_tokens (P) — no CLS in output
+            object_only_num_tokens = P
 
             print(f"  - Query tokens: {sd_num_query_object} for object-only, {sd_num_query_all} for all tokens")
             print(f"  - Token dimension: {self.token_dim}")
-            print(f"  - Object-only tokens: {object_only_num_tokens} (CLS: {self.num_cls_tokens}, object patches: {P})")
+            print(f"  - Object-only tokens: {object_only_num_tokens} (object patches: {P})")
             print(f"  - Context dimension: {sd_ctx_dim}")
             print(f"  - Embedding dimension: {sd_emb_dim}")
 
@@ -240,12 +240,12 @@ class ActorCriticSDF(nn.Module):
                 num_query_object = num_query_object_tokens
             num_query_all = num_query_tokens - num_query_object
 
-            # Object-only tokens: CLS (if present) + obj_tokens (P)
-            object_only_num_tokens = self.num_cls_tokens + P
+            # Object-only tokens: obj_tokens (P) — no CLS in output
+            object_only_num_tokens = P
 
             print(f"  - Query tokens: {num_query_object} for object-only, {num_query_all} for all tokens")
             print(f"  - Token dimension: {self.token_dim}")
-            print(f"  - Object-only tokens: {object_only_num_tokens} (CLS: {self.num_cls_tokens}, object patches: {P})")
+            print(f"  - Object-only tokens: {object_only_num_tokens} (object patches: {P})")
             print(f"  - Cross attention heads: {cross_attn_heads}")
             print(f"  - Cross attention layers: {cross_attn_layers}")
 
@@ -351,7 +351,7 @@ class ActorCriticSDF(nn.Module):
         distribution. The object center is returned as additional context.
 
         Returns:
-            all_tokens: [B, total_num_tokens, D] — CLS + tool_tokens + obj_tokens
+            all_tokens: [B, 2P, D] — tool_tokens + obj_tokens (CLS already stripped by encoder)
             obj_center: [B, 3] — object centroid (used as extra context)
             extra_state: [B, extra_state_dim] — all non-point-cloud observations
         """
@@ -369,9 +369,8 @@ class ActorCriticSDF(nn.Module):
         else:
             res = self.encoder.encode(tool_cloud_centered, object_cloud_centered)
 
-        # Assemble all tokens: [CLS, tool_tokens, obj_tokens]
-        global_feat = res.global_feat.unsqueeze(1)    # (B, 1, D)
-        all_tokens = torch.cat([global_feat, res.tool_tokens, res.obj_tokens], dim=1)  # (B, 1+2P, D)
+        # fused_tokens: (B, 2P, D) — [tool_patches, obj_patches], CLS already stripped
+        all_tokens = res.fused_tokens  # (B, 2P, D)
 
         return all_tokens, obj_center, extra_state
 
@@ -388,16 +387,10 @@ class ActorCriticSDF(nn.Module):
         if not self.use_learnable_query_tokens:
             ctx = {"extra_state": ctx_vec}
 
-            # Object-only tokens: CLS (if present) + obj_tokens
-            # Token layout: [CLS, tool_0..tool_{P-1}, obj_0..obj_{P-1}]
-            # Object-only = CLS + obj_tokens = indices [0] + [1+P .. 1+2P-1]
+            # Object-only tokens: obj_tokens (last P tokens)
+            # Token layout: [tool_0..tool_{P-1}, obj_0..obj_{P-1}]
             P = self.num_patches_per_cloud
-            if self.num_cls_tokens > 0:
-                cls_token = all_tokens[:, :1, :]  # (B, 1, D)
-                obj_tokens = all_tokens[:, 1 + P:, :]  # (B, P, D)
-                object_only_tokens = torch.cat([cls_token, obj_tokens], dim=1)  # (B, 1+P, D)
-            else:
-                object_only_tokens = all_tokens[:, P:, :]  # (B, P, D)
+            object_only_tokens = all_tokens[:, P:, :]  # (B, P, D)
 
             # Differentiated attention
             sd_out_parts = []
@@ -425,12 +418,7 @@ class ActorCriticSDF(nn.Module):
             query = self.query_tokens.expand(batch, -1, -1)  # (B, num_query_tokens, D)
 
             P = self.num_patches_per_cloud
-            if self.num_cls_tokens > 0:
-                cls_token = all_tokens[:, :1, :]
-                obj_tokens = all_tokens[:, 1 + P:, :]
-                object_only_tokens = torch.cat([cls_token, obj_tokens], dim=1)
-            else:
-                object_only_tokens = all_tokens[:, P:, :]
+            object_only_tokens = all_tokens[:, P:, :]  # (B, P, D)
 
             attn_out_parts = []
 

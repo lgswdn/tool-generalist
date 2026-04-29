@@ -18,7 +18,7 @@ class TrainConfig:
     # Training
     epochs: int = 1000
     total_steps: int = 0      # Fixed step budget (overrides epochs; 0 = use epochs)
-    batch_size: int = 256     # GLOBAL batch size, split evenly across GPUs
+    batch_size: int = 512     # GLOBAL batch size, split evenly across GPUs
     lr: float = 5e-4
     resume: str = ""
     amp: bool = False  # Disabled: float16 corrupts flow matching prediction
@@ -31,7 +31,7 @@ class TrainConfig:
 
     # Logging
     wandb: bool = True
-    wandb_project: str = "sdf-diffusion"
+    wandb_project: str = "all-tools"
     wandb_name: str = ""
 
     # Shared encoder

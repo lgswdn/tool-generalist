@@ -52,7 +52,7 @@ class InitialPoseHyperparams:
     """Hyperparameters for random initial-pose generation."""
 
     init_radius: float = 0.25        # metres from object centre
-    collision_threshold: float = 0.002  # max allowed penetration (m)
+    collision_threshold: float = 0.001  # max allowed penetration (m)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
