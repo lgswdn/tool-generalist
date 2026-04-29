@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """
-Deterministic RobotSmith pipeline.
-Uses the LLM-returned JSON directly without any randomness:
-- no scale variation sampling
-- no rotation variance during attachment
-- no surface noise during mesh export
+Combined RobotSmith generation pipeline.
+
+For one design JSON response, generate:
+- one deterministic tool
+- N randomized variants using claude_pipeline.py behavior
+
+Outputs are written to <task_name>/tmp_trial/<NNN>/.
 """
-import os
-import json
 import argparse
+import copy
+import json
+import os
+import random
 import re
+import sys
 import traceback
 
 import numpy as np
@@ -28,7 +33,6 @@ def parse_json(response):
 def export_voxel_object_deterministic(voxel_obj, output_path):
     """Export a voxel object without adding surface noise."""
     import trimesh
-    import sys
 
     sys.path.insert(0, os.path.join(project_path, "utils"))
     from api_tool_design import grid_to_mesh
@@ -41,8 +45,6 @@ def export_voxel_object_deterministic(voxel_obj, output_path):
 
 def execute_design_deterministic(design_json, log_dir, num_outputs=1):
     """Execute design JSON directly without any randomized variations."""
-    import copy
-    import sys
     import trimesh
 
     sys.path.insert(0, os.path.join(project_path, "utils"))
@@ -350,17 +352,213 @@ def render_outputs(log_dir, output_files):
         print(f"Rendering failed: {render_error}")
 
 
+def execute_design_with_variations(design_json, log_dir, num_variations=3):
+    """Execute design JSON with randomized scale and rotation variations."""
+    import trimesh
+
+    sys.path.insert(0, os.path.join(project_path, "utils"))
+    from api_tool_design import primitive, subtract_attach, union_attach
+    import api_tool_design
+
+    base_tool_name = design_json["name"]
+    parts_template = design_json["parts"]
+    operations = design_json["operations"]
+    all_filenames = []
+
+    for i in range(num_variations):
+        print(f"\nGenerating variation {i + 1}/{num_variations}...")
+        api_tool_design._BASE_CENTER = None
+
+        parts = copy.deepcopy(parts_template)
+        semantic_groups = {}
+        for part in parts:
+            group = part["semantic_group"]
+            if group not in semantic_groups:
+                min_mult, max_mult = part["scale_variance_range"]
+                semantic_groups[group] = random.uniform(min_mult, max_mult)
+
+            multiplier = semantic_groups[group]
+            if part["geom"] == "arc":
+                scaled = [p * multiplier for p in part["base_parameters"][:3]]
+                scaled.append(part["base_parameters"][3])
+                part["parameters"] = scaled
+            else:
+                part["parameters"] = [p * multiplier for p in part["base_parameters"]]
+
+        objects = {}
+        cached_bboxes = {}
+        for idx, part in enumerate(parts):
+            is_head = part.get("is_head", False)
+            is_base = idx == 0
+            initial_rotation = part.get("arc_plane", None)
+            obj = primitive(
+                part["geom"],
+                part["parameters"],
+                is_head=is_head,
+                is_base=is_base,
+                arc_plane=initial_rotation,
+            )
+            objects[idx] = obj
+            from api_tool_design import get_axis_align_bounding_box
+
+            cached_bboxes[idx] = get_axis_align_bounding_box(obj)
+
+        for op in operations:
+            op_type = op["op"]
+            target_idx = op["target"]
+            source_idx = op["source"]
+
+            if op_type == "union_attach":
+                objects[target_idx] = union_attach(
+                    objects[target_idx],
+                    objects[source_idx],
+                    op["target_point"],
+                    op["source_point"],
+                    op["rotation"],
+                    op["rotation_variance"],
+                    cached_target_bbox=cached_bboxes[target_idx],
+                )
+            elif op_type == "subtract_attach":
+                objects[target_idx] = subtract_attach(
+                    objects[target_idx],
+                    objects[source_idx],
+                    op["target_point"],
+                    op["source_point"],
+                    op["rotation"],
+                    op["rotation_variance"],
+                    cached_target_bbox=cached_bboxes[target_idx],
+                )
+            else:
+                raise ValueError(f"Unsupported operation: {op_type}")
+
+        result = objects[0]
+
+        current_filename = f"{base_tool_name}_var_{i:03d}.obj"
+        temp_filename = f"{base_tool_name}_var_{i:03d}_temp.obj"
+        output_path = os.path.join(log_dir, temp_filename)
+        result.export(output_path)
+
+        temp_mesh = trimesh.load(output_path)
+        bounds = temp_mesh.bounds
+        min_b, max_b = bounds[0], bounds[1]
+        margin = 2.0
+        old_min = api_tool_design.GLOBAL_VOXEL_MIN.copy()
+        old_max = api_tool_design.GLOBAL_VOXEL_MAX.copy()
+        api_tool_design.GLOBAL_VOXEL_MIN[:] = min_b - margin
+        api_tool_design.GLOBAL_VOXEL_MAX[:] = max_b + margin
+
+        api_tool_design._BASE_CENTER = None
+        objects = {}
+        cached_bboxes = {}
+        for idx, part in enumerate(parts):
+            is_head = part.get("is_head", False)
+            is_base = idx == 0
+            initial_rotation = part.get("arc_plane", None)
+            obj = primitive(
+                part["geom"],
+                part["parameters"],
+                is_head=is_head,
+                is_base=is_base,
+                arc_plane=initial_rotation,
+            )
+            objects[idx] = obj
+            from api_tool_design import get_axis_align_bounding_box
+
+            cached_bboxes[idx] = get_axis_align_bounding_box(obj)
+
+        for op in operations:
+            op_type = op["op"]
+            target_idx = op["target"]
+            source_idx = op["source"]
+
+            if op_type == "union_attach":
+                objects[target_idx] = union_attach(
+                    objects[target_idx],
+                    objects[source_idx],
+                    op["target_point"],
+                    op["source_point"],
+                    op["rotation"],
+                    op["rotation_variance"],
+                    cached_target_bbox=cached_bboxes[target_idx],
+                )
+            elif op_type == "subtract_attach":
+                objects[target_idx] = subtract_attach(
+                    objects[target_idx],
+                    objects[source_idx],
+                    op["target_point"],
+                    op["source_point"],
+                    op["rotation"],
+                    op["rotation_variance"],
+                    cached_target_bbox=cached_bboxes[target_idx],
+                )
+            else:
+                raise ValueError(f"Unsupported operation: {op_type}")
+
+        result = objects[0]
+
+        final_output_path = os.path.join(log_dir, current_filename)
+        result.export(final_output_path)
+
+        current_voxel_min = api_tool_design.GLOBAL_VOXEL_MIN.copy()
+        current_voxel_max = api_tool_design.GLOBAL_VOXEL_MAX.copy()
+
+        mesh = trimesh.load(final_output_path)
+        tight_min = mesh.bounds[0]
+        tight_max = mesh.bounds[1]
+
+        api_tool_design.GLOBAL_VOXEL_MIN[:] = old_min
+        api_tool_design.GLOBAL_VOXEL_MAX[:] = old_max
+        os.remove(output_path)
+
+        all_filenames.append(current_filename)
+
+        head_voxels = np.argwhere(result.grid["data"] == 2)
+        head_area = None
+        if len(head_voxels) > 0:
+            voxel_size = (current_voxel_max - current_voxel_min) / result.grid["res"]
+            voxel_coords = current_voxel_min + head_voxels * voxel_size
+            head_min = voxel_coords.min(axis=0)
+            head_max = voxel_coords.max(axis=0)
+            head_area = [
+                ((head_min - tight_min) / (tight_max - tight_min)).tolist(),
+                ((head_max - tight_min) / (tight_max - tight_min)).tolist(),
+            ]
+
+        base_center_normalized = None
+        if api_tool_design._BASE_CENTER is not None:
+            base_center_normalized = (
+                (np.array(api_tool_design._BASE_CENTER) - tight_min) / (tight_max - tight_min)
+            ).tolist()
+
+        metadata = {
+            "head_area": head_area,
+            "base_center": base_center_normalized,
+            "mesh_bounds": [tight_min.tolist(), tight_max.tolist()],
+        }
+        metadata_path = os.path.join(log_dir, f"{base_tool_name}_var_{i:03d}_metadata.json")
+        with open(metadata_path, "w") as mf:
+            json.dump(metadata, mf)
+
+    return all_filenames
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--task_name", type=str, required=True, help="Task name for output directory")
     parser.add_argument("--response_file", type=str, required=True, help="LLM response file containing design JSON")
-    parser.add_argument("--num_outputs", type=int, default=1, help="Number of deterministic rebuilds to export")
+    parser.add_argument("--num_variations", type=int, default=3, help="Number of randomized variants to export")
+    parser.add_argument("--seed", type=int, default=None, help="Optional random seed for variant generation")
     args = parser.parse_args()
 
-    log_dir = os.path.join(project_path, args.task_name, "deterministic_trial")
-    os.makedirs(log_dir, exist_ok=True)
-    n_tries = len([f for f in os.listdir(log_dir) if "." not in f])
-    log_dir = os.path.join(log_dir, f"{n_tries:03d}")
+    if args.num_variations < 0:
+        raise ValueError("--num_variations must be >= 0")
+    if args.seed is not None:
+        random.seed(args.seed)
+
+    log_root = os.path.join(project_path, args.task_name, "tmp_trial")
+    os.makedirs(log_root, exist_ok=True)
+    n_tries = len([f for f in os.listdir(log_root) if "." not in f])
+    log_dir = os.path.join(log_root, f"{n_tries:03d}")
     os.makedirs(log_dir, exist_ok=True)
 
     print("\n" + "=" * 80)
@@ -383,25 +581,36 @@ def main():
             json.dump(design_json, f, indent=4)
         print(f"Design JSON saved to: {json_file}")
 
-        print(f"Generating {args.num_outputs} deterministic output(s)...")
-        output_files = execute_design_deterministic(design_json, log_dir, args.num_outputs)
+        print("Generating 1 deterministic output...")
+        deterministic_files = execute_design_deterministic(design_json, log_dir, num_outputs=1)
 
+        print(f"Generating {args.num_variations} randomized variation(s)...")
+        variation_files = execute_design_with_variations(design_json, log_dir, args.num_variations)
+
+        output_files = deterministic_files + variation_files
         output_files_json = os.path.join(log_dir, "output_files.json")
         with open(output_files_json, "w") as f:
             json.dump(output_files, f)
 
+        with open(os.path.join(log_dir, "deterministic_output_files.json"), "w") as f:
+            json.dump(deterministic_files, f)
+        with open(os.path.join(log_dir, "variation_output_files.json"), "w") as f:
+            json.dump(variation_files, f)
+
         render_outputs(log_dir, output_files)
 
         print("\n" + "=" * 80)
-        print("DETERMINISTIC TOOL GENERATION SUCCEEDED")
+        print("COMBINED TOOL GENERATION SUCCEEDED")
         print("=" * 80)
         print(f"Tool name: {design_json['name']}")
         print(f"Output directory: {log_dir}")
-        print(f"Generated .obj files: {output_files}")
+        print(f"Deterministic .obj files: {deterministic_files}")
+        print(f"Variation .obj files: {variation_files}")
         print("=" * 80)
     except Exception as e:
         print(f"\nError: {e}")
         print(traceback.format_exc())
+        raise
 
 
 if __name__ == "__main__":

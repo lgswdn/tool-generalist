@@ -177,12 +177,16 @@ def main():
     obj_mesh_raw = trimesh.load(obj_path, force="mesh", process=False)
     tool_mesh_raw = trimesh.load(tool_path, force="mesh", process=False)
 
-    # Apply tool scale if present
+    # Apply scales used during data generation.
     tool_scale = data.get("tool_scale", 1.0)
+    object_scale = data.get("object_scale", 1.0)
     tool_mesh_raw.vertices = tool_mesh_raw.vertices * tool_scale
+    obj_mesh_raw.vertices = obj_mesh_raw.vertices * object_scale
+    print(f"  Tool scale:   {tool_scale:.4f}")
+    print(f"  Object scale: {object_scale:.4f}")
 
     # ---- Transform object ----
-    R_obj = data["object_rotation"]
+    R_obj = data.get("object_rotation", np.eye(3))
     obj_mesh = transform_object_mesh(obj_mesh_raw, R_obj)
 
     # ---- Select diverse tool indices ----

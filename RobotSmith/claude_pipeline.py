@@ -208,6 +208,7 @@ def main():
     parser.add_argument('--num_variations', type=int, default=3)
     parser.add_argument('--tips', type=str, default='', help='Optional design tips')
     parser.add_argument('--response_file', type=str, default=None, help='Use existing response file instead of calling API')
+    parser.add_argument('--effort', type=str, default='medium', choices=['low', 'medium', 'high', 'xhigh'], help='GPT reasoning effort')
     args = parser.parse_args()
 
     task_name = args.task_name
@@ -259,7 +260,7 @@ def main():
         with client.responses.stream(
             model="gpt-5.4",
             input=[{"role": "user", "content": prompt}],
-            reasoning={"effort": "medium"}
+            reasoning={"effort": args.effort}
         ) as stream:
             for event in stream:
                 if getattr(event, "type", None) == "response.output_text.delta":

@@ -74,8 +74,8 @@ source "$HOME/miniconda3/etc/profile.d/conda.sh"
 conda activate pamo
 
 # ── Define output directories ─────────────────────────────────
-OUT_OBJ_DIR="${EEF_DIR}/objects"
-OUT_META_DIR="${EEF_DIR}/objects_metadata"
+OUT_OBJ_DIR="${EEF_DIR}/pamo_objects"
+OUT_META_DIR="${EEF_DIR}/oamo_objects_metadata"
 
 mkdir -p "$OUT_OBJ_DIR"
 mkdir -p "$OUT_META_DIR"
