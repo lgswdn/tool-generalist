@@ -47,9 +47,12 @@ from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.cloud imp
 
 _CLOUD_CACHE = {}
 
-# Load path configuration from paths.yaml at the project root
-_PATHS_CFG_FILE = os.path.join(os.path.dirname(__file__), "../" * 6, "paths.yaml")
-_PATHS_CFG_FILE = os.path.normpath(_PATHS_CFG_FILE)
+# Load path configuration. By default this reads paths.yaml at the project
+# root; set TOOL_GENERALIST_PATHS_YAML to run against an alternate asset config.
+_DEFAULT_PATHS_CFG_FILE = os.path.join(os.path.dirname(__file__), "../" * 6, "paths.yaml")
+_PATHS_CFG_FILE = os.environ.get("TOOL_GENERALIST_PATHS_YAML", _DEFAULT_PATHS_CFG_FILE)
+_PATHS_CFG_FILE = os.path.abspath(os.path.normpath(_PATHS_CFG_FILE))
+print(f"[INFO] Loading path config from {_PATHS_CFG_FILE}")
 with open(_PATHS_CFG_FILE, "r") as _f:
     _PATHS = yaml.safe_load(_f)
 from scipy.spatial.transform import Rotation as R
