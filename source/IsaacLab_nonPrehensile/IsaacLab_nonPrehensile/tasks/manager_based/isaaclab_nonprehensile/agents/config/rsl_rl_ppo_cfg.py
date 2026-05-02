@@ -8,7 +8,7 @@ from isaaclab_rl.rsl_rl import (
 from dataclasses import field
 
 
-POINT2VEC_CKPT_PATH = "/tmp/p2v/pre_point2vec-epoch.799-step.64800.ckpt"
+POINT2VEC_CKPT_PATH = "/mnt/project/world_model/tool_generalist/model/pre_point2vec-epoch.799-step.64800.ckpt"
 
 
 @configclass

@@ -17,10 +17,10 @@ from torch.distributions import Normal
 from rsl_rl.utils import resolve_nn_activation
 from rsl_rl.modules.models.rl.net.sd_cross import StateDependentCrossFeatNet
 
-from point2vec.modules.pointnet import PointcloudTokenizer
-from point2vec.modules.transformer import TransformerEncoder
-from point2vec.utils import transforms
-from point2vec.utils.checkpoint import extract_model_checkpoint
+from rsl_rl.point2vec.modules.pointnet import PointcloudTokenizer
+from rsl_rl.point2vec.modules.transformer import TransformerEncoder
+from rsl_rl.point2vec.utils import transforms
+from rsl_rl.point2vec.utils.checkpoint import extract_model_checkpoint
 
 
 class ActorCriticPoint2Vec(nn.Module):
