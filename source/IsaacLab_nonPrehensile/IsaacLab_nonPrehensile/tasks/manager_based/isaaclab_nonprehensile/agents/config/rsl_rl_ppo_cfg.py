@@ -351,7 +351,7 @@ class SDFPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=0.5,
         use_clipped_value_loss=True,
         clip_param=0.3,
-        entropy_coef=0.002,
+        entropy_coef=0.001,
         num_learning_epochs=4,
         num_mini_batches=16,
         learning_rate=5.0e-5,

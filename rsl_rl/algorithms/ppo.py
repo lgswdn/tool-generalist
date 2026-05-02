@@ -135,15 +135,52 @@ class PPO:
             self.device,
         )
 
+        # Enable encoder feature caching if policy supports it and encoder is frozen
+        if hasattr(self.policy, 'supports_cached_features') and self.policy.supports_cached_features:
+            if hasattr(self.policy, 'freeze_point2vec') and self.policy.freeze_point2vec:
+                if hasattr(self.policy, 'get_cached_encoder_features'):
+                    # Get feature dimensions by running a dummy forward pass
+                    with torch.no_grad():
+                        dummy_obs = torch.zeros(1, actor_obs_shape[0], device=self.device)
+                        encoder_features, extra_state = self.policy.get_cached_encoder_features(dummy_obs)
+                    self.storage.enable_encoder_feature_cache(
+                        encoder_features_shape=encoder_features.shape[1:],
+                        extra_state_shape=extra_state.shape[1:]
+                    )
+                    self._use_cached_features = True
+                    print("[PPO] Enabled encoder feature caching for frozen encoder optimization")
+                else:
+                    self._use_cached_features = False
+            else:
+                self._use_cached_features = False
+        else:
+            self._use_cached_features = False
+
     def act(self, obs, critic_obs):
         if self.policy.is_recurrent:
             self.transition.hidden_states = self.policy.get_hidden_states()
-        # compute the actions and values
-        self.transition.actions = self.policy.act(obs).detach()
-        self.transition.values = self.policy.evaluate(critic_obs).detach()
-        self.transition.actions_log_prob = self.policy.get_actions_log_prob(self.transition.actions).detach()
-        self.transition.action_mean = self.policy.action_mean.detach()
-        self.transition.action_sigma = self.policy.action_std.detach()
+
+        # Compute encoder features and cache them if enabled
+        if self._use_cached_features:
+            with torch.no_grad():
+                encoder_features, extra_state = self.policy.get_cached_encoder_features(obs)
+                self.transition.encoder_features = encoder_features
+                self.transition.extra_state = extra_state
+
+            # Use cached features for action/value computation
+            self.transition.actions = self.policy.act_from_cached_features(encoder_features, extra_state).detach()
+            self.transition.values = self.policy.evaluate_from_cached_features(encoder_features, extra_state).detach()
+            self.transition.actions_log_prob = self.policy.get_actions_log_prob_from_cached_features(self.transition.actions).detach()
+            self.transition.action_mean = self.policy.action_mean.detach()
+            self.transition.action_sigma = self.policy.action_std.detach()
+        else:
+            # Standard path (no caching)
+            self.transition.actions = self.policy.act(obs).detach()
+            self.transition.values = self.policy.evaluate(critic_obs).detach()
+            self.transition.actions_log_prob = self.policy.get_actions_log_prob(self.transition.actions).detach()
+            self.transition.action_mean = self.policy.action_mean.detach()
+            self.transition.action_sigma = self.policy.action_std.detach()
+
         # need to record obs and critic_obs before env.step()
         self.transition.observations = obs
         self.transition.privileged_observations = critic_obs
@@ -220,6 +257,8 @@ class PPO:
             hid_states_batch,
             masks_batch,
             rnd_state_batch,
+            encoder_features_batch,
+            extra_state_batch,
         ) in generator:
 
             # number of augmentations per sample
@@ -235,7 +274,8 @@ class PPO:
 
             # Perform symmetric augmentation
             if self.symmetry and self.symmetry["use_data_augmentation"]:
-                # augmentation using symmetry
+                # augmentation using symmetry - cached features are no longer valid
+                # because observations are transformed
                 data_augmentation_func = self.symmetry["data_augmentation_func"]
                 # returned shape: [batch_size * num_aug, ...]
                 obs_batch, actions_batch = data_augmentation_func(
@@ -253,19 +293,33 @@ class PPO:
                 target_values_batch = target_values_batch.repeat(num_aug, 1)
                 advantages_batch = advantages_batch.repeat(num_aug, 1)
                 returns_batch = returns_batch.repeat(num_aug, 1)
+                # Invalidate cached features when augmentation is applied
+                encoder_features_batch = None
+                extra_state_batch = None
 
             # Recompute actions log prob and entropy for current batch of transitions
             # Note: we need to do this because we updated the policy with the new parameters
-            # -- actor
-            self.policy.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
-            actions_log_prob_batch = self.policy.get_actions_log_prob(actions_batch)
-            # -- critic
-            value_batch = self.policy.evaluate(critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
-            # -- entropy
-            # we only keep the entropy of the first augmentation (the original one)
-            mu_batch = self.policy.action_mean[:original_batch_size]
-            sigma_batch = self.policy.action_std[:original_batch_size]
-            entropy_batch = self.policy.entropy[:original_batch_size]
+            # Use cached features if available (frozen encoder optimization)
+            if self._use_cached_features and encoder_features_batch is not None:
+                # -- actor (using cached encoder features)
+                self.policy.act_from_cached_features(encoder_features_batch, extra_state_batch)
+                actions_log_prob_batch = self.policy.get_actions_log_prob_from_cached_features(actions_batch)
+                # -- critic (using cached encoder features)
+                value_batch = self.policy.evaluate_from_cached_features(encoder_features_batch, extra_state_batch)
+                # -- entropy
+                mu_batch = self.policy.action_mean[:original_batch_size]
+                sigma_batch = self.policy.action_std[:original_batch_size]
+                entropy_batch = self.policy.entropy[:original_batch_size]
+            else:
+                # -- actor (standard path)
+                self.policy.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
+                actions_log_prob_batch = self.policy.get_actions_log_prob(actions_batch)
+                # -- critic
+                value_batch = self.policy.evaluate(critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
+                # -- entropy
+                mu_batch = self.policy.action_mean[:original_batch_size]
+                sigma_batch = self.policy.action_std[:original_batch_size]
+                entropy_batch = self.policy.entropy[:original_batch_size]
 
             # KL
             if self.desired_kl is not None and self.schedule == "adaptive":

@@ -25,6 +25,9 @@ class RolloutStorage:
             self.action_sigma = None
             self.hidden_states = None
             self.rnd_state = None
+            # Cached encoder features for frozen encoder optimization
+            self.encoder_features = None
+            self.extra_state = None
 
         def clear(self):
             self.__init__()
@@ -83,8 +86,23 @@ class RolloutStorage:
         self.saved_hidden_states_a = None
         self.saved_hidden_states_c = None
 
+        # Cached encoder features (optional, for frozen encoder optimization)
+        self.encoder_features = None
+        self.extra_state = None
+        self.encoder_features_shape = None
+
         # counter for the number of transitions stored
         self.step = 0
+
+    def enable_encoder_feature_cache(self, encoder_features_shape, extra_state_shape):
+        """Enable caching of encoder features for frozen encoder optimization."""
+        self.encoder_features_shape = encoder_features_shape
+        self.encoder_features = torch.zeros(
+            self.num_transitions_per_env, self.num_envs, *encoder_features_shape, device=self.device
+        )
+        self.extra_state = torch.zeros(
+            self.num_transitions_per_env, self.num_envs, *extra_state_shape, device=self.device
+        )
 
     def add_transitions(self, transition: Transition):
         # check if the transition is valid
@@ -113,6 +131,11 @@ class RolloutStorage:
         # For RND
         if self.rnd_state_shape is not None:
             self.rnd_state[self.step].copy_(transition.rnd_state)
+
+        # For cached encoder features
+        if self.encoder_features is not None and transition.encoder_features is not None:
+            self.encoder_features[self.step].copy_(transition.encoder_features)
+            self.extra_state[self.step].copy_(transition.extra_state)
 
         # For RNN networks
         self._save_hidden_states(transition.hidden_states)
@@ -209,6 +232,14 @@ class RolloutStorage:
         if self.rnd_state_shape is not None:
             rnd_state = self.rnd_state.flatten(0, 1)
 
+        # For cached encoder features
+        if self.encoder_features is not None:
+            encoder_features_flat = self.encoder_features.flatten(0, 1)
+            extra_state_flat = self.extra_state.flatten(0, 1)
+        else:
+            encoder_features_flat = None
+            extra_state_flat = None
+
         for epoch in range(num_epochs):
             for i in range(num_mini_batches):
                 # Select the indices for the mini-batch
@@ -236,11 +267,19 @@ class RolloutStorage:
                 else:
                     rnd_state_batch = None
 
+                # -- For cached encoder features
+                if self.encoder_features is not None:
+                    encoder_features_batch = encoder_features_flat[batch_idx]
+                    extra_state_batch = extra_state_flat[batch_idx]
+                else:
+                    encoder_features_batch = None
+                    extra_state_batch = None
+
                 # yield the mini-batch
                 yield obs_batch, privileged_observations_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (
                     None,
                     None,
-                ), None, rnd_state_batch
+                ), None, rnd_state_batch, encoder_features_batch, extra_state_batch
 
     # for reinfrocement learning with recurrent networks
     def recurrent_mini_batch_generator(self, num_mini_batches, num_epochs=8):
@@ -308,9 +347,19 @@ class RolloutStorage:
                 hid_a_batch = hid_a_batch[0] if len(hid_a_batch) == 1 else hid_a_batch
                 hid_c_batch = hid_c_batch[0] if len(hid_c_batch) == 1 else hid_c_batch
 
+                # For cached encoder features (recurrent)
+                if self.encoder_features is not None:
+                    padded_encoder_features, _ = split_and_pad_trajectories(self.encoder_features, self.dones)
+                    padded_extra_state, _ = split_and_pad_trajectories(self.extra_state, self.dones)
+                    encoder_features_batch = padded_encoder_features[:, first_traj:last_traj]
+                    extra_state_batch = padded_extra_state[:, first_traj:last_traj]
+                else:
+                    encoder_features_batch = None
+                    extra_state_batch = None
+
                 yield obs_batch, privileged_obs_batch, actions_batch, values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (
                     hid_a_batch,
                     hid_c_batch,
-                ), masks_batch, rnd_state_batch
+                ), masks_batch, rnd_state_batch, encoder_features_batch, extra_state_batch
 
                 first_traj = last_traj

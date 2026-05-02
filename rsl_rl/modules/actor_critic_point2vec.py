@@ -17,16 +17,16 @@ from torch.distributions import Normal
 from rsl_rl.utils import resolve_nn_activation
 from rsl_rl.modules.models.rl.net.sd_cross import StateDependentCrossFeatNet
 
-from rsl_rl.point2vec.modules.pointnet import PointcloudTokenizer
-from rsl_rl.point2vec.modules.transformer import TransformerEncoder
-from rsl_rl.point2vec.utils import transforms
-from rsl_rl.point2vec.utils.checkpoint import extract_model_checkpoint
+from point2vec.modules.pointnet import PointcloudTokenizer
+from point2vec.modules.transformer import TransformerEncoder
+from point2vec.utils import transforms
+from point2vec.utils.checkpoint import extract_model_checkpoint
 
 
 class ActorCriticPoint2Vec(nn.Module):
     """
     Actor-Critic network using Point2Vec as point cloud encoder.
-    
+
     Architecture:
         1. Point cloud encoding with Point2Vec (tokenizer + encoder)
         2. Mean/Max pooling to aggregate features
@@ -34,8 +34,9 @@ class ActorCriticPoint2Vec(nn.Module):
         4. Fusion MLP
         5. Actor and Critic heads
     """
-    
+
     is_recurrent = False
+    supports_cached_features = True  # Indicates this policy supports encoder feature caching
 
     def __init__(
         self,
@@ -530,6 +531,96 @@ class ActorCriticPoint2Vec(nn.Module):
     def reset(self, dones=None):
         """Stateless policy; nothing to reset."""
         pass
+
+    # --------------------------------------------------------------------------
+    # Cached feature methods for frozen encoder optimization
+    # --------------------------------------------------------------------------
+    def get_cached_encoder_features(self, observations: torch.Tensor):
+        """
+        Compute and return encoder features (frozen part) for caching.
+
+        This is the expensive Point2Vec encoding that should be computed once
+        during rollout collection and cached for reuse during PPO updates.
+
+        Returns:
+            encoder_features: [B, aggregated_D] pooled encoder features
+            extra_state: [B, extra_state_dim] non-point-cloud observations
+        """
+        pointcloud, extra_state = self._split_observations(observations)
+
+        # Encode with Point2Vec (frozen, expensive)
+        encoder_features_seq = self._encode_with_point2vec(pointcloud, is_training=False)  # [B, T, D]
+
+        # Aggregate features: max and/or mean pooling
+        aggregated_features = []
+        if self.use_max_pooling:
+            max_features = encoder_features_seq.max(dim=1).values  # [B, D]
+            aggregated_features.append(max_features)
+        if self.use_mean_pooling:
+            mean_features = encoder_features_seq.mean(dim=1)  # [B, D]
+            aggregated_features.append(mean_features)
+
+        encoder_features = torch.cat(aggregated_features, dim=-1)  # [B, aggregated_D]
+
+        return encoder_features, extra_state
+
+    def act_from_cached_features(self, encoder_features: torch.Tensor, extra_state: torch.Tensor):
+        """
+        Compute action using cached encoder features (trainable part only).
+
+        This skips the expensive encoder forward pass and uses pre-computed features.
+        """
+        # Prepare for sd_cross or concat
+        if self.use_sd_cross:
+            x = encoder_features.unsqueeze(1)  # [B, 1, D]
+            sd_ctx = {'rest': extra_state}
+            base_features = self.state_cross(x, ctx=sd_ctx)
+            fused_features = self.fusion_mlp(base_features)
+        else:
+            fusion_input = torch.cat([encoder_features, extra_state], dim=-1)
+            fused_features = self.fusion_mlp(fusion_input)
+
+        mean = self.actor(fused_features)
+
+        if self.noise_std_type == "scalar":
+            std = self.std.expand_as(mean)
+        else:
+            std = torch.exp(self.log_std).expand_as(mean)
+        std = torch.clamp(std, min=1e-6)
+        self.distribution = Normal(mean, std)
+
+        return self.distribution.sample()
+
+    def evaluate_from_cached_features(self, encoder_features: torch.Tensor, extra_state: torch.Tensor):
+        """
+        Compute value using cached encoder features (trainable part only).
+        """
+        if self.use_sd_cross:
+            x = encoder_features.unsqueeze(1)  # [B, 1, D]
+            sd_ctx = {'rest': extra_state}
+            base_features = self.state_cross(x, ctx=sd_ctx)
+            fused_features = self.fusion_mlp(base_features)
+        else:
+            fusion_input = torch.cat([encoder_features, extra_state], dim=-1)
+            fused_features = self.fusion_mlp(fusion_input)
+
+        return self.critic(fused_features)
+
+    def get_actions_log_prob_from_cached_features(self, actions: torch.Tensor):
+        """Get log prob of actions under current distribution (after act_from_cached_features)."""
+        return self.distribution.log_prob(actions).sum(dim=-1)
+
+    def act_inference_from_cached_features(self, encoder_features: torch.Tensor, extra_state: torch.Tensor):
+        """Deterministic action from cached features."""
+        if self.use_sd_cross:
+            x = encoder_features.unsqueeze(1)
+            sd_ctx = {'rest': extra_state}
+            base_features = self.state_cross(x, ctx=sd_ctx)
+            fused_features = self.fusion_mlp(base_features)
+        else:
+            fusion_input = torch.cat([encoder_features, extra_state], dim=-1)
+            fused_features = self.fusion_mlp(fusion_input)
+        return self.actor(fused_features)
 
     def train(self, mode=True):
         """

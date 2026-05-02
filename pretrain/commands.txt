@@ -1,3 +1,7 @@
+export http_proxy=hyyp://'galbot:sK0aZ5bZ9v'@10.119.176.202:3128
+export https_proxy=hyyp://'galbot:sK0aZ5bZ9v'@10.119.176.202:3128
+
+
 python gen_dataset.py --method optimize --num-pairs 300 --num-poses 10 --batch-size 512 --gpus 0 1 --opt-steps 100 /mnt/project/world_model/tool_generalist/teardrop_contact
 
 python gen_initial.py --input-dir /mnt/project/world_model/tool_generalist/teardrop_contact/000_asym_teardrop_contour_scraper_var_000/
