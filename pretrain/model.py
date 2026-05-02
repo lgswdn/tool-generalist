@@ -9,7 +9,7 @@ Pretraining tasks and their locality constraints:
   - Patchwise SDF : patch token only                                    → per-patch SDF
   - Movement pred : patch token + relative xyz, cross-attn with tool Δpose → per-point displacement
   - Flow matching : ALL patch tokens (global conditioning)               → delta pose
-  - Aux regression: ALL tokens mean-pooled → init_pose (unchanged)
+  - Aux regression: ALL tokens mean-pooled → init target (pose or translation)
 
 Architecture:
   JointModel (shared encoder + task heads)
@@ -17,7 +17,7 @@ Architecture:
     ├── sdf_head: SDFSegmentor          (local-only: no global_feat)
     ├── movement_head: MovementPredictionHead  (per-point displacement)
     ├── velocity_net: MLPVelocityNet    (MLP, fast for horizon=1)
-    └── aux_reg_head: AuxRegressionHead (optional, pooled cond → init_pose)
+    └── aux_reg_head: AuxRegressionHead (optional, pooled cond → init target)
 """
 
 from __future__ import annotations
@@ -501,6 +501,8 @@ class DiffusionModel(nn.Module):
         p_drop_emb: float = 0.0,
         p_drop_attn: float = 0.0,
         use_mlp_head: bool = True,
+        pose_dim: int = 9,
+        aux_pose_dim: int = 9,
         # Auxiliary regression
         aux_reg: bool = True,
         # Loss weights
@@ -513,6 +515,7 @@ class DiffusionModel(nn.Module):
         self.diffusion_weight = diffusion_weight
         self.aux_weight = aux_weight
         self.use_mlp_head = use_mlp_head
+        self.pose_dim = pose_dim
 
         # Shared encoder
         enc_cfg = SDFEncoderCfg(
@@ -547,12 +550,12 @@ class DiffusionModel(nn.Module):
         # Velocity network (flow matching)
         if use_mlp_head:
             self.velocity_net = MLPVelocityNet(
-                pose_dim=9, cond_dim=D, hidden=n_emb, n_layers=n_layer,
+                pose_dim=pose_dim, cond_dim=D, hidden=n_emb, n_layers=n_layer,
             )
         else:
             self.velocity_net = TransformerForDiffusion(
-                input_dim=9,
-                output_dim=9,
+                input_dim=pose_dim,
+                output_dim=pose_dim,
                 horizon=1,
                 n_obs_steps=2 * P,
                 cond_dim=D,
@@ -573,7 +576,7 @@ class DiffusionModel(nn.Module):
         self.cond_pos_proj = nn.Linear(6, D)
 
         # Auxiliary regression head (optional)
-        self.aux_reg_head = AuxRegressionHead(cond_dim=D) if aux_reg else None
+        self.aux_reg_head = AuxRegressionHead(cond_dim=D, pose_dim=aux_pose_dim) if aux_reg else None
 
         # Flow matching inference steps
         self.n_inference_steps = 20
@@ -706,8 +709,8 @@ class DiffusionModel(nn.Module):
 
             # Flow matching (disabled during warmup phase)
             if enable_flow and has_delta:
-                x_0 = delta_pose_gt.unsqueeze(1)       # (B, 1, 9) data
-                eps = torch.randn_like(x_0)             # (B, 1, 9) noise
+                x_0 = delta_pose_gt.unsqueeze(1)       # (B, 1, pose_dim) data
+                eps = torch.randn_like(x_0)             # (B, 1, pose_dim) noise
 
                 # Logit-normal time sampling (SD3 recipe):
                 # Concentrates near t=0 and t=1 where signal is clearest,
@@ -751,7 +754,7 @@ class DiffusionModel(nn.Module):
             obj_pc:       (B, Q, 3) object point cloud
             n_steps:      number of Euler steps (default: self.n_inference_steps)
 
-        Returns: (B, 9) predicted delta_pose
+        Returns: (B, pose_dim) predicted delta target
         """
         if n_steps is None:
             n_steps = self.n_inference_steps
@@ -762,7 +765,7 @@ class DiffusionModel(nn.Module):
         dt = 1.0 / n_steps
 
         # Start from pure noise (t=1)
-        x = torch.randn(B, 1, 9, device=device)
+        x = torch.randn(B, 1, self.pose_dim, device=device)
 
         # Euler integration: t goes from 1 → 0
         for i in range(n_steps):
@@ -771,12 +774,7 @@ class DiffusionModel(nn.Module):
             v = self.velocity_net(sample=x, timestep=t, cond=cond)
             x = x - v * dt  # step toward data
 
-        return x.squeeze(1)  # (B, 9)
-
-
-# Backward compat alias
-JointModel = DiffusionModel
-
+        return x.squeeze(1)  # (B, pose_dim)
 
 # --------------------------------------------------------------------------- #
 # MovementModel — SDF + per-point movement prediction (no flow matching)
@@ -960,5 +958,138 @@ class MovementModel(nn.Module):
             metrics["movement_gt_mean_abs"] = obj_displacement_gt.abs().mean().item()
             metrics["movement_gt_max_abs"] = obj_displacement_gt.abs().max().item()
 
+        metrics["total"] = total_loss.item()
+        return total_loss, metrics
+
+
+# --------------------------------------------------------------------------- #
+# JointModel — SDF prediction + pose flow matching + movement prediction
+# --------------------------------------------------------------------------- #
+
+class JointModel(DiffusionModel):
+    """Joint training of SDF prediction, pose flow matching, and movement prediction.
+
+    Shares one SDFPointCloudEncoder across all heads:
+        - sdf_head: local SDF prediction at contact/init poses
+        - velocity_net: flow matching for tool delta pose
+        - aux_reg_head: optional init pose regression
+        - movement_head: per-object-point displacement prediction
+    """
+
+    def __init__(
+        self,
+        # SDF head
+        head_mode: str = "patch",
+        patch_agg: str = "min",
+        head_hidden: tuple[int, ...] = (128, 64),
+        # Encoder (shared)
+        num_pts: int = 512,
+        patch_size: int = 32,
+        encoder_channel: int = 128,
+        vit_depth: int = 4,
+        vit_heads: int = 4,
+        freeze_encoder: bool = False,
+        # Flow matching / diffusion head
+        n_layer: int = 4,
+        n_head: int = 4,
+        n_emb: int = 256,
+        p_drop_emb: float = 0.0,
+        p_drop_attn: float = 0.0,
+        use_mlp_head: bool = True,
+        pose_dim: int = 9,
+        aux_pose_dim: int = 9,
+        aux_reg: bool = True,
+        # Movement head
+        movement_head_hidden: tuple[int, ...] = (128, 64),
+        # Loss weights
+        sdf_weight: float = 1.0,
+        diffusion_weight: float = 1.0,
+        movement_weight: float = 1.0,
+        aux_weight: float = 1.0,
+    ):
+        super().__init__(
+            head_mode=head_mode,
+            patch_agg=patch_agg,
+            head_hidden=head_hidden,
+            num_pts=num_pts,
+            patch_size=patch_size,
+            encoder_channel=encoder_channel,
+            vit_depth=vit_depth,
+            vit_heads=vit_heads,
+            freeze_encoder=freeze_encoder,
+            n_layer=n_layer,
+            n_head=n_head,
+            n_emb=n_emb,
+            p_drop_emb=p_drop_emb,
+            p_drop_attn=p_drop_attn,
+            use_mlp_head=use_mlp_head,
+            pose_dim=pose_dim,
+            aux_pose_dim=aux_pose_dim,
+            aux_reg=aux_reg,
+            sdf_weight=sdf_weight,
+            diffusion_weight=diffusion_weight,
+            aux_weight=aux_weight,
+        )
+        self.movement_weight = movement_weight
+        self.movement_head = MovementPredictionHead(
+            patch_dim=self.encoder.feature_dim,
+            pose_dim=9,
+            head_hidden=movement_head_hidden,
+        )
+
+    def loss(
+        self,
+        # SDF inputs (tool at CONTACT pose)
+        tool_pc: torch.Tensor,
+        obj_pc: torch.Tensor,
+        tool_sdf_gt: torch.Tensor,
+        obj_sdf_gt: torch.Tensor,
+        # SDF inputs (tool at INIT pose - optional)
+        init_tool_sdf_gt: torch.Tensor = None,
+        init_obj_sdf_gt: torch.Tensor = None,
+        # Flow matching inputs (tool at INIT pose)
+        tool_pc_init: torch.Tensor = None,
+        delta_pose_gt: torch.Tensor = None,
+        init_pose_gt: torch.Tensor = None,
+        # Movement inputs
+        tool_delta_action: torch.Tensor = None,
+        obj_displacement_gt: torch.Tensor = None,
+        # Phase control
+        enable_flow: bool = True,
+    ) -> Tuple[torch.Tensor, dict]:
+        """Joint SDF + flow matching + movement loss computation."""
+        total_loss, metrics = super().loss(
+            tool_pc=tool_pc,
+            obj_pc=obj_pc,
+            tool_sdf_gt=tool_sdf_gt,
+            obj_sdf_gt=obj_sdf_gt,
+            init_tool_sdf_gt=init_tool_sdf_gt,
+            init_obj_sdf_gt=init_obj_sdf_gt,
+            tool_pc_init=tool_pc_init,
+            delta_pose_gt=delta_pose_gt,
+            init_pose_gt=init_pose_gt,
+            enable_flow=enable_flow,
+        )
+
+        if tool_delta_action is None:
+            raise ValueError("JointModel requires tool_delta_action for movement prediction.")
+        if obj_displacement_gt is None:
+            raise ValueError("JointModel requires obj_displacement_gt for movement prediction.")
+
+        enc = self.encoder.encode(tool_pc, obj_pc)
+        P = self.encoder.num_patches
+        _, obj_tok = _split_tokens(enc, P)
+        disp_pred = self.movement_head(
+            pc=obj_pc,
+            patch_tokens=obj_tok,
+            patch_idx=enc.obj_patch_idx,
+            patch_centers=enc.obj_patch_centers,
+            tool_delta_pose=tool_delta_action,
+        )
+        movement_loss = F.smooth_l1_loss(disp_pred, obj_displacement_gt)
+        total_loss = total_loss + self.movement_weight * movement_loss
+        metrics["movement_loss"] = movement_loss.item()
+        metrics["movement_gt_mean_abs"] = obj_displacement_gt.abs().mean().item()
+        metrics["movement_gt_max_abs"] = obj_displacement_gt.abs().max().item()
         metrics["total"] = total_loss.item()
         return total_loss, metrics

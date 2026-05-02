@@ -1,0 +1,87 @@
+python gen_dataset.py --method optimize --num-pairs 300 --num-poses 10 --batch-size 512 --gpus 0 1 --opt-steps 100 /mnt/project/world_model/tool_generalist/teardrop_contact
+
+python gen_initial.py --input-dir /mnt/project/world_model/tool_generalist/teardrop_contact/000_asym_teardrop_contour_scraper_var_000/
+
+torchrun --nproc_per_node=2 train.py \
+  --data-dir /mnt/project/world_model/tool_generalist/teardrop_contact/000_asym_teardrop_contour_scraper_var_000/ \
+  --diffusion --diffusion-steps 100 --sdf-weight 1.0 --diffusion-weight 1.0
+
+torchrun --nproc_per_node=4 train.py --data-dir /mnt/project/world_model/tool_generalist/teardrop_contact
+
+  export PYTHONPATH=/mnt/home/zhengyixin/tool-generalist:/mnt/home/zhengyixin/tool-generalist/source/IsaacLab_nonPrehensile
+
+
+CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 train.py --task sdf --head-mode point --epochs 100 --data-dir /mnt/project/world_model/tool_generalist/teardrop_contact/000_asym_teardrop_contour_scraper_var_000 --out-dir /mnt/project/world_model/tool_generalist/model/encoder/teardrop_sdf_point2
+
+CUDA_VISIBLE_DEVICES=5,6 torchrun --nproc_per_node=2 --master_port=29502 train.py --task movement --head-mode point --epochs 100 --data-dir /mnt/project/world_model/tool_generalist/teardrop_contact/000_asym_teardrop_contour_scraper_var_000 --out-dir /mnt/project/world_model/tool_generalist/model/encoder/teardrop_sdf_movement
+CUDA_VISIBLE_DEVICES=4,7 torchrun --nproc_per_node=2 --master_port=29503 train.py --task joint --head-mode point --epochs 700 --data-dir /mnt/project/world_model/tool_generalist/teardrop_contact/000_asym_teardrop_contour_scraper_var_000 --out-dir /mnt/project/world_model/tool_generalist/model/encoder/teardrop_sdf_diff
+
+CUDA_VISIBLE_DEVICES=4,5 torchrun --nproc_per_node=2 --master_port=29502 train.py --task movement --head-mode patch --epochs 100 --data-dir /mnt/project/world_model/tool_generalist/teardrop_contact/000_asym_teardrop_contour_scraper_var_000 --out-dir /mnt/project/world_model/tool_generalist/model/encoder/teardrop_sdf_movement_patch
+
+CUDA_VISIBLE_DEVICES=0,1 python -m torch.distributed.run --nnodes=1 --nproc_per_node=2 --master_port=29500 scripts/train.py --distributed --task=tool-sdf-teardrop-point-v0 --headless --logger wandb --num_envs 2048 --log_project_name teardrop_rl
+CUDA_VISIBLE_DEVICES=2,3 python -m torch.distributed.run --nnodes=1 --nproc_per_node=2 --master_port=29501 scripts/train.py --distributed --task=tool-sdf-teardrop-patch-v0 --headless --logger wandb --num_envs 2048 --log_project_name teardrop_rl
+CUDA_VISIBLE_DEVICES=5,6 python -m torch.distributed.run --nnodes=1 --nproc_per_node=2 --master_port=29502 scripts/train.py --distributed --task=tool-sdf-teardrop-movement-v0 --headless --logger wandb --num_envs 2048 --log_project_name teardrop_rl
+CUDA_VISIBLE_DEVICES=4,5 python -m torch.distributed.run --nnodes=1 --nproc_per_node=2 --master_port=29502 scripts/train.py --distributed --task=tool-sdf-teardrop-movement-patch-v0 --headless --logger wandb --num_envs 2048 --log_project_name teardrop_rl
+
+
+CUDA_VISIBLE_DEVICES=4,5,6,7 python -m torch.distributed.run --nnodes=1 --nproc_per_node=4 --master_port=29514 scripts/train.py --distributed \
+  --task=tool-sdf-teardrop-diffusion-patch-v0 --headless --logger wandb --num_envs 2048 --log_project_name teardrop_rl
+
+python -m torch.distributed.run --nnodes=1 --nproc_per_node=8 --master_port=29514 scripts/train.py --distributed \
+  --task=tool-sdf-teardrop-point2vec-v0 --headless --logger wandb --num_envs 1024 --log_project_name teardrop_rl
+
+CUDA_VISIBLE_DEVICES=2,3 torchrun --nproc_per_node=2 train.py --task sdf --head-mode patch --epochs 20 \
+  --data-dir /mnt/project/world_model/tool_generalist/contact_data \
+  --out-dir /mnt/project/world_model/tool_generalist/model/encoder/tool_sdf_patch
+
+  PYTHONPATH=/mnt/home/zhengyixin/tool-generalist:/mnt/home/zhengyixin/tool-generalist/source/IsaacLab_nonPrehensile:$PYTHONPATH   TOOL_GENERALIST_PATHS_YAML=/mnt/home/zhengyixin/tool-generalist/paths_multitool.yaml   CUDA_VISIBLE_DEVICES=0,1,2,3   python -m torch.distributed.run --nnodes=1 --nproc_per_node=4 --master_port=29575   scripts/train.py --distributed --task=tool-sdf-multitool-point-v0 --headless --logger wandb --num_envs 2048 --log_project_name all-tools
+
+
+  python pretrain/visualize_diffusion_output.py \
+    --checkpoint /mnt/project/world_model/tool_generalist/model/encoder/teardrop_sdf_diff/best.pt \
+    --input-dir teardrop_contact/000_asym_teardrop_contour_scraper_var_000 \
+    --num-samples 4 \
+    --save diffusion_output.png
+  
+  python scripts/play.py \
+    --task=tool-sdf-teardrop-movement-v0 \
+    --checkpoint /mnt/project/world_model/tool_generalist/RL/teardrop_sdf_movement/2026-04-29_05-41-07/model_3000.pt \
+    --num_envs 1 \
+    --video \
+    --video_length 100 \
+    --headless
+
+torchrun --nproc_per_node=2 train.py --task joint --head-mode patch --epochs 100 \
+  --data-dir /mnt/project/world_model/tool_generalist/teardrop_contact/000_asym_teardrop_contour_scraper_var_000 \
+  --out-dir /mnt/project/world_model/tool_generalist/model/encoder/teardrop_joint
+
+CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --nproc_per_node=4 train.py --task diffusion --head-mode patch --epochs 30 \
+  --data-dir /mnt/project/world_model/tool_generalist/contact_data \
+  --out-dir /mnt/project/world_model/tool_generalist/model/encoder/tool_sdf_patch_diff
+
+录视频：
+TOOL_GENERALIST_PATHS_YAML=/mnt/home/zhengyixin/tool-generalist/paths_record_video.yaml \
+python scripts/eval_tools.py \
+  --checkpoint /mnt/project/world_model/tool_generalist/RL/multitool_sdf_patch/2026-04-29_15-14-36/model_1500.patch \
+  --video \
+  --video_dir /mnt/project/world_model/tool_generalist/video/ \
+  --video_length 300 \
+  --video_width 256 \
+  --video_height 256 \
+  --video_fps 10 \
+  --num_envs 8 \
+  --num_episodes 8
+  --headless
+
+TOOL_GENERALIST_PATHS_YAML=/mnt/home/zhengyixin/tool-generalist/paths.yaml \
+python scripts/eval_tools.py \
+  --checkpoint /mnt/project/world_model/tool_generalist/RL/teardrop_sdf_joint/2026-04-30_12-39-41/model_1000.pt \
+  --video \
+  --video_dir /mnt/project/world_model/tool_generalist/video/ \
+  --video_length 300 \
+  --video_width 256 \
+  --video_height 256 \
+  --video_fps 10 \
+  --num_envs 8 \
+  --num_episodes 8 \
+  --headless

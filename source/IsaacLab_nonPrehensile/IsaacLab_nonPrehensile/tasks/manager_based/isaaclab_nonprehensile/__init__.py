@@ -36,6 +36,16 @@ gym.register(
     },
 )
 
+gym.register(
+    id="tool-point2vec-v0",
+    entry_point=f"{__name__}.env_tool:NonPrehensileEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.env_tool:NonPrehensileEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.config.rsl_rl_ppo_cfg:Point2VecPPORunnerCfg",
+    },
+)
+
 # Auto-register SDF experiment variants from SDF_VARIANTS dict.
 # Each variant is registered as "tool-sdf-<suffix>" with overridden policy/runner params.
 from .agents.config.rsl_rl_ppo_cfg import SDF_VARIANTS, make_sdf_variant

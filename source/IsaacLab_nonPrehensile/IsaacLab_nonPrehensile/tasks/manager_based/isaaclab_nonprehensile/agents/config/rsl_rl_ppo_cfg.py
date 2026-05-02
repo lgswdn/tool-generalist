@@ -8,6 +8,9 @@ from isaaclab_rl.rsl_rl import (
 from dataclasses import field
 
 
+POINT2VEC_CKPT_PATH = "/tmp/p2v/pre_point2vec-epoch.799-step.64800.ckpt"
+
+
 @configclass
 class MultiICPActorCriticCfg:
     """Config for Multi-ICP Actor-Critic with object cloud + tool cloud (as obstacle).
@@ -181,6 +184,94 @@ class MomentumPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         max_grad_norm=1.0,
     )
 
+@configclass
+class Point2VecActorCriticCfg:
+    """Config for Point2Vec Actor-Critic on object + tool xyz point clouds.
+
+    Observation layout (env_tool):
+        object_cloud (512*3=1536) | tool_cloud (512*3=1536) | extra_state
+    """
+
+    class_name: str = "ActorCriticPoint2Vec"
+
+    # Point cloud / state layout
+    point_dim: int = 3  # Only coordinates supported (3D)
+    num_points: int = 512
+    num_obstacles: int = 1
+
+    # Point2Vec encoder settings
+    point2vec_ckpt_path: str | None = POINT2VEC_CKPT_PATH
+    freeze_point2vec: bool = True
+
+    # Tokenizer settings
+    tokenizer_num_groups: int = 64
+    tokenizer_group_size: int = 32
+    tokenizer_group_radius: float | None = None
+
+    # Encoder settings
+    encoder_dim: int = 384
+    encoder_depth: int = 12
+    encoder_heads: int = 6
+    encoder_dropout: float = 0.0
+    encoder_attention_dropout: float = 0.05
+    encoder_drop_path_rate: float = 0.25
+    encoder_add_pos_at_every_layer: bool = True
+
+    # Feature aggregation
+    use_max_pooling: bool = True
+    use_mean_pooling: bool = True
+
+    # Data transformations
+    train_transformations: list[str] = field(default_factory=lambda: ["center", "unit_sphere"])
+    val_transformations: list[str] = field(default_factory=lambda: ["center", "unit_sphere"])
+
+    # StateDependentCrossFeatNet settings
+    use_sd_cross: bool = True
+    sd_num_query: int = 16
+    sd_emb_dim: int = 128
+    sd_cat_query: bool = False
+    sd_cat_ctx: bool = True
+
+    # Actor / Critic heads
+    fusion_hidden_dims: list[int] = field(default_factory=lambda: [256, 128, 64])
+    actor_hidden_dims: list[int] = field(default_factory=lambda: [64])
+    critic_hidden_dims: list[int] = field(default_factory=lambda: [64])
+
+    # Activation / noise
+    activation: str = "gelu"
+    init_noise_std: float = 1.0
+    noise_std_type: str = "scalar"
+
+
+@configclass
+class Point2VecPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    """RSL-RL PPO configuration for Point2Vec-encoder-based training."""
+
+    num_steps_per_env = 8
+    max_iterations = 1000000
+    save_interval = 500
+
+    experiment_name = "franka_nonprehensile_point2vec"
+
+    empirical_normalization = False
+
+    policy = Point2VecActorCriticCfg()
+
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=0.5,
+        use_clipped_value_loss=True,
+        clip_param=0.3,
+        entropy_coef=0.006,
+        num_learning_epochs=8,
+        num_mini_batches=8,
+        learning_rate=5.0e-5,
+        schedule="adaptive",
+        gamma=0.99,
+        lam=0.95,
+        desired_kl=0.016,
+        max_grad_norm=1.0,
+    )
+
 
 # =============================================================================
 # SDF Encoder configuration — for tool-sdf-v0
@@ -260,9 +351,9 @@ class SDFPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=0.5,
         use_clipped_value_loss=True,
         clip_param=0.3,
-        entropy_coef=0.006,
-        num_learning_epochs=8,
-        num_mini_batches=8,
+        entropy_coef=0.002,
+        num_learning_epochs=4,
+        num_mini_batches=16,
         learning_rate=5.0e-5,
         schedule="adaptive",
         gamma=0.99,
@@ -297,12 +388,60 @@ SDF_VARIANTS: dict[str, dict] = {
     },
     "teardrop-patch-v0": {
         "policy": {
-            "encoder_weights_path": "/mnt/project/world_model/tool_generalist/model/encoder/teardrop_sdf_point/best.pt",
+            "encoder_weights_path": "/mnt/project/world_model/tool_generalist/model/encoder/teardrop_sdf_patch/best.pt",
         },
         "runner": {
             "experiment_name": "teardrop_sdf_patch",
         },
     },
+    "teardrop-movement-v0": {
+        "policy": {
+            "encoder_weights_path": "/mnt/project/world_model/tool_generalist/model/encoder/teardrop_sdf_movement/best.pt",
+        },
+        "runner": {
+            "experiment_name": "teardrop_sdf_movement",
+        },
+    },
+    "teardrop-movement-patch-v0": {
+        "policy": {
+            "encoder_weights_path": "/mnt/project/world_model/tool_generalist/model/encoder/teardrop_sdf_movement_patch/best.pt",
+        },
+        "runner": {
+            "experiment_name": "teardrop_sdf_movement_patch",
+        },
+    },
+    "teardrop-diffusion-patch-v0": {
+        "policy": {
+            "encoder_weights_path": "/mnt/project/world_model/tool_generalist/model/encoder/teardrop_sdf_diff/best.pt",
+        },
+        "runner": {
+            "experiment_name": "teardrop_sdf_diffusion",
+        },
+    },
+    "teardrop-joint-v0": {
+        "policy": {
+            "encoder_weights_path": "/mnt/project/world_model/tool_generalist/model/encoder/teardrop_joint/best.pt",
+        },
+        "runner": {
+            "experiment_name": "teardrop_sdf_joint",
+        },
+    },
+    "multitool-patch-v0": {
+        "policy": {
+            "encoder_weights_path": "/mnt/project/world_model/tool_generalist/model/encoder/tool_sdf_patch/best.pt",
+        },
+        "runner": {
+            "experiment_name": "multitool_sdf_patch",
+        }
+    },
+    "multitool-point-v0": {
+        "policy": {
+            "encoder_weights_path": "/mnt/project/world_model/tool_generalist/model/encoder/tool_sdf_point/best.pt",
+        },
+        "runner": {
+            "experiment_name": "multitool_sdf_point",
+        }
+    }
 }
 
 

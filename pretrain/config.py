@@ -26,7 +26,8 @@ class TrainConfig:
     # Warmup: SDF+aux only phase before flow matching starts (0 = disabled).
     warmup_epochs: int = 0
 
-    # Task selector: "diffusion" (SDF+flow), "movement" (SDF+movement), "sdf" (SDF-only)
+    # Task selector: "diffusion" (SDF+pose flow), "translation" (SDF+translation flow),
+    # "movement" (SDF+movement), "sdf" (SDF-only)
     task: str = "diffusion"
 
     # Logging

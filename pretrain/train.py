@@ -24,6 +24,9 @@ Usage:
 
     # Movement-only training
     python train.py --data-dir /path/to/data/ --task movement
+
+    # Translation-only diffusion training
+    python train.py --data-dir /path/to/data/ --task translation
 """
 
 from __future__ import annotations
@@ -54,7 +57,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from config import TrainConfig, DEFAULT_CONFIG
 from dataset import make_split
-from model import SDFSegmentor, DiffusionModel, MovementModel
+from model import SDFSegmentor, DiffusionModel, MovementModel, JointModel
 
 
 # --------------------------------------------------------------------------- #
@@ -103,7 +106,7 @@ def load_ckpt(path: str, model: torch.nn.Module, optimizer=None):
 
 _OPTIONAL_KEYS = {
     "tool_pc_init", "init_tool_pts_sdf", "init_obj_pts_sdf",
-    "delta_pose", "init_pose",
+    "delta_pose", "delta_translation", "init_pose", "init_translation",
     "obj_point_displacement", "tool_delta_pose",
 }
 
@@ -159,7 +162,9 @@ def run_epoch(
             # Flow matching inputs (optional)
             tool_pc_init = _safe_to_device(batch.get("tool_pc_init"), device)
             delta_pose = _safe_to_device(batch.get("delta_pose"), device)
+            delta_translation = _safe_to_device(batch.get("delta_translation"), device)
             init_pose = _safe_to_device(batch.get("init_pose"), device)
+            init_translation = _safe_to_device(batch.get("init_translation"), device)
 
             # Movement inputs (optional)
             obj_point_displacement = _safe_to_device(batch.get("obj_point_displacement"), device)
@@ -169,7 +174,16 @@ def run_epoch(
             # Build kwargs based on model type
             fwd_kwargs = {}
             raw_model = model.module if isinstance(model, DDP) else model
-            if isinstance(raw_model, MovementModel):
+            if isinstance(raw_model, JointModel):
+                fwd_kwargs["tool_pc_init"] = tool_pc_init
+                fwd_kwargs["delta_pose_gt"] = delta_pose
+                fwd_kwargs["init_pose_gt"] = init_pose
+                fwd_kwargs["enable_flow"] = enable_flow
+                fwd_kwargs["init_tool_sdf_gt"] = init_tool_sdf_gt
+                fwd_kwargs["init_obj_sdf_gt"] = init_obj_sdf_gt
+                fwd_kwargs["tool_delta_action"] = tool_delta_pose
+                fwd_kwargs["obj_displacement_gt"] = obj_point_displacement
+            elif isinstance(raw_model, MovementModel):
                 fwd_kwargs["tool_delta_action"] = tool_delta_pose
                 fwd_kwargs["obj_displacement_gt"] = obj_point_displacement
                 fwd_kwargs["tool_pc_init"] = tool_pc_init
@@ -177,8 +191,12 @@ def run_epoch(
                 fwd_kwargs["init_obj_sdf_gt"] = init_obj_sdf_gt
             elif isinstance(raw_model, DiffusionModel):
                 fwd_kwargs["tool_pc_init"] = tool_pc_init
-                fwd_kwargs["delta_pose_gt"] = delta_pose
-                fwd_kwargs["init_pose_gt"] = init_pose
+                if raw_model.pose_dim == 3:
+                    fwd_kwargs["delta_pose_gt"] = delta_translation
+                    fwd_kwargs["init_pose_gt"] = init_translation
+                else:
+                    fwd_kwargs["delta_pose_gt"] = delta_pose
+                    fwd_kwargs["init_pose_gt"] = init_pose
                 fwd_kwargs["enable_flow"] = enable_flow
                 fwd_kwargs["init_tool_sdf_gt"] = init_tool_sdf_gt
                 fwd_kwargs["init_obj_sdf_gt"] = init_obj_sdf_gt
@@ -281,8 +299,8 @@ def main():
     parser.add_argument("--warmup-epochs", type=int, default=-1,
                         help="Override warmup epochs (-1=use config)")
     parser.add_argument("--task", type=str, default="",
-                        choices=["", "diffusion", "movement", "sdf"],
-                        help="Task: 'diffusion' (SDF+flow), 'movement' (SDF+movement), 'sdf' (SDF-only)")
+                        choices=["", "diffusion", "translation", "movement", "joint", "sdf"],
+                        help="Task: 'diffusion' (SDF+pose flow), 'translation' (SDF+translation flow), 'movement' (SDF+movement), 'joint' (SDF+pose flow+movement), 'sdf' (SDF-only)")
     parser.add_argument("--head-mode", type=str, default="",
                         choices=["", "point", "patch"],
                         help="SDF head mode (default from config)")
@@ -343,13 +361,17 @@ def main():
     # ---- Data ----
     train_ds, val_ds = make_split(
         cfg.data_dir, val_ratio=cfg.val_ratio, max_files=cfg.max_files,
+        require_movement=(cfg.task == "movement" or cfg.task == "joint"),
     )
     if is_main():
         skipped = train_ds.get_skipped_files() + val_ds.get_skipped_files()
         if skipped:
-            print(f"⚠ Skipped {len(skipped)} corrupted files:")
+            print(f"⚠ Skipped {len(skipped)} corrupted/incompatible files:")
             for f in skipped:
                 print(f"    {f}")
+        skipped_mvmt = train_ds._skipped_movement_configs + val_ds._skipped_movement_configs
+        if skipped_mvmt > 0:
+            print(f"⚠ Skipped {skipped_mvmt} configs with invalid movement data")
         print(f"Train: {len(train_ds)}  Val: {len(val_ds)}  GPUs: {world_size}")
         print(f"Config: task={cfg.task}, head_mode={cfg.head_mode}, "
               f"patch_agg={cfg.patch_agg}, diffusion={cfg.diffusion}")
@@ -375,7 +397,34 @@ def main():
     )
 
     # ---- Model ----
-    if cfg.task == "movement":
+    if cfg.task == "joint":
+        model = JointModel(
+            head_mode=cfg.head_mode,
+            patch_agg=cfg.patch_agg,
+            head_hidden=cfg.head_hidden,
+            num_pts=cfg.num_pts,
+            patch_size=cfg.patch_size,
+            encoder_channel=cfg.encoder_channel,
+            vit_depth=cfg.vit_depth,
+            vit_heads=cfg.vit_heads,
+            freeze_encoder=cfg.freeze_encoder,
+            n_layer=cfg.n_layer,
+            n_head=cfg.n_head,
+            n_emb=cfg.n_emb,
+            p_drop_emb=cfg.p_drop_emb,
+            p_drop_attn=cfg.p_drop_attn,
+            use_mlp_head=cfg.use_mlp_head,
+            pose_dim=9,
+            aux_pose_dim=9,
+            aux_reg=cfg.aux_reg,
+            movement_head_hidden=cfg.movement_head_hidden,
+            sdf_weight=cfg.sdf_weight,
+            diffusion_weight=cfg.diffusion_weight,
+            movement_weight=cfg.movement_weight,
+            aux_weight=cfg.aux_weight,
+        ).to(device)
+        model_name = "JointModel"
+    elif cfg.task == "movement":
         model = MovementModel(
             head_mode=cfg.head_mode,
             patch_agg=cfg.patch_agg,
@@ -408,12 +457,14 @@ def main():
             p_drop_emb=cfg.p_drop_emb,
             p_drop_attn=cfg.p_drop_attn,
             use_mlp_head=cfg.use_mlp_head,
+            pose_dim=3 if cfg.task == "translation" else 9,
+            aux_pose_dim=3 if cfg.task == "translation" else 9,
             aux_reg=cfg.aux_reg,
             sdf_weight=cfg.sdf_weight,
             diffusion_weight=cfg.diffusion_weight,
             aux_weight=cfg.aux_weight,
         ).to(device)
-        model_name = "DiffusionModel"
+        model_name = "TranslationDiffusionModel" if cfg.task == "translation" else "DiffusionModel"
     else:
         model = SDFSegmentor(
             head_mode=cfg.head_mode,

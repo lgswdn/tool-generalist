@@ -41,6 +41,8 @@ NUM_OBJ_PTS  = 512
 # Raw displacements are ~4mm avg, ~3cm max → dividing by 0.01 gives ~0.4 avg, ~3.0 max,
 # matching the dynamic range of SDF targets and preventing trivial zero-prediction.
 DISPLACEMENT_NORM_SCALE = 0.01  # 1 cm
+DELTA_TRANSLATION_NORM_SCALE = 0.0252
+DELTA_ROTATION_6D_NORM_SCALE = 0.9946
 
 
 # --------------------------------------------------------------------------- #
@@ -62,10 +64,18 @@ class ContactDataset(Dataset):
           No additional scale augmentation needed.
     """
 
+    # Keys required for movement prediction task
+    _MOVEMENT_KEYS = {
+        "delta_obj_translations", "delta_obj_rotations",
+        "movement_contact_pts",
+        "delta_tool_translations", "delta_tool_rotations",
+    }
+
     def __init__(
         self,
         pt_files: List[str],
         augment: bool = True,
+        require_movement: bool = False,
     ):
         self.augment = augment
 
@@ -73,12 +83,30 @@ class ContactDataset(Dataset):
         self._index: List[Tuple[str, int]] = []
         self._pt_cache: dict = {}
         self._skipped_files: List[str] = []  # Track corrupted files
+        self._skipped_movement_configs: int = 0
 
         for path in pt_files:
             try:
                 data = torch.load(path, map_location="cpu", weights_only=False)
                 n = data["tool_translations"].shape[0]
+
+                # If movement is required, skip files missing movement keys entirely
+                if require_movement and not self._MOVEMENT_KEYS.issubset(data.keys()):
+                    self._skipped_files.append(path)
+                    continue
+
                 for i in range(n):
+                    if require_movement:
+                        # Validate per-config movement data is accessible
+                        try:
+                            _ = data["delta_obj_rotations"][i]
+                            _ = data["delta_obj_translations"][i]
+                            _ = data["movement_contact_pts"][i]
+                            _ = data["delta_tool_translations"][i]
+                            _ = data["delta_tool_rotations"][i]
+                        except Exception:
+                            self._skipped_movement_configs += 1
+                            continue
                     self._index.append((path, i))
                 self._pt_cache[path] = data
             except (RuntimeError, IOError, OSError) as e:
@@ -156,19 +184,21 @@ class ContactDataset(Dataset):
             delta_R = contact_R @ init_R.T  # (3, 3)
             delta_R_6d = delta_R[:, :2].reshape(6)  # (6,)
 
-            delta_t_norm = delta_t / 0.0987
-            delta_R_6d_norm = delta_R_6d / 0.8757
+            delta_t_norm = delta_t / DELTA_TRANSLATION_NORM_SCALE
+            delta_R_6d_norm = delta_R_6d / DELTA_ROTATION_6D_NORM_SCALE
 
             # Full delta pose (9D) 
             delta_pose = torch.cat([delta_t_norm, delta_R_6d_norm], dim=0)  # (9,)
 
         # ---- Init pose (9D: translation + 6D rotation) ----
         init_pose = None
+        init_translation = None
         if "init_translations" in data and "init_rotations" in data:
             init_t = data["init_translations"][cfg_i]    # (3,)
             init_R = data["init_rotations"][cfg_i]       # (3, 3)
             init_R_6d = init_R[:, :2].reshape(6)         # (6,)
             init_pose = torch.cat([init_t, init_R_6d], dim=0)  # (9,)
+            init_translation = init_t
 
         # ---- Movement prediction: per-point displacement (on-the-fly) ---------
         obj_point_displacement = None
@@ -222,8 +252,10 @@ class ContactDataset(Dataset):
             "contact_normals":     contact_normals.float(),  # (5, 3)
             # Diffusion supervision (optional - None if init poses not generated)
             "delta_pose":          delta_pose.float() if delta_pose is not None else None,
+            "delta_translation":   delta_pose[:3].float() if delta_pose is not None else None,
             # Init pose for conditioning tests
             "init_pose":           init_pose.float() if init_pose is not None else None,  # (9,)
+            "init_translation":    init_translation.float() if init_translation is not None else None,  # (3,)
             # Movement prediction (optional - None if gen_movement_delta not run)
             "obj_point_displacement": obj_point_displacement.float() if obj_point_displacement is not None else None,  # (Q, 3)
             "tool_delta_pose":        tool_delta_pose_9d.float() if tool_delta_pose_9d is not None else None,  # (9,)
@@ -245,12 +277,14 @@ def make_split(
     seed: int = 42,
     augment: bool = True,
     max_files: int = 0,
+    require_movement: bool = False,
 ) -> Tuple[ContactDataset, ContactDataset]:
     """Return (train_dataset, val_dataset) split by file.
 
     Args:
         max_files: If > 0, limit total number of .pt files before splitting.
                    Useful for quick single-file overfitting tests.
+        require_movement: If True, only include configs with valid movement data.
     """
     files = collect_pt_files(data_dir)
     if not files:
@@ -266,6 +300,6 @@ def make_split(
         # If only 1 file, use it for both train and val
         train_files = val_files
     return (
-        ContactDataset(train_files, augment=augment),
-        ContactDataset(val_files,   augment=False),
+        ContactDataset(train_files, augment=augment, require_movement=require_movement),
+        ContactDataset(val_files,   augment=False,   require_movement=require_movement),
     )

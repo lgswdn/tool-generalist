@@ -3,16 +3,15 @@
 gen_initial.py — Generate initial poses for each contact config.
 
 For each config in a .pt file, generates one initial pose where:
-  1. Sample an anchor point on object surface
-  2. Get outward normal direction with perturbation
-  3. Translate tool away from anchor (1-5cm default)
-  4. Apply small random rotation perturbation
-  5. Rejection sampling to ensure no penetration
+  1. Use the saved contact point/normal for that config
+  2. Translate the contact tool pose away from the object (1-5cm default)
+  3. Apply small random rotation perturbation around the contact rotation
+  4. Rejection sampling ensures no penetration
 
 Adds to .pt file:
   - init_translations: (N, 3) initial tool positions
   - init_rotations: (N, 3, 3) initial tool rotations
-  - init_anchor_pts: (N, 3) anchor points on object surface
+  - init_anchor_pts: (N, 3) mean contact points used as pull anchors
 
 Usage:
     python gen_initial.py --input contact_configs.pt
@@ -27,7 +26,6 @@ import os
 import sys
 from pathlib import Path
 
-import numpy as np
 import torch
 import trimesh
 
@@ -63,32 +61,6 @@ def load_mesh(path: str, device: str) -> tuple[torch.Tensor, torch.Tensor]:
     verts = torch.tensor(mesh.vertices, dtype=torch.float32, device=device)
     faces = torch.tensor(mesh.faces, dtype=torch.int64, device=device)
     return verts, faces
-
-
-def random_rotation_downward(n: int, device: str) -> torch.Tensor:
-    """Random rotation with Z-axis pointing downward (z_z < 0).
-
-    Samples random rotations and filters those with z_z < 0.
-    """
-    # Sample more than needed, then filter
-    H = torch.randn(n * 4, 3, 3, device=device)  # 4x to ensure enough valid
-    Q, R_ = torch.linalg.qr(H)
-    signs = torch.sign(torch.diagonal(R_, dim1=-2, dim2=-1))
-    Q = Q * signs.unsqueeze(-2)
-    det = torch.det(Q)
-    Q[det < 0] *= -1
-
-    # Check z-axis (third column)
-    z_axis = Q[:, :, 2]  # (N*4, 3)
-    valid_mask = z_axis[:, 2] < 0  # z_z < 0 (pointing down)
-    valid_Q = Q[valid_mask]
-
-    # Take first n valid
-    if valid_Q.shape[0] < n:
-        # If not enough, regenerate (shouldn't happen often)
-        return random_rotation_downward(n, device)
-
-    return valid_Q[:n]
 
 
 def compute_unsigned_distance_batch(
@@ -251,125 +223,69 @@ def compute_sign_trimesh(points, obj_verts, obj_faces):
     return torch.stack(results)
 
 
-def sample_anchor_points(
+def contact_pull_candidates(
+    contact_t: torch.Tensor,  # (N, 3)
+    contact_R: torch.Tensor,  # (N, 3, 3)
+    contact_pts: torch.Tensor,  # (N, C, 3)
+    contact_normals: torch.Tensor,  # (N, C, 3)
     obj_verts: torch.Tensor,  # (V, 3)
-    obj_faces: torch.Tensor,  # (F, 3)
-    n: int,
-    device: str,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Sample random anchor points on object surface and compute outward normals.
-
-    Returns:
-        anchor_pts: (N, 3) points on surface
-        outward_normals: (N, 3) normals pointing away from object
-    """
-    # Randomly sample points on mesh surface
-    if HAS_KAOLIN:
-        face_verts = kaolin.ops.mesh.index_vertices_by_faces(
-            obj_verts.unsqueeze(0), obj_faces
-        )  # (1, F, 3, 3)
-
-        # Random face indices
-        n_faces = obj_faces.shape[0]
-        face_idx = torch.randint(0, n_faces, (n,), device=device)
-
-        # Random barycentric coordinates
-        r1 = torch.rand(n, device=device)
-        r2 = torch.rand(n, device=device)
-        sqrt_r1 = torch.sqrt(r1)
-        u = 1 - sqrt_r1
-        v = sqrt_r1 * (1 - r2)
-        w = sqrt_r1 * r2
-
-        # Get triangle vertices
-        triangles = face_verts[0, face_idx]  # (N, 3, 3)
-        anchor_pts = (
-            u.unsqueeze(-1) * triangles[:, 0]
-            + v.unsqueeze(-1) * triangles[:, 1]
-            + w.unsqueeze(-1) * triangles[:, 2]
-        )  # (N, 3)
-
-        # Compute face normals
-        v0, v1, v2 = triangles[:, 0], triangles[:, 1], triangles[:, 2]
-        face_normals = torch.cross(v1 - v0, v2 - v0, dim=-1)
-        face_normals = torch.nn.functional.normalize(face_normals, dim=-1)
-
-        # Ensure outward direction (away from center)
-        obj_center = obj_verts.mean(dim=0)
-        center_to_face = triangles.mean(dim=1) - obj_center
-        dot = (face_normals * center_to_face).sum(dim=-1)
-        outward_normals = torch.where(
-            dot.unsqueeze(-1) > 0,
-            face_normals,
-            -face_normals
-        )
-    else:
-        # Fallback: sample from vertices
-        idx = torch.randint(0, obj_verts.shape[0], (n,), device=device)
-        anchor_pts = obj_verts[idx]
-        outward_normals = torch.nn.functional.normalize(anchor_pts - obj_verts.mean(dim=0), dim=-1)
-
-    return anchor_pts, outward_normals
-
-
-def random_poses_away_from_anchor(
-    n: int,
-    obj_verts: torch.Tensor,  # (V, 3)
-    obj_faces: torch.Tensor,  # (F, 3)
+    attempts: int,
     pull_distance_range: tuple,  # (min, max) meters to pull away
     perturbation_scale: float,  # spread around outward direction
     rot_angle_max_deg: float,  # max random rotation angle
     device: str,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Generate poses pulled away from anchor points with rejection sampling.
+    """Generate contact-relative initial pose candidates.
 
     For each pose:
-    1. Sample anchor point on object surface
-    2. Get outward normal direction
-    3. Add perturbation for diversity
-    4. Translate away from anchor along perturbed direction
-    5. Apply small random rotation
+    1. Use the mean saved contact point as anchor
+    2. Pull the contact tool translation away along the contact normal
+    3. Apply a small random rotation around the contact rotation
 
     Returns:
-        positions: (N, 3)
-        rotations: (N, 3, 3)
-        anchor_pts: (N, 3) the sampled anchor points
+        positions: (N, attempts, 3)
+        rotations: (N, attempts, 3, 3)
+        anchor_pts: (N, 3) mean contact point
     """
-    # Sample anchors and outward normals
-    anchor_pts, outward_normals = sample_anchor_points(obj_verts, obj_faces, n, device)
+    n = contact_t.shape[0]
+    anchor_pts = contact_pts.mean(dim=1)
+
+    obj_center = obj_verts.mean(dim=0)
+    center_to_anchor = anchor_pts - obj_center.unsqueeze(0)
+    normals = torch.nn.functional.normalize(contact_normals, dim=-1)
+    normal_alignment = (normals * center_to_anchor.unsqueeze(1)).sum(dim=-1, keepdim=True)
+    outward_normals = torch.where(normal_alignment >= 0.0, normals, -normals)
+    pull_normals = torch.nn.functional.normalize(outward_normals.mean(dim=1), dim=-1)
 
     # Add perturbation to outward direction for diversity
-    perturbation = torch.randn(n, 3, device=device) * perturbation_scale
-    pull_directions = outward_normals + perturbation
+    perturbation = torch.randn(n, attempts, 3, device=device) * perturbation_scale
+    pull_directions = pull_normals.unsqueeze(1) + perturbation
     pull_directions = torch.nn.functional.normalize(pull_directions, dim=-1)
 
     # Random pull distance
     min_dist, max_dist = pull_distance_range
-    pull_distance = torch.rand(n, 1, device=device) * (max_dist - min_dist) + min_dist
+    pull_distance = torch.rand(n, attempts, 1, device=device) * (max_dist - min_dist) + min_dist
 
-    # Position: anchor + pull_distance * pull_direction
-    positions = anchor_pts + pull_distance * pull_directions
+    # Position: contact translation pulled away from object
+    positions = contact_t.unsqueeze(1) + pull_distance * pull_directions
 
-    # Random rotation with downward constraint + small perturbation
-    base_rotations = random_rotation_downward(n, device)
-
-    # Add small random rotation perturbation
+    # Add small random rotation perturbation around contact rotation
     import math
-    axis = torch.nn.functional.normalize(torch.randn(n, 3, device=device), dim=-1)
-    angle = torch.rand(n, device=device) * math.radians(rot_angle_max_deg)
+    axis = torch.nn.functional.normalize(torch.randn(n, attempts, 3, device=device), dim=-1)
+    angle = torch.rand(n, attempts, device=device) * math.radians(rot_angle_max_deg)
 
-    K = torch.zeros(n, 3, 3, device=device)
-    K[:, 0, 1] = -axis[:, 2]
-    K[:, 0, 2] = axis[:, 1]
-    K[:, 1, 0] = axis[:, 2]
-    K[:, 1, 2] = -axis[:, 0]
-    K[:, 2, 0] = -axis[:, 1]
-    K[:, 2, 1] = axis[:, 0]
-    eye = torch.eye(3, device=device).unsqueeze(0).expand(n, -1, -1)
+    K = torch.zeros(n, attempts, 3, 3, device=device)
+    K[:, :, 0, 1] = -axis[:, :, 2]
+    K[:, :, 0, 2] = axis[:, :, 1]
+    K[:, :, 1, 0] = axis[:, :, 2]
+    K[:, :, 1, 2] = -axis[:, :, 0]
+    K[:, :, 2, 0] = -axis[:, :, 1]
+    K[:, :, 2, 1] = axis[:, :, 0]
+    eye = torch.eye(3, device=device).view(1, 1, 3, 3).expand(n, attempts, -1, -1)
     small_R = eye + torch.sin(angle.unsqueeze(-1).unsqueeze(-1)) * K + \
               (1 - torch.cos(angle.unsqueeze(-1).unsqueeze(-1))) * (K @ K)
 
-    rotations = small_R @ base_rotations
+    rotations = small_R @ contact_R.unsqueeze(1)
 
     return positions, rotations, anchor_pts
 
@@ -447,22 +363,31 @@ def process_pt_file(pt_path: str, cfg: Config) -> bool:
     obj_verts = obj_verts.clone()
     obj_verts[:, 2] -= z_shift
 
-    # Generate initial poses in batches using anchor-based approach
-    init_translations = []
-    init_rotations = []
-    init_anchor_pts = []
+    # Generate initial poses in batches from the matching contact poses
+    contact_translations = data["tool_translations"].to(device)
+    contact_rotations = data["tool_rotations"].to(device)
+    contact_pts = data["contact_pts_world"].to(device)
+    contact_normals = data["contact_normals"].to(device)
+
+    init_translations = torch.empty(n_configs, 3, device=device)
+    init_rotations = torch.empty(n_configs, 3, 3, device=device)
+    init_anchor_pts = torch.empty(n_configs, 3, device=device)
 
     torch.manual_seed(cfg.seed)
 
-    remaining = n_configs
+    unresolved = torch.arange(n_configs, device=device)
     attempts_per_config = 10
 
-    while remaining > 0:
-        batch_n = min(cfg.batch_size, remaining * attempts_per_config)
+    while unresolved.numel() > 0:
+        batch_idx = unresolved[:cfg.batch_size]
 
-        # Generate candidates using anchor-based approach
-        cand_t, cand_R, cand_anchor = random_poses_away_from_anchor(
-            batch_n, obj_verts, obj_faces,
+        cand_t, cand_R, cand_anchor = contact_pull_candidates(
+            contact_translations[batch_idx],
+            contact_rotations[batch_idx],
+            contact_pts[batch_idx],
+            contact_normals[batch_idx],
+            obj_verts,
+            attempts_per_config,
             (cfg.pull_distance_min, cfg.pull_distance_max),
             cfg.perturbation_scale,
             cfg.rot_angle_max_deg,
@@ -470,29 +395,34 @@ def process_pt_file(pt_path: str, cfg: Config) -> bool:
         )
 
         # Check collision with rejection sampling
+        B = batch_idx.shape[0]
+        cand_t_flat = cand_t.reshape(B * attempts_per_config, 3)
+        cand_R_flat = cand_R.reshape(B * attempts_per_config, 3, 3)
         valid_mask = check_collision_free(
-            tool_verts, cand_t, cand_R,
+            tool_verts, cand_t_flat, cand_R_flat,
             obj_verts, obj_faces,
             cfg.collision_threshold, device
-        )
+        ).view(B, attempts_per_config)
 
-        valid_t = cand_t[valid_mask]
-        valid_R = cand_R[valid_mask]
-        valid_anchor = cand_anchor[valid_mask]
+        has_valid = valid_mask.any(dim=1)
+        first_valid = valid_mask.float().argmax(dim=1)
 
-        # Take as many as needed
-        take = min(valid_t.shape[0], remaining)
-        if take > 0:
-            init_translations.append(valid_t[:take].cpu())
-            init_rotations.append(valid_R[:take].cpu())
-            init_anchor_pts.append(valid_anchor[:take].cpu())
-            remaining -= take
-        else:
+        valid_rows = has_valid.nonzero(as_tuple=False).squeeze(1)
+        if valid_rows.numel() > 0:
+            valid_config_idx = batch_idx[valid_rows]
+            valid_attempt_idx = first_valid[valid_rows]
+            init_translations[valid_config_idx] = cand_t[valid_rows, valid_attempt_idx]
+            init_rotations[valid_config_idx] = cand_R[valid_rows, valid_attempt_idx]
+            init_anchor_pts[valid_config_idx] = cand_anchor[valid_rows]
+
+        failed_batch_idx = batch_idx[~has_valid]
+        unresolved = torch.cat([unresolved[cfg.batch_size:], failed_batch_idx], dim=0)
+        if failed_batch_idx.numel() == B:
             print(f"    [WARN] No valid poses found in batch, retrying...")
 
-    init_translations = torch.cat(init_translations, dim=0)
-    init_rotations = torch.cat(init_rotations, dim=0)
-    init_anchor_pts = torch.cat(init_anchor_pts, dim=0)
+    init_translations = init_translations.cpu()
+    init_rotations = init_rotations.cpu()
+    init_anchor_pts = init_anchor_pts.cpu()
 
     # ---- Compute SDFs at initial pose ----
     # Get canonical tool and object points from data

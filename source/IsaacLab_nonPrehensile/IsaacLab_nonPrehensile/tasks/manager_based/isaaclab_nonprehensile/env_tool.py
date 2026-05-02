@@ -481,7 +481,7 @@ class RewardsCfg:
         params={
             "command_name": "target_object_pose", 
             "threshold": 0.05, 
-            "rotation_threshold": 0.1, 
+            "rotation_threshold": 0.2,
             "planar": False,
             "base_reward": 1.0,  # Base reward for success
         },
@@ -534,7 +534,7 @@ class TerminationsCfg:
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
     reached = DoneTerm(
         func=mdp.object_reached_goal,
-        params={"command_name": "target_object_pose", "threshold": 0.05, "rotation_threshold": 0.1, "planar": False},
+        params={"command_name": "target_object_pose", "threshold": 0.05, "rotation_threshold": 0.2, "planar": False},
     )
     object_dropped = DoneTerm(
         func=mdp.object_dropped_off_table,
