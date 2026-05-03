@@ -126,14 +126,12 @@ def task_success_reward(
     # Get current object orientation and convert to euler
     object_quat_w = object.data.root_quat_w  # (num_envs, 4) [w, x, y, z]
     
-    position_distance = torch.norm(des_pos_env[:, :2] - object_pos_env[:, :2], dim=1)
-    
     if planar:
-        # position_distance = torch.norm(des_pos_env[:, :2] - object_pos_env[:, :2], dim=1)
+        position_distance = torch.norm(des_pos_env[:, :2] - object_pos_env[:, :2], dim=1)
         position_reached = position_distance < threshold
         return position_reached.float()
 
-    # position_distance = torch.norm(des_pos_env - object_pos_env, dim=1)
+    position_distance = torch.norm(des_pos_env - object_pos_env, dim=1)
     
     dot_product = torch.sum(object_quat_w * des_rot_env, dim=1)
     dot_product = torch.clamp(torch.abs(dot_product), max=1.0)

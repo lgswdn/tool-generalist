@@ -1,5 +1,5 @@
-export http_proxy=hyyp://'galbot:sK0aZ5bZ9v'@10.119.176.202:3128
-export https_proxy=hyyp://'galbot:sK0aZ5bZ9v'@10.119.176.202:3128
+export http_proxy=http://'galbot:sK0aZ5bZ9v'@10.119.176.202:3128
+export https_proxy=http://'galbot:sK0aZ5bZ9v'@10.119.176.202:3128
 
 
 python gen_dataset.py --method optimize --num-pairs 300 --num-poses 10 --batch-size 512 --gpus 0 1 --opt-steps 100 /mnt/project/world_model/tool_generalist/teardrop_contact
@@ -32,7 +32,7 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 python -m torch.distributed.run --nnodes=1 --nproc_
   --task=tool-sdf-teardrop-diffusion-patch-v0 --headless --logger wandb --num_envs 2048 --log_project_name teardrop_rl
 
 python -m torch.distributed.run --nnodes=1 --nproc_per_node=8 --master_port=29514 scripts/train.py --distributed \
-  --task=tool-sdf-teardrop-point2vec-v0 --headless --logger wandb --num_envs 1024 --log_project_name teardrop_rl
+  --task=tool-sdf-teardrop-joint-v0 --headless --logger wandb --num_envs 1024 --log_project_name teardrop_rl
 
 CUDA_VISIBLE_DEVICES=2,3 torchrun --nproc_per_node=2 train.py --task sdf --head-mode patch --epochs 20 \
   --data-dir /mnt/project/world_model/tool_generalist/contact_data \
