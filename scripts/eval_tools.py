@@ -326,6 +326,8 @@ def _activate_video_slots(
 def _capture_video_frames(env, video_records: list[dict], recording: set[int]) -> None:
     if len(recording) == 0:
         return
+    env.unwrapped.sim.render()
+    env.unwrapped.scene["eval_record_camera"].update(dt=0.0, force_recompute=True)
     rgb_all = env.unwrapped.scene["eval_record_camera"].data.output["rgb"]
     for record_idx in list(recording):
         record = video_records[record_idx]

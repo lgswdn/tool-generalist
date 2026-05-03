@@ -493,31 +493,31 @@ class RewardsCfg:
         params={
             "std": 0.15,
         },
-        weight=0.6,
+        weight=1,
     )
 
     object_goal_tracking = RewTerm(
         func=mdp.object_goal_distance_tanh,
         params={
-            "std": 0.5,
+            "std": 0.6,
             "command_name": "target_object_pose",
-            "obj_ee_distance_threshold": 0.15,
+            "obj_ee_distance_threshold": 0.1,
             "ee_frame_cfg": SceneEntityCfg("ee_frame"),
             "object_cfg": SceneEntityCfg("object"),
         },
-        weight=3.0,
+        weight=5.0,
     )
 
     object_goal_tracking_fine_grained = RewTerm(
         func=mdp.object_goal_distance_tanh,
         params={
-            "std": 0.2,
+            "std": 0.3,
             "command_name": "target_object_pose",
-            "obj_ee_distance_threshold": 0.15,
+            "obj_ee_distance_threshold": 0.1,
             "ee_frame_cfg": SceneEntityCfg("ee_frame"),
             "object_cfg": SceneEntityCfg("object"),
         },
-        weight=7.0,
+        weight=16.0,
     )
     
     # Energy penalty: c_energy = k_e * Σ(τ_i * q̇_i)
