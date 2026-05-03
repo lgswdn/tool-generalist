@@ -40,7 +40,7 @@ class NewPretrainConfig:
     pose_dim: int = 7              # 3 (trans) + 4 (quaternion)
 
     # ── Denoising head ───────────────────────────────────────────────────
-    denoise_hidden: int = 256
+    denoise_hidden: Tuple[int, ...] = (256, 128)
 
     # ── Diffusion noising ────────────────────────────────────────────────
     num_diffusion_steps: int = 10
