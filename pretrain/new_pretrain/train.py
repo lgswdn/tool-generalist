@@ -47,7 +47,9 @@ _PRETRAIN_DIR = _THIS_DIR.parent
 _REPO_ROOT    = _PRETRAIN_DIR.parent
 _RPDIFF_SRC   = _PRETRAIN_DIR / "rpdiff" / "src"
 
-for p in [str(_REPO_ROOT), str(_PRETRAIN_DIR), str(_RPDIFF_SRC), str(_THIS_DIR)]:
+# NOTE: do NOT add _PRETRAIN_DIR — it has config.py/model.py/dataset.py
+# that would shadow our new_pretrain versions.
+for p in [str(_REPO_ROOT), str(_RPDIFF_SRC), str(_THIS_DIR)]:
     if p not in sys.path:
         sys.path.insert(0, p)
 

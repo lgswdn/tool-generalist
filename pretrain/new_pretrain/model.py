@@ -29,7 +29,9 @@ _PRETRAIN_DIR     = _NEW_PRETRAIN_DIR.parent
 _REPO_ROOT        = _PRETRAIN_DIR.parent
 _RPDIFF_SRC       = _PRETRAIN_DIR / "rpdiff" / "src"
 
-for p in [str(_REPO_ROOT), str(_PRETRAIN_DIR), str(_RPDIFF_SRC)]:
+# NOTE: do NOT add _PRETRAIN_DIR to sys.path — it has its own config.py,
+# model.py, dataset.py that would shadow our new_pretrain versions.
+for p in [str(_REPO_ROOT), str(_RPDIFF_SRC)]:
     if p not in sys.path:
         sys.path.insert(0, p)
 
@@ -44,7 +46,37 @@ from rpdiff.utils.torch_util import SinusoidalPosEmb
 from rpdiff.utils.torch3d_util import matrix_to_quaternion
 from rpdiff.training.losses import TransformChamferWrapper
 
-from model import _make_mlp, _aggregate_sdf, _split_tokens
+
+# --------------------------------------------------------------------------- #
+# Small helpers (inlined from pretrain/model.py to avoid module name collision)
+# --------------------------------------------------------------------------- #
+
+def _make_mlp(dims: tuple[int, ...]) -> nn.Sequential:
+    """Linear → LayerNorm → ELU stack; last layer has no activation."""
+    layers: list[nn.Module] = []
+    for i in range(len(dims) - 1):
+        layers.append(nn.Linear(dims[i], dims[i + 1]))
+        if i < len(dims) - 2:
+            layers.append(nn.LayerNorm(dims[i + 1]))
+            layers.append(nn.ELU())
+    return nn.Sequential(*layers)
+
+
+def _aggregate_sdf(
+    sdf_pts:   torch.Tensor,
+    patch_idx: torch.Tensor,
+    mode:      str = "mean",
+) -> torch.Tensor:
+    B, P, K = patch_idx.shape
+    gathered = sdf_pts.gather(1, patch_idx.reshape(B, P * K)).view(B, P, K)
+    if mode == "min":  return gathered.min(-1).values
+    if mode == "max":  return gathered.max(-1).values
+    return gathered.mean(-1)
+
+
+def _split_tokens(res, P: int):
+    """Split fused_tokens (B, 2P, D) into tool_tokens and obj_tokens."""
+    return res.fused_tokens[:, :P, :], res.fused_tokens[:, P:, :]
 
 
 # ============================================================================ #

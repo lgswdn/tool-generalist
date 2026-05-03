@@ -68,8 +68,13 @@ class NewPretrainDataset(Dataset):
         pt_path, cfg_i = self._index[idx]
         data = self._pt_cache[pt_path]
 
-        # ── Canonical tool cloud (origin, R=I, already scaled) ────────
-        P_tool = data["tool_pts_canonical"]              # (P, 3)
+        # ── Canonical tool cloud → center at (0,0,0) ─────────────────
+        # Raw canonical is in mesh frame (uncentered). We subtract the
+        # centroid so the encoder sees a standardised input and the pose
+        # becomes a pure placement transform (consistent with RL).
+        P_tool_raw = data["tool_pts_canonical"]          # (P, 3)
+        tool_centroid = P_tool_raw.mean(dim=0)           # (3,)
+        P_tool = P_tool_raw - tool_centroid              # (P, 3) centered
 
         # ── Object cloud (world frame) ────────────────────────────────
         P_obj   = data["obj_pts_canonical"]              # (Q, 3)
@@ -79,9 +84,13 @@ class NewPretrainDataset(Dataset):
         obj_pc  = obj_pc.clone()
         obj_pc[:, 2] -= z_shift
 
-        # ── Contact pose ──────────────────────────────────────────────
+        # ── Contact pose (adjusted for centroid shift) ────────────────
+        # Original: tool_world = P_tool_raw @ R.T + t
+        # Centered: tool_world = P_tool @ R.T + (R @ centroid + t)
+        # So new_t = R @ centroid + old_t
         contact_R = data["tool_rotations"][cfg_i]        # (3, 3)
-        contact_t = data["tool_translations"][cfg_i]     # (3,)
+        contact_t_raw = data["tool_translations"][cfg_i] # (3,)
+        contact_t = contact_R @ tool_centroid + contact_t_raw  # (3,)
 
         # ── SDF at contact pose ───────────────────────────────────────
         tool_sdf = data["tool_pts_sdf"][cfg_i]           # (P,)
