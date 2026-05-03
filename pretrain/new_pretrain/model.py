@@ -181,25 +181,26 @@ class PoseCrossAttention(nn.Module):
 class DenoisingHead(nn.Module):
     """RPDiff-style denoising head: predicts one-step inverse transform.
 
-    Three parallel MLPs:
-      out_trans → 3D translation
-      out_vec1  → 3D (first rotation vector)
-      out_vec2  → 3D (second rotation vector)
+    Follows RPDiff's policy_feat_encoder.py exactly:
+      out_trans: Linear → ReLU → Linear → 3D translation
+      out_vec1:  Linear → ReLU → Linear → 3D (first rotation vector)
+      out_vec2:  Linear → ReLU → Linear → 3D (second rotation vector)
 
     Gram-Schmidt orthogonalization on (vec1, vec2) → rotation matrix → quaternion.
     """
 
-    def __init__(self, input_dim: int, hidden_dim=256):
+    def __init__(self, input_dim: int, hidden_dim: int = 256):
         super().__init__()
-        # Accept int or tuple
-        if isinstance(hidden_dim, int):
-            hidden = (hidden_dim,)
-        else:
-            hidden = tuple(hidden_dim)
-
-        self.out_trans = _make_mlp((input_dim,) + hidden + (3,))
-        self.out_vec1  = _make_mlp((input_dim,) + hidden + (3,))
-        self.out_vec2  = _make_mlp((input_dim,) + hidden + (3,))
+        # Exactly RPDiff's output heads (2-layer MLPs)
+        self.out_trans = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, 3)
+        )
+        self.out_vec1 = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, 3)
+        )
+        self.out_vec2 = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, 3)
+        )
 
     def forward(
         self,
