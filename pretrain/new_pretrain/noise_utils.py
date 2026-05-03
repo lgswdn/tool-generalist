@@ -101,6 +101,51 @@ def interpolate_se3_trajectory(
 
 # ── Batch noising for training ──────────────────────────────────────────────
 
+def _sample_noised_single(
+    contact_R_np: np.ndarray,    # (3, 3)
+    contact_t_np: np.ndarray,    # (3,)
+    num_steps: int,
+    max_trans: float,
+    max_rot_deg: float,
+    precise_prob: bool,
+) -> dict:
+    """Sample one noised pose (no guard checks — done later in batch)."""
+    pert_R, pert_t = sample_full_perturbation(1, max_trans, max_rot_deg)
+    traj = interpolate_se3_trajectory(pert_R[0], pert_t[0], num_steps)
+
+    if precise_prob:
+        diff_vals = np.exp(-1.0 * np.arange(num_steps + 1))
+        probs = diff_vals / diff_vals.sum()
+        t_idx = int(np.where(np.random.multinomial(1, probs))[0][0])
+    else:
+        t_idx = int(np.random.randint(0, num_steps + 1))
+
+    if t_idx == 0:
+        return {
+            "t_idx": 0,
+            "noised_R": contact_R_np.copy(),
+            "noised_t": contact_t_np.copy(),
+            "target_trans": np.zeros(3, dtype=np.float32),
+            "target_rot_mat": np.eye(3, dtype=np.float32),
+        }
+
+    cum_R = traj["cumulative_R"][t_idx]
+    cum_t = traj["cumulative_t"][t_idx]
+    noised_R = cum_R @ contact_R_np
+    noised_t = cum_R @ contact_t_np + cum_t
+
+    step_R = traj["incremental_R"][t_idx - 1]
+    step_t = traj["incremental_t"][t_idx - 1]
+
+    return {
+        "t_idx": t_idx,
+        "noised_R": noised_R.astype(np.float32),
+        "noised_t": noised_t.astype(np.float32),
+        "target_trans": (-1.0 * step_t).astype(np.float32),
+        "target_rot_mat": np.linalg.inv(step_R).astype(np.float32),
+    }
+
+
 def sample_noised_poses_batch(
     contact_R: torch.Tensor,     # (B, 3, 3) contact rotations
     contact_t: torch.Tensor,     # (B, 3) contact translations
@@ -109,14 +154,20 @@ def sample_noised_poses_batch(
     max_rot_deg: float,
     interp: bool = True,
     precise_prob: bool = False,
+    # For rejection sampling
+    tool_canonical: torch.Tensor = None,  # (B, P, 3)
+    obj_pc: torch.Tensor = None,          # (B, Q, 3)
+    pen_threshold: float = 0.001,         # metres
+    max_retries: int = 10,
 ) -> dict:
-    """Sample a random diffusion timestep and noised pose for each sample in a batch.
+    """Sample noised poses with batch-level GPU rejection sampling.
 
-    For each sample:
-      1. Sample a full SE(3) perturbation
-      2. Interpolate T+1 trajectory via SLERP + linear
-      3. Pick a random timestep t_idx
-      4. Return the noised pose at t_idx and the one-step denoising target
+    1. Generate all B candidates (numpy, SLERP + linear)
+    2. Move to GPU and check min NN distance via compute_on_the_fly_sdf
+    3. Resample only rejected items; repeat up to max_retries
+    4. Fallback: rejected items get contact pose (t_idx=0)
+
+    Guard: min tool-to-object NN distance >= pen_threshold (0.001m).
 
     Args:
         contact_R: (B, 3, 3) GT contact rotations.
@@ -124,77 +175,92 @@ def sample_noised_poses_batch(
         num_steps: T — number of diffusion steps.
         max_trans: Max translation perturbation.
         max_rot_deg: Max rotation perturbation.
-        interp: Use SLERP interpolation (True) or random walk (False).
+        interp: Use SLERP interpolation.
         precise_prob: Bias toward smaller timesteps.
+        tool_canonical: (B, P, 3) canonical tool points for guard checks.
+        obj_pc: (B, Q, 3) object points for penetration check.
+        pen_threshold: Min allowed NN distance (metres).
+        max_retries: Max rejection rounds before fallback to contact.
 
     Returns:
-        dict with tensors on same device as inputs:
-            "t_idx":        (B,) int — sampled timestep index (0 = contact)
-            "noised_R":     (B, 3, 3) — tool rotation at noised pose
-            "noised_t":     (B, 3) — tool translation at noised pose
-            "target_trans":  (B, 3) — GT translation target (inverse of step noise)
-            "target_rot_mat": (B, 3, 3) — GT rotation target (inverse of step noise)
+        dict with tensors on same device as inputs.
     """
     B = contact_R.shape[0]
     device = contact_R.device
-
-    # Sample full perturbations (numpy)
-    pert_R, pert_t = sample_full_perturbation(B, max_trans, max_rot_deg)
-
-    # For each sample, build trajectory and pick a timestep
-    all_t_idx = []
-    all_noised_R = []
-    all_noised_t = []
-    all_target_trans = []
-    all_target_rot = []
+    do_guards = (tool_canonical is not None and obj_pc is not None)
 
     contact_R_np = contact_R.detach().cpu().numpy()
     contact_t_np = contact_t.detach().cpu().numpy()
 
-    for b in range(B):
-        traj = interpolate_se3_trajectory(pert_R[b], pert_t[b], num_steps)
+    # Pre-allocate result arrays
+    result_t_idx = np.zeros(B, dtype=np.int64)
+    result_noised_R = np.zeros((B, 3, 3), dtype=np.float32)
+    result_noised_t = np.zeros((B, 3), dtype=np.float32)
+    result_target_trans = np.zeros((B, 3), dtype=np.float32)
+    result_target_rot = np.zeros((B, 3, 3), dtype=np.float32)
 
-        # Sample timestep (RPDiff-style)
-        if precise_prob:
-            diff_vals = np.exp(-1.0 * np.arange(num_steps + 1))
-            probs = diff_vals / diff_vals.sum()
-            t_idx = np.where(np.random.multinomial(1, probs))[0][0]
-        else:
-            t_idx = np.random.randint(0, num_steps + 1)
+    # Track which samples still need valid candidates
+    pending = set(range(B))
 
-        all_t_idx.append(t_idx)
+    for retry in range(max_retries):
+        if not pending:
+            break
 
-        if t_idx == 0:
-            # At contact pose — noise target is identity (zero step)
-            all_noised_R.append(contact_R_np[b])
-            all_noised_t.append(contact_t_np[b])
-            all_target_trans.append(np.zeros(3, dtype=np.float32))
-            all_target_rot.append(np.eye(3, dtype=np.float32))
-        else:
-            # Apply cumulative perturbation to contact pose
-            cum_R = traj["cumulative_R"][t_idx]
-            cum_t = traj["cumulative_t"][t_idx]
+        pending_list = sorted(pending)
 
-            # Noised pose = perturbation applied to contact
-            # Following RPDiff: rotate child around its centroid, then translate
-            noised_R = cum_R @ contact_R_np[b]
-            noised_t = cum_R @ contact_t_np[b] + cum_t
+        # Generate candidates for pending samples
+        for b in pending_list:
+            out = _sample_noised_single(
+                contact_R_np[b], contact_t_np[b],
+                num_steps, max_trans, max_rot_deg, precise_prob,
+            )
+            result_t_idx[b] = out["t_idx"]
+            result_noised_R[b] = out["noised_R"]
+            result_noised_t[b] = out["noised_t"]
+            result_target_trans[b] = out["target_trans"]
+            result_target_rot[b] = out["target_rot_mat"]
 
-            all_noised_R.append(noised_R)
-            all_noised_t.append(noised_t)
+        if not do_guards:
+            pending.clear()
+            break
 
-            # Target: inverse of the incremental step (RPDiff convention)
-            step_R = traj["incremental_R"][t_idx - 1]
-            step_t = traj["incremental_t"][t_idx - 1]
-            all_target_trans.append(-1.0 * step_t)
-            all_target_rot.append(np.linalg.inv(step_R).astype(np.float32))
+        # Batch GPU guard check: compute min NN distance for all pending
+        # Move current candidates to GPU
+        noised_R_gpu = torch.tensor(result_noised_R, device=device)
+        noised_t_gpu = torch.tensor(result_noised_t, device=device)
+
+        # Compute on-the-fly NN distances on GPU (whole batch)
+        tool_sdf, _ = compute_on_the_fly_sdf(
+            tool_canonical, obj_pc, noised_R_gpu, noised_t_gpu
+        )
+        # tool_sdf: (B, P) — min dist from each tool pt to object
+        min_dists = tool_sdf.min(dim=-1).values  # (B,)
+
+        # Check which pending samples pass
+        min_dists_np = min_dists.detach().cpu().numpy()
+        new_pending = set()
+        for b in pending_list:
+            if result_t_idx[b] == 0:
+                # Contact pose always passes
+                continue
+            if min_dists_np[b] < pen_threshold:
+                new_pending.add(b)
+        pending = new_pending
+
+    # Fallback: any remaining pending → contact pose (t_idx=0)
+    for b in pending:
+        result_t_idx[b] = 0
+        result_noised_R[b] = contact_R_np[b]
+        result_noised_t[b] = contact_t_np[b]
+        result_target_trans[b] = 0.0
+        result_target_rot[b] = np.eye(3, dtype=np.float32)
 
     return {
-        "t_idx":         torch.tensor(all_t_idx, dtype=torch.long, device=device),
-        "noised_R":      torch.tensor(np.stack(all_noised_R), dtype=torch.float32, device=device),
-        "noised_t":      torch.tensor(np.stack(all_noised_t), dtype=torch.float32, device=device),
-        "target_trans":  torch.tensor(np.stack(all_target_trans), dtype=torch.float32, device=device),
-        "target_rot_mat": torch.tensor(np.stack(all_target_rot), dtype=torch.float32, device=device),
+        "t_idx":         torch.tensor(result_t_idx, dtype=torch.long, device=device),
+        "noised_R":      torch.tensor(result_noised_R, dtype=torch.float32, device=device),
+        "noised_t":      torch.tensor(result_noised_t, dtype=torch.float32, device=device),
+        "target_trans":  torch.tensor(result_target_trans, dtype=torch.float32, device=device),
+        "target_rot_mat": torch.tensor(result_target_rot, dtype=torch.float32, device=device),
     }
 
 

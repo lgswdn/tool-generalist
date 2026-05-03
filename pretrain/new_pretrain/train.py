@@ -152,7 +152,7 @@ def train_step(
     # ── sdf-diff: sample noised pose and compute losses ──────────────
     B = tool_canonical.shape[0]
 
-    # 1. Sample noised pose (on-the-fly, RPDiff-style)
+    # 1. Sample noised pose (on-the-fly, RPDiff-style, with rejection sampling)
     noise_out = sample_noised_poses_batch(
         contact_R=contact_R,
         contact_t=contact_t,
@@ -161,6 +161,8 @@ def train_step(
         max_rot_deg=cfg.noise_max_rot_deg,
         interp=cfg.interp_trajectory,
         precise_prob=cfg.precise_diff_prob,
+        tool_canonical=tool_canonical,
+        obj_pc=obj_pc,
     )
 
     # 2. Compute on-the-fly SDF at the noised pose
