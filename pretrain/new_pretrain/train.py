@@ -218,102 +218,27 @@ def train_step(
 
 def main():
     parser = argparse.ArgumentParser(description="RPDiff-style joint SDF + denoising pretraining")
-
-    # Data
     parser.add_argument("--data-dir",    type=str, required=True)
-    parser.add_argument("--max-files",   type=int, default=0)
-    parser.add_argument("--val-ratio",   type=float, default=0.1)
-
-    # Task
-    parser.add_argument("--task",        type=str, default="sdf-diff", choices=["sdf", "sdf-diff"])
-    parser.add_argument("--head-mode",   type=str, default="point", choices=["point", "patch"])
-    parser.add_argument("--patch-agg",   type=str, default="mean", choices=["mean", "min", "max"])
-
-    # Encoder
-    parser.add_argument("--num-pts",          type=int, default=512)
-    parser.add_argument("--patch-size",       type=int, default=32)
-    parser.add_argument("--encoder-channel",  type=int, default=128)
-    parser.add_argument("--vit-depth",        type=int, default=4)
-    parser.add_argument("--vit-heads",        type=int, default=4)
-    parser.add_argument("--freeze-encoder",   action="store_true")
-
-    # Cross-attention
-    parser.add_argument("--cross-attn-heads",  type=int, default=4)
-    parser.add_argument("--cross-attn-layers", type=int, default=2)
-
-    # Diffusion
-    parser.add_argument("--num-diffusion-steps", type=int, default=10)
-    parser.add_argument("--noise-max-trans",     type=float, default=0.15)
-    parser.add_argument("--noise-max-rot-deg",   type=float, default=90.0)
-    parser.add_argument("--interp-trajectory",   action="store_true", default=True)
-    parser.add_argument("--no-interp-trajectory", dest="interp_trajectory", action="store_false")
-    parser.add_argument("--precise-diff-prob",   action="store_true")
-
-    # Loss weights
-    parser.add_argument("--sdf-weight",     type=float, default=1.0)
-    parser.add_argument("--denoise-weight", type=float, default=1.0)
-    parser.add_argument("--chamfer-weight", type=float, default=1.0)
-
-    # Training
-    parser.add_argument("--batch-size",   type=int, default=256)
-    parser.add_argument("--lr",           type=float, default=5e-4)
-    parser.add_argument("--weight-decay", type=float, default=1e-5)
-    parser.add_argument("--epochs",       type=int, default=1000)
-    parser.add_argument("--log-interval", type=int, default=10)
-    parser.add_argument("--save-interval", type=int, default=50)
-    parser.add_argument("--num-workers",  type=int, default=4)
-    parser.add_argument("--seed",         type=int, default=42)
-
-    # Checkpoint
-    parser.add_argument("--resume",   type=str, default="")
-    parser.add_argument("--ckpt-dir", type=str, default="checkpoints_new")
-
-    # Logging
-    parser.add_argument("--wandb",          action="store_true")
-    parser.add_argument("--wandb-project",  type=str, default="new_pretrain")
-    parser.add_argument("--wandb-run-name", type=str, default="")
-
+    parser.add_argument("--task",        type=str, default=None, choices=["sdf", "sdf-diff"])
+    parser.add_argument("--head-mode",   type=str, default=None, choices=["point", "patch"])
+    parser.add_argument("--resume",      type=str, default="")
+    parser.add_argument("--wandb",       action="store_true")
+    parser.add_argument("--max-files",   type=int, default=0,
+                        help="Limit number of config files (0 = all)")
     args = parser.parse_args()
 
-    # Build config from args
-    cfg = NewPretrainConfig(**{k: v for k, v in vars(args).items()
-                               if hasattr(NewPretrainConfig, k.replace("-", "_"))})
-    # Handle hyphens → underscores
-    cfg.data_dir = args.data_dir
-    cfg.max_files = args.max_files
-    cfg.val_ratio = args.val_ratio
-    cfg.task = args.task
-    cfg.head_mode = args.head_mode
-    cfg.patch_agg = args.patch_agg
-    cfg.num_pts = args.num_pts
-    cfg.patch_size = args.patch_size
-    cfg.encoder_channel = args.encoder_channel
-    cfg.vit_depth = args.vit_depth
-    cfg.vit_heads = args.vit_heads
-    cfg.freeze_encoder = args.freeze_encoder
-    cfg.cross_attn_heads = args.cross_attn_heads
-    cfg.cross_attn_layers = args.cross_attn_layers
-    cfg.num_diffusion_steps = args.num_diffusion_steps
-    cfg.noise_max_trans = args.noise_max_trans
-    cfg.noise_max_rot_deg = args.noise_max_rot_deg
-    cfg.interp_trajectory = args.interp_trajectory
-    cfg.precise_diff_prob = args.precise_diff_prob
-    cfg.sdf_weight = args.sdf_weight
-    cfg.denoise_weight = args.denoise_weight
-    cfg.chamfer_weight = args.chamfer_weight
-    cfg.batch_size = args.batch_size
-    cfg.lr = args.lr
-    cfg.weight_decay = args.weight_decay
-    cfg.epochs = args.epochs
-    cfg.log_interval = args.log_interval
-    cfg.save_interval = args.save_interval
-    cfg.num_workers = args.num_workers
-    cfg.seed = args.seed
-    cfg.resume = args.resume
-    cfg.ckpt_dir = args.ckpt_dir
-    cfg.wandb = args.wandb
-    cfg.wandb_project = args.wandb_project
-    cfg.wandb_run_name = args.wandb_run_name
+    # Everything else comes from config.py — edit NewPretrainConfig directly.
+    cfg = NewPretrainConfig(data_dir=args.data_dir)
+    if args.task is not None:
+        cfg.task = args.task
+    if args.head_mode is not None:
+        cfg.head_mode = args.head_mode
+    if args.resume:
+        cfg.resume = args.resume
+    if args.wandb:
+        cfg.wandb = True
+    if args.max_files:
+        cfg.max_files = args.max_files
 
     # ── Setup ────────────────────────────────────────────────────────────
     rank, local_rank = setup_ddp()
