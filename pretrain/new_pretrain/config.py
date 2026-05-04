@@ -30,7 +30,7 @@ class NewPretrainConfig:
     num_pts: int = 512
     patch_size: int = 32
     encoder_channel: int = 128
-    vit_depth: int = 4
+    vit_depth: int = 6
     vit_heads: int = 4
     freeze_encoder: bool = False
 
@@ -44,7 +44,7 @@ class NewPretrainConfig:
 
     # ── Diffusion noising ────────────────────────────────────────────────
     num_diffusion_steps: int = 10
-    noise_max_trans: float = 0.15  # metres
+    noise_max_trans: float = 0.2  # metres
     noise_max_rot_deg: float = 90.0
     interp_trajectory: bool = True  # True=SLERP interp, False=random walk
     precise_diff_prob: bool = False  # bias toward smaller steps
@@ -59,7 +59,7 @@ class NewPretrainConfig:
     batch_size: int = 256
     lr: float = 5e-4
     weight_decay: float = 1e-5
-    epochs: int = 1000
+    epochs: int = 100
     log_interval: int = 10
     save_interval: int = 50
     num_workers: int = 4

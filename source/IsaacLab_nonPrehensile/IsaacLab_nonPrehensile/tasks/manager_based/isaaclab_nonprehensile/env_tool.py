@@ -501,11 +501,11 @@ class RewardsCfg:
         params={
             "std": 0.6,
             "command_name": "target_object_pose",
-            "obj_ee_distance_threshold": 0.1,
+            "obj_ee_distance_threshold": 0.15,
             "ee_frame_cfg": SceneEntityCfg("ee_frame"),
             "object_cfg": SceneEntityCfg("object"),
         },
-        weight=5.0,
+        weight=4.0,
     )
 
     object_goal_tracking_fine_grained = RewTerm(
@@ -513,11 +513,11 @@ class RewardsCfg:
         params={
             "std": 0.3,
             "command_name": "target_object_pose",
-            "obj_ee_distance_threshold": 0.1,
+            "obj_ee_distance_threshold": 0.15,
             "ee_frame_cfg": SceneEntityCfg("ee_frame"),
             "object_cfg": SceneEntityCfg("object"),
         },
-        weight=16.0,
+        weight=12.0,
     )
     
     # Energy penalty: c_energy = k_e * Σ(τ_i * q̇_i)

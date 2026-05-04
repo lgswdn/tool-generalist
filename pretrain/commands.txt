@@ -89,3 +89,7 @@ python scripts/eval_tools.py \
   --num_envs 8 \
   --num_episodes 8 \
   --headless
+
+torchrun --nproc_per_node=2 pretrain/new_pretrain/train.py --task sdf-diff --head-mode patch \
+  --data-dir /mnt/project/world_model/tool_generalist/teardrop_contact/000_asym_teardrop_contour_scraper_var_000 \
+  --wandb

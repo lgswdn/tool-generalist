@@ -321,8 +321,8 @@ class SDFActorCriticCfg:
 
     # Actor / Critic heads
     fusion_hidden_dims: list[int] = field(default_factory=lambda: [512, 256, 128])
-    actor_hidden_dims: list[int] = field(default_factory=lambda: [64])
-    critic_hidden_dims: list[int] = field(default_factory=lambda: [128])
+    actor_hidden_dims: list[int] = field(default_factory=lambda: [64,64])
+    critic_hidden_dims: list[int] = field(default_factory=lambda: [128,64])
 
     # Activation / noise
     activation: str = "elu"
@@ -339,7 +339,7 @@ class SDFPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
     num_steps_per_env = 8
     max_iterations = 1000000
-    save_interval = 500
+    save_interval = 200
 
     experiment_name = "franka_nonprehensile_sdf"
 
@@ -351,9 +351,9 @@ class SDFPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=0.5,
         use_clipped_value_loss=True,
         clip_param=0.3,
-        entropy_coef=0.001,
-        num_learning_epochs=4,
-        num_mini_batches=16,
+        entropy_coef=0.005,
+        num_learning_epochs=8,
+        num_mini_batches=8,
         learning_rate=5.0e-5,
         schedule="adaptive",
         gamma=0.99,
