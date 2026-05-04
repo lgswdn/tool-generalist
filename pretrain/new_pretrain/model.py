@@ -204,7 +204,7 @@ class DenoisingHead(nn.Module):
 
     def forward(
         self,
-        pooled_features: torch.Tensor,  # (B, D) mean-pooled pose-conditioned tokens
+        pooled_features: torch.Tensor,  # (B, 2*D) separately pooled tool+obj tokens, concatenated
     ) -> dict:
         """Predict one-step denoising transform.
 
@@ -344,8 +344,9 @@ class ContactDiffusionModel(nn.Module):
             )
 
             # ── Denoising head (RPDiff-style) ────────────────────────────
+            # Input: separately pooled tool tokens + object tokens concatenated (2*D)
             self.denoising_head = DenoisingHead(
-                input_dim=D,
+                input_dim=2 * D,
                 hidden_dim=denoise_hidden,
             )
 
@@ -483,8 +484,14 @@ class ContactDiffusionModel(nn.Module):
                 and noised_pose_7d is not None
                 and target_trans is not None):
 
-            # Mean-pool conditioned tokens → (B, D)
-            pooled = fused_conditioned.mean(dim=1)
+            # Separately pool tool and object conditioned tokens → (B, 2*D)
+            # Preserves tool vs. object geometry distinction (critical for pose prediction).
+            tool_cond = fused_conditioned[:, :P, :]   # (B, P, D)
+            obj_cond  = fused_conditioned[:, P:, :]   # (B, P, D)
+            pooled = torch.cat([
+                tool_cond.mean(dim=1),   # (B, D)
+                obj_cond.mean(dim=1),    # (B, D)
+            ], dim=-1)                   # (B, 2*D)
 
             # Predict one-step denoising
             denoise_out = self.denoising_head(pooled)

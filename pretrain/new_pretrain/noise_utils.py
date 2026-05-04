@@ -212,17 +212,24 @@ def sample_noised_poses_batch(
         # Step at t_idx: SLERP at (t_idx-1)/T vs t_idx/T
         alpha_prev = (t_idx.float() - 1).clamp(min=0) / T
         cum_q_prev = _quat_slerp(q_id[:n_pending], pert_q, alpha_prev)
+        cum_R_prev = _quat_to_rotmat(cum_q_prev)  # (n, 3, 3)
 
         # Incremental rotation: cum_q @ inv(cum_q_prev)
         step_q = _quat_multiply(cum_q, _quat_inverse(cum_q_prev))
         step_R = _quat_to_rotmat(step_q)  # (n, 3, 3)
 
         cum_t_prev = pert_t * alpha_prev.unsqueeze(-1)
-        step_t = cum_t - cum_t_prev  # (n, 3)
 
-        # Target = inverse of step
-        target_rot = step_R.transpose(1, 2)  # (n, 3, 3)
-        target_trans = -step_t               # (n, 3)
+        # World-space translations at current and previous timesteps.
+        # noised_t  = cum_R   @ contact_t + cum_t     (already computed above)
+        # prev_t    = cum_R_prev @ contact_t + cum_t_prev
+        # The correct delta is prev_t - noised_t, NOT just -(cum_t - cum_t_prev).
+        # The missing term (cum_R_prev - cum_R) @ contact_t can be ~30mm for 9°/step.
+        prev_t_world = torch.bmm(cum_R_prev, contact_t_p.unsqueeze(-1)).squeeze(-1) + cum_t_prev
+
+        # Target = inverse of step (rotation) + world-space translation correction
+        target_rot = step_R.transpose(1, 2)          # (n, 3, 3)
+        target_trans = prev_t_world - noised_t        # (n, 3)  world-space delta
 
         # t_idx == 0 → identity target (no denoising needed)
         is_zero = (t_idx == 0)
