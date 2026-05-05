@@ -103,9 +103,10 @@ class ActorCriticSDF(nn.Module):
         self.freeze_encoder = freeze_encoder
 
         # Validate observation layout
-        # Layout: object_cloud + tool_cloud + extra_state
+        # Layout: object_cloud | tool_cloud | obj_centroid(3) | tool_centroid(3) | extra_state
         self.pc_dim = 2 * num_points * point_dim
-        self.extra_state_dim = num_actor_obs - self.pc_dim
+        self.centroid_dim = 6            # obj_centroid(3) + tool_centroid(3)
+        self.extra_state_dim = num_actor_obs - self.pc_dim - self.centroid_dim
 
         activation_fn = resolve_nn_activation(activation)
 
@@ -146,8 +147,9 @@ class ActorCriticSDF(nn.Module):
         # ------------------------------------------------------------------
         self.use_learnable_query_tokens = use_learnable_query_tokens
 
-        # Context dimension for SD-Cross or fusion: obj_center (3) + extra_state
-        sd_ctx_dim = 3 + self.extra_state_dim
+        # Context dimension for SD-Cross or fusion:
+        # [obj_centroid(3), tool_centroid(3), extra_state]
+        sd_ctx_dim = self.centroid_dim + self.extra_state_dim
 
         if not self.use_learnable_query_tokens:
             # Option 1: StateDependentCrossFeatNet
@@ -328,18 +330,21 @@ class ActorCriticSDF(nn.Module):
     # Observation parsing
     # --------------------------------------------------------------------------
     def _split_observations(self, obs: torch.Tensor):
-        """Split observations into point clouds and extra_state.
+        """Split observations into point clouds, centroids, and extra_state.
 
-        Layout: object_cloud | tool_cloud | extra_state
+        Layout: object_cloud | tool_cloud | obj_centroid(3) | tool_centroid(3) | extra_state
         """
         object_dim = self.num_points * self.point_dim
         tool_dim = self.num_points * self.point_dim
+        centroid_start = object_dim + tool_dim
 
         object_cloud = obs[:, :object_dim].view(-1, self.num_points, self.point_dim)
         tool_cloud = obs[:, object_dim:object_dim + tool_dim].view(-1, self.num_points, self.point_dim)
-        extra_state = obs[:, object_dim + tool_dim:]
+        obj_centroid = obs[:, centroid_start:centroid_start + 3]      # (B, 3)
+        tool_centroid = obs[:, centroid_start + 3:centroid_start + 6]  # (B, 3)
+        extra_state = obs[:, centroid_start + 6:]
 
-        return object_cloud, tool_cloud, extra_state
+        return object_cloud, tool_cloud, obj_centroid, tool_centroid, extra_state
 
     # --------------------------------------------------------------------------
     # Tokenization via SDF encoder
@@ -347,42 +352,46 @@ class ActorCriticSDF(nn.Module):
     def _tokenize(self, observations: torch.Tensor):
         """Extract tokens from SDF encoder and split observations.
 
-        Point clouds are centered around the object center to match pretrain
-        distribution. The object center is returned as additional context.
+        Point clouds arrive PRE-CENTERED at (0,0,0) from the environment
+        observation functions (get_object_pointcloud_in_env_frame and
+        get_tool_pointcloud_in_env_frame).  The corresponding env-frame
+        centroids are available as separate observation terms (get_obj_centroid,
+        get_tool_centroid) and are explicitly sliced out here.
+
+        This mirrors pretraining (contact_gen.py filter_and_save):
+          - tool_pts_canonical : (P,3) centered at (0,0,0)   <- encoder input
+          - obj_pts_canonical  : (Q,3) centered at (0,0,0)   <- encoder input
+          - tool_translations  : (N,3) world-frame centroid  <- pose context
+          - obj_centroid       : (3,)  world-frame centroid  <- pose context
 
         Returns:
-            all_tokens: [B, 2P, D] — tool_tokens + obj_tokens (CLS already stripped by encoder)
-            obj_center: [B, 3] — object centroid (used as extra context)
-            extra_state: [B, extra_state_dim] — all non-point-cloud observations
+            all_tokens:    (B, 2P, D) — tool_tokens + obj_tokens
+            ctx_vec:       (B, centroid_dim + extra_state_dim) — conditioning vector
         """
-        object_cloud, tool_cloud, extra_state = self._split_observations(observations)
+        object_cloud, tool_cloud, obj_centroid, tool_centroid, extra_state = \
+            self._split_observations(observations)
 
-        # Center both clouds around object center (matches pretrain distribution)
-        obj_center = object_cloud.mean(dim=1)                       # (B, 3)
-        object_cloud_centered = object_cloud - obj_center.unsqueeze(1)  # (B, N, 3)
-        tool_cloud_centered = tool_cloud - obj_center.unsqueeze(1)      # (B, N, 3)
-
-        # Encode tokens (with no_grad if encoder is frozen)
+        # Clouds are already centered — feed directly to encoder
         if self.freeze_encoder:
             with torch.no_grad():
-                res = self.encoder.encode(tool_cloud_centered, object_cloud_centered)
+                res = self.encoder.encode(tool_cloud, object_cloud)
         else:
-            res = self.encoder.encode(tool_cloud_centered, object_cloud_centered)
+            res = self.encoder.encode(tool_cloud, object_cloud)
 
-        # fused_tokens: (B, 2P, D) — [tool_patches, obj_patches], CLS already stripped
         all_tokens = res.fused_tokens  # (B, 2P, D)
 
-        return all_tokens, obj_center, extra_state
+        # Context vector: [obj_centroid(3), tool_centroid(3), extra_state(...)]
+        # Matches pose_6d = [tool_t(3), obj_t(3)] used in pretraining cross-attn
+        ctx_vec = torch.cat([obj_centroid, tool_centroid, extra_state], dim=-1)
+
+        return all_tokens, ctx_vec
 
     # --------------------------------------------------------------------------
     # Feature extraction
     # --------------------------------------------------------------------------
     def _get_features(self, observations: torch.Tensor):
         """Get fused features using either SD-Cross or learnable query tokens."""
-        all_tokens, obj_center, extra_state = self._tokenize(observations)
-
-        # Context: obj_center + extra_state
-        ctx_vec = torch.cat([obj_center, extra_state], dim=-1)
+        all_tokens, ctx_vec = self._tokenize(observations)
 
         if not self.use_learnable_query_tokens:
             ctx = {"extra_state": ctx_vec}

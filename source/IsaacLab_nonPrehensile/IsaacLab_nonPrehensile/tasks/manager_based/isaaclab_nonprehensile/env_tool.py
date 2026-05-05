@@ -350,11 +350,20 @@ class ObservationsCfg:
             noise=GaussianNoiseCfg(mean=0.0, std=0.005, operation="add"),
         )
 
-        # Tool Cloud (512*3=1536D: tool point cloud xyz in env frame)
+        # Tool Cloud (512*3=1536D: tool point cloud xyz, centered at (0,0,0))
         tool_cloud = ObsTerm(
             func=mdp.get_tool_pointcloud_in_env_frame,
             noise=GaussianNoiseCfg(mean=0.0, std=0.002, operation="add"),
         )
+
+        # Object Centroid (3D: env-frame position of object cloud centroid).
+        # MUST come AFTER object_cloud so the centroid cache is populated.
+        # No noise: centroid is a derived geometric fact used as pose context.
+        obj_centroid = ObsTerm(func=mdp.get_obj_centroid)
+
+        # Tool Centroid (3D: env-frame position of tool cloud centroid).
+        # MUST come AFTER tool_cloud so the centroid cache is populated.
+        tool_centroid = ObsTerm(func=mdp.get_tool_centroid)
 
         # Hand State (9D: hand position[3] + rotation_matrix[6])
         hand_state = ObsTerm(

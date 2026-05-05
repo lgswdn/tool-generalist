@@ -683,15 +683,55 @@ def get_object_pointcloud_in_env_frame(
     env: ManagerBasedRLEnv,
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
 ) -> torch.Tensor:
-    """Get object point cloud in environment frame with optional normalization."""
+    """Get object point cloud CENTERED at (0,0,0) in the environment frame.
+
+    Mirrors the pretraining pipeline (contact_gen.py filter_and_save):
+      obj_centroid = obj_world.mean(0)
+      P_obj_c = obj_world - obj_centroid
+
+    The per-env centroid (env-frame position) is cached as ``env._obs_obj_centroid``
+    so that ``get_obj_centroid()`` can return it cheaply as a separate observation.
+
+    Returns:
+        Tensor (num_envs, num_points*3) — centered at (0,0,0) per env.
+    """
     pointcloud_w = get_object_pointcloud(env, object_cfg)
     num_envs, flat_dim = pointcloud_w.shape
     num_points = flat_dim // 3
     pointcloud_w_reshaped = pointcloud_w.view(num_envs, num_points, 3)
-    pointcloud_env = pointcloud_w_reshaped - env.scene.env_origins.unsqueeze(1)
+    # Convert to env frame (subtract world env origin)
+    pointcloud_env = pointcloud_w_reshaped - env.scene.env_origins.unsqueeze(1)  # (N, P, 3)
 
-    pointcloud_env_flat = pointcloud_env.reshape(num_envs, num_points * 3)
-    return pointcloud_env_flat
+    # Center at (0,0,0): subtract per-env centroid
+    obj_centroid = pointcloud_env.mean(dim=1)          # (N, 3)  env-frame centroid
+    env._obs_obj_centroid = obj_centroid.detach()      # cache for get_obj_centroid()
+    pointcloud_centered = pointcloud_env - obj_centroid.unsqueeze(1)
+
+    return pointcloud_centered.reshape(num_envs, num_points * 3)
+
+
+def get_obj_centroid(
+    env: ManagerBasedRLEnv,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+) -> torch.Tensor:
+    """Return the object cloud centroid in the environment frame (3D per env).
+
+    Must be listed AFTER ``object_cloud`` in the observation config so the
+    centroid cache (``env._obs_obj_centroid``) is populated first.
+
+    Returns:
+        Tensor (num_envs, 3)
+    """
+    if hasattr(env, "_obs_obj_centroid"):
+        return env._obs_obj_centroid
+    # Fallback: recompute (should not happen in normal operation)
+    pointcloud_w = get_object_pointcloud(env, object_cfg)
+    num_envs, flat_dim = pointcloud_w.shape
+    num_points = flat_dim // 3
+    pc_env = pointcloud_w.view(num_envs, num_points, 3) - env.scene.env_origins.unsqueeze(1)
+    centroid = pc_env.mean(dim=1)
+    env._obs_obj_centroid = centroid.detach()
+    return centroid
 
 
 def visualize_tool_pointcloud(
@@ -864,16 +904,39 @@ def get_tool_pointcloud_in_env_frame(
 
     # Convert to env frame: subtract env_origins
     pointcloud_w = out_tensor  # (num_envs, M, 3) in world frame
-    pointcloud_env = pointcloud_w - env.scene.env_origins.unsqueeze(1)
+    pointcloud_env = pointcloud_w - env.scene.env_origins.unsqueeze(1)  # (N, M, 3)
+
+    # Center at (0,0,0): subtract per-env centroid
+    tool_centroid = pointcloud_env.mean(dim=1)          # (N, 3)  env-frame centroid
+    env._obs_tool_centroid = tool_centroid.detach()     # cache for get_tool_centroid()
+    pointcloud_centered = pointcloud_env - tool_centroid.unsqueeze(1)
 
     # Flatten to (num_envs, M*3)
-    pointcloud_env_flat = pointcloud_env.reshape(num_envs, -1)
+    pointcloud_env_flat = pointcloud_centered.reshape(num_envs, -1)
 
     # Optional visualization (world frame for marker rendering)
     if getattr(env.cfg, "visualize_tool_pointcloud", False):
         visualize_tool_pointcloud(env, out_tensor.reshape(num_envs, -1).float())
 
     return pointcloud_env_flat
+
+
+def get_tool_centroid(
+    env: ManagerBasedRLEnv,
+) -> torch.Tensor:
+    """Return the tool cloud centroid in the environment frame (3D per env).
+
+    Must be listed AFTER ``tool_cloud`` in the observation config so the
+    centroid cache (``env._obs_tool_centroid``) is populated first.
+
+    Returns:
+        Tensor (num_envs, 3)
+    """
+    if hasattr(env, "_obs_tool_centroid"):
+        return env._obs_tool_centroid
+    # Fallback: recompute by calling the full function
+    get_tool_pointcloud_in_env_frame(env)
+    return env._obs_tool_centroid
 
 
 # ---------------------------------------------------------------------------
