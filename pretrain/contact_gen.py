@@ -309,21 +309,26 @@ def randomise_object_pose(
 #                TOOL POSE INITIALISATION (with constraint projection)
 # ==============================================================================
 
-def _project_orientation(R: torch.Tensor) -> torch.Tensor:
-    """Minimal orientation constraint: allow all approach angles.
+def _project_orientation(R: torch.Tensor, upright_threshold: float = 0.0) -> torch.Tensor:
+    """Hard orientation constraint at initialisation.
 
-    Only flips orientations where tool's +Z points very strongly upward (> 0.9),
-    which would be unnatural (tool pointing up like holding a flag).
-    Allows sideways, downward, and angled approaches for diverse contact coverage.
+    Flips any pose where the tool's +Z has a positive world-Z component
+    (i.e. any upward-pointing orientation), consistent with the L_upright
+    loss which penalises relu(R[2,2] - upright_threshold).
+
+    The flip is a 180° rotation around the tool's local X axis:
+        R' = R @ diag(1, -1, -1)
+    which maps +Z → -Z and +Y → -Y, reflecting the tool downward.
 
     Args:
-        R: (N, 3, 3)
+        R:                  (N, 3, 3)
+        upright_threshold:  same value as cfg.upright_threshold (default 0.0)
 
     Returns:
-        R_proj: (N, 3, 3) with minimal constraint.
+        R_proj: (N, 3, 3) with tool +Z having no upward component.
     """
-    z_col = R[:, :, 2]       # (N, 3) – image of local +Z
-    bad = z_col[:, 2] > 0.9  # only flip if nearly vertical upward
+    z_col = R[:, :, 2]                        # (N, 3) — image of local +Z in world frame
+    bad   = z_col[:, 2] > upright_threshold   # any upward component
 
     if bad.any():
         flip = torch.eye(3, device=R.device).unsqueeze(0).expand(bad.sum(), -1, -1).clone()
@@ -370,7 +375,7 @@ def initialise_tool_poses(
 
     # --- 1. Random rotations, project orientation ---
     R = random_rotation_matrices(N, device)
-    R = _project_orientation(R)
+    R = _project_orientation(R, upright_threshold=cfg.upright_threshold)
 
     # --- 2. Sample one anchor per item from the assigned region ---
     head_anchor_idx = torch.randint(P_head.shape[0], (n_head_batch,), device=device)
