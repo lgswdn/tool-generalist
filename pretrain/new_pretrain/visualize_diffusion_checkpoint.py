@@ -168,13 +168,18 @@ def build_centered_tool_mesh(data: dict):
 
 
 def build_object_mesh(data: dict):
+    """Build object mesh in world frame and compute its centroid."""
     obj_mesh = load_mesh_trimesh(data["object_mesh_path"])
     obj_mesh.vertices *= to_numpy(data["object_scale"])
-    return apply_object_pose(
-        obj_mesh,
-        to_numpy(data["object_rotation"]),
-        float(to_numpy(data["obj_z_shift"])),
-    )
+    # Ground the object (z_min = 0)
+    z_min = obj_mesh.vertices[:, 2].min()
+    if z_min < 0:
+        obj_mesh.vertices[:, 2] -= z_min
+    if "object_rotation" in data:
+        obj_mesh.vertices = obj_mesh.vertices @ to_numpy(data["object_rotation"])
+    if "obj_z_shift" in data:
+        obj_mesh.vertices[:, 2] -= float(to_numpy(data["obj_z_shift"]))
+    return obj_mesh
 
 
 def sample_start_pose(
@@ -195,14 +200,23 @@ def sample_start_pose(
 @torch.no_grad()
 def rollout_diffusion(
     model: ContactDiffusionModel,
-    tool_canonical: torch.Tensor,
-    obj_pc: torch.Tensor,
-    contact_R: torch.Tensor,
-    contact_t: torch.Tensor,
+    tool_canonical: torch.Tensor,   # (1, P, 3) centered at origin (R=I)
+    obj_pc: torch.Tensor,           # (1, Q, 3) centered at origin
+    obj_centroid: torch.Tensor,     # (1, 3)    world-frame object centroid
+    contact_R: torch.Tensor,        # (1, 3, 3)
+    contact_t: torch.Tensor,        # (1, 3)    world-frame tool centroid at contact
     max_trans: float,
     max_rot_deg: float,
     n_steps: int,
 ) -> tuple[list[np.ndarray], list[np.ndarray], list[dict[str, float]]]:
+    """Iterative denoising rollout using the new architecture.
+
+    Encoder sees:
+      - tool rotated by cur_R (tool_canonical @ cur_R.T) — centered at origin
+      - obj_pc — centered at origin
+    Cross-attention gets:
+      - pose_6d = [cur_t(3), obj_centroid(3)] — world positions (no quaternion)
+    """
     cur_R, cur_t = sample_start_pose(contact_R, contact_t, max_trans, max_rot_deg)
     poses_R = [cur_R[0].detach().cpu().numpy()]
     poses_t = [cur_t[0].detach().cpu().numpy()]
@@ -210,9 +224,7 @@ def rollout_diffusion(
     stats = [{
         "frame": 0.0,
         "timestep": float(n_steps),
-        "delta_tx": 0.0,
-        "delta_ty": 0.0,
-        "delta_tz": 0.0,
+        "delta_tx": 0.0, "delta_ty": 0.0, "delta_tz": 0.0,
         "delta_trans_mm": 0.0,
         "delta_rot_deg": 0.0,
         "pose_tx": float(cur_t[0, 0].detach().cpu()),
@@ -222,19 +234,35 @@ def rollout_diffusion(
         "rot_error_deg": float(rotation_angle_deg_torch(rel_R)[0].detach().cpu()),
     }]
 
-    encoder_result = model.encoder.encode(tool_canonical, obj_pc)
+    device = tool_canonical.device
+    P = tool_canonical.shape[1]  # number of tool patches
+
     for frame_idx, step in enumerate(range(n_steps, 0, -1), start=1):
-        quat = matrix_to_quaternion(cur_R)
-        pose_7d = torch.cat([cur_t, quat], dim=-1)
-        timestep = torch.tensor([step], device=tool_canonical.device, dtype=torch.long)
-        fused = model.pose_cross_attn(encoder_result.fused_tokens, pose_7d, timestep)
-        pooled = fused.mean(dim=1)
+        # Rotate canonical tool by current rotation → centered, oriented
+        tool_rotated = torch.bmm(tool_canonical, cur_R.transpose(1, 2))  # (1, P, 3)
+
+        # Encode the current state (rotated tool + centered object)
+        encoder_result = model.encoder.encode(tool_rotated, obj_pc)
+
+        # 6D pose conditioning: [tool_centroid_world, obj_centroid_world]
+        pose_6d = torch.cat([cur_t, obj_centroid], dim=-1)  # (1, 6)
+        timestep = torch.tensor([step], device=device, dtype=torch.long)
+
+        # Cross-attention: inject position information
+        fused = model.pose_cross_attn(encoder_result.fused_tokens, pose_6d, timestep)
+
+        # Separate tool / object token pools → (1, 2*D)
+        tool_cond = fused[:, :P, :]
+        obj_cond  = fused[:, P:, :]
+        pooled = torch.cat([tool_cond.mean(dim=1), obj_cond.mean(dim=1)], dim=-1)
+
         denoise_out = model.denoising_head(pooled)
-        delta_R = denoise_out["rot_mat"]
-        delta_t = denoise_out["trans"]
+        delta_R = denoise_out["rot_mat"]  # (1, 3, 3)
+        delta_t = denoise_out["trans"]    # (1, 3)
 
         cur_R = torch.bmm(delta_R, cur_R)
         cur_t = cur_t + delta_t
+
         poses_R.append(cur_R[0].detach().cpu().numpy())
         poses_t.append(cur_t[0].detach().cpu().numpy())
         rel_R = torch.bmm(cur_R, contact_R.transpose(1, 2))
@@ -396,14 +424,16 @@ def render_video_for_sample(
 
     torch.manual_seed(args.seed + cfg_i)
     tool_canonical = sample["tool_canonical"].unsqueeze(0).to(device)
-    obj_pc = sample["obj_pc"].unsqueeze(0).to(device)
-    contact_R = sample["contact_R"].unsqueeze(0).to(device)
-    contact_t = sample["contact_t"].unsqueeze(0).to(device)
+    obj_pc         = sample["obj_pc"].unsqueeze(0).to(device)         # already centered
+    obj_centroid   = sample["obj_centroid"].unsqueeze(0).to(device)   # world pos
+    contact_R      = sample["contact_R"].unsqueeze(0).to(device)
+    contact_t      = sample["contact_t"].unsqueeze(0).to(device)
 
     poses_R, poses_t, stats = rollout_diffusion(
         model=model,
         tool_canonical=tool_canonical,
         obj_pc=obj_pc,
+        obj_centroid=obj_centroid,
         contact_R=contact_R,
         contact_t=contact_t,
         max_trans=args.noise_trans,

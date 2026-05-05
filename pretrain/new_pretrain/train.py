@@ -107,12 +107,14 @@ def load_ckpt(path: str, model: torch.nn.Module, optimizer=None):
 # ============================================================================ #
 
 def collate_fn(batch):
-    """Stack tensors from batch dicts, skip None fields."""
+    """Stack tensors from batch dicts, skip None fields. Keep strings as lists."""
     out = {}
     for key in batch[0]:
         vals = [b[key] for b in batch]
         if vals[0] is None:
             out[key] = None
+        elif isinstance(vals[0], str):
+            out[key] = vals          # keep as list of strings
         else:
             out[key] = torch.stack(vals)
     return out
@@ -127,21 +129,37 @@ def train_step(
     batch: dict,
     cfg: NewPretrainConfig,
     device: torch.device,
+    dataset=None,           # passed to look up _mesh_cache for signed SDF
 ) -> tuple[torch.Tensor, dict]:
-    """One training step: encode → noise → cross-attend → SDF + denoise loss."""
+    """One training step: encode → noise → cross-attend → SDF + denoise loss.
 
-    tool_canonical = batch["tool_canonical"].to(device)   # (B, P, 3)
-    obj_pc         = batch["obj_pc"].to(device)           # (B, Q, 3)
+    Architecture (new):
+      - Encoder input: tool_rotated (tool_canonical @ noised_R.T, centered) +
+                       obj_pc_centered
+      - Cross-attn:   pose_6d = [noised_t(3), obj_centroid(3)]  (no quaternion)
+      - Denoising:    predict (delta_R, delta_t) as before
+    """
+
+    tool_canonical = batch["tool_canonical"].to(device)   # (B, P, 3) centered
+    obj_pc         = batch["obj_pc"].to(device)           # (B, Q, 3) centered
+    obj_centroid   = batch["obj_centroid"].to(device)     # (B, 3)    world pos
     contact_R      = batch["contact_R"].to(device)        # (B, 3, 3)
     contact_t      = batch["contact_t"].to(device)        # (B, 3)
-    tool_sdf_gt    = batch["tool_sdf"].to(device)         # (B, P)
-    obj_sdf_gt     = batch["obj_sdf"].to(device)          # (B, Q)
+    tool_sdf_gt    = batch["tool_sdf"].to(device)         # (B, P)  signed
+    obj_sdf_gt     = batch["obj_sdf"].to(device)          # (B, Q)  signed
+
+    # Mesh cache for kaolin signed SDF (one entry per unique pt_path in batch)
+    mesh_entry = None
+    if dataset is not None and "pt_path" in batch:
+        # All items in a batch may come from different pt files;
+        # use the first entry's mesh as an approximation for rejection.
+        first_path = batch["pt_path"][0] if isinstance(batch["pt_path"], list) else batch["pt_path"]
+        mesh_entry = dataset._mesh_cache.get(first_path)
 
     raw_model = model.module if isinstance(model, DDP) else model
 
     if raw_model.task == "sdf":
-        # SDF-only: no noising, use contact pose SDF directly
-        # The encoder sees canonical tool + object
+        # SDF-only: encoder sees canonical tool (R=I) + centered object
         return model(
             tool_canonical=tool_canonical,
             obj_pc=obj_pc,
@@ -152,7 +170,7 @@ def train_step(
     # ── sdf-diff: sample noised pose and compute losses ──────────────
     B = tool_canonical.shape[0]
 
-    # 1. Sample noised pose (on-the-fly, RPDiff-style, with rejection sampling)
+    # 1. Sample noised pose (on-the-fly, RPDiff-style, with signed SDF rejection)
     noise_out = sample_noised_poses_batch(
         contact_R=contact_R,
         contact_t=contact_t,
@@ -163,47 +181,56 @@ def train_step(
         precise_prob=cfg.precise_diff_prob,
         tool_canonical=tool_canonical,
         obj_pc=obj_pc,
+        obj_centroid=obj_centroid,
+        mesh_cache_entry=mesh_entry,
     )
 
-    # 2. Compute on-the-fly SDF at the noised pose
+    noised_R = noise_out["noised_R"]   # (B, 3, 3)
+    noised_t = noise_out["noised_t"]   # (B, 3)
+
+    # 2. Build encoder inputs (both centered at origin)
+    #    Tool: rotate canonical by noised_R so encoder sees the actual orientation
+    tool_rotated = torch.bmm(tool_canonical, noised_R.transpose(1, 2))  # (B, P, 3)
+    # obj_pc is already centered (from dataset)
+
+    # 3. Compute on-the-fly SIGNED SDF at the noised pose
     tool_sdf_noised, obj_sdf_noised = compute_on_the_fly_sdf(
         tool_canonical, obj_pc,
-        noise_out["noised_R"], noise_out["noised_t"],
+        noised_R, noised_t, obj_centroid,
+        mesh_cache_entry=mesh_entry,
     )
 
     # For t=0 (contact pose), use the exact signed SDF from dataset
     is_contact = (noise_out["t_idx"] == 0)
     if is_contact.any():
         tool_sdf_noised[is_contact] = tool_sdf_gt[is_contact]
-        obj_sdf_noised[is_contact] = obj_sdf_gt[is_contact]
+        obj_sdf_noised[is_contact]  = obj_sdf_gt[is_contact]
 
-    # 3. Build noised pose 7D: trans(3) + quaternion(4)
-    noised_quat = matrix_to_quaternion(noise_out["noised_R"])  # (B, 4)
-    noised_pose_7d = torch.cat([noise_out["noised_t"], noised_quat], dim=-1)  # (B, 7)
+    # 4. Build 6D pose conditioning: [tool_centroid_world(3), obj_centroid_world(3)]
+    #    (no quaternion — rotation is baked into the encoder's tool_rotated input)
+    pose_6d = torch.cat([noised_t, obj_centroid], dim=-1)  # (B, 6)
 
-    # 4. Build child point clouds for chamfer loss
-    # child = tool at noised pose
-    child_start_pcd = torch.bmm(
-        tool_canonical, noise_out["noised_R"].transpose(1, 2)
-    ) + noise_out["noised_t"].unsqueeze(1)
+    # 5. Build child point clouds for chamfer loss
+    #    child_start = tool in world frame at noised pose
+    child_start_pcd = tool_rotated + noised_t.unsqueeze(1)   # (B, P, 3)
 
-    # child_final = where child SHOULD be after denoising one step
-    # Apply target (R, t) to child_start
-    child_start_mean = child_start_pcd.mean(dim=1, keepdim=True)
-    child_centered = child_start_pcd - child_start_mean
-    child_rotated = torch.bmm(
-        noise_out["target_rot_mat"],
-        child_centered.transpose(1, 2)
-    ).transpose(1, 2)
-    child_final_pcd = child_rotated + child_start_mean + noise_out["target_trans"].unsqueeze(1)
+    #    child_final = tool in world frame at previous timestep
+    #    = tool_canonical @ prev_R.T + prev_t
+    #    = target_rot @ noised_R applied to canonical, + (noised_t + target_trans)
+    prev_R = torch.bmm(noise_out["target_rot_mat"], noised_R)  # (B, 3, 3)
+    prev_t = noised_t + noise_out["target_trans"]               # (B, 3)
+    child_final_pcd = (
+        torch.bmm(tool_canonical, prev_R.transpose(1, 2))
+        + prev_t.unsqueeze(1)
+    )  # (B, P, 3)
 
-    # 5. Forward
+    # 6. Forward
     return model(
-        tool_canonical=tool_canonical,
-        obj_pc=obj_pc,
+        tool_canonical=tool_rotated,          # encoder sees rotated tool
+        obj_pc=obj_pc,                        # encoder sees centered object
         tool_sdf_gt=tool_sdf_noised,
         obj_sdf_gt=obj_sdf_noised,
-        noised_pose_7d=noised_pose_7d,
+        noised_pose_7d=pose_6d,               # cross-attn: 6D [noised_t, obj_centroid]
         timestep=noise_out["t_idx"],
         target_trans=noise_out["target_trans"],
         target_rot_mat=noise_out["target_rot_mat"],
@@ -295,7 +322,8 @@ def main():
         freeze_encoder=cfg.freeze_encoder,
         cross_attn_heads=cfg.cross_attn_heads,
         cross_attn_layers=cfg.cross_attn_layers,
-        denoise_hidden=256,
+        pose_dim=cfg.pose_dim,
+        denoise_hidden=cfg.denoise_hidden,
         sdf_weight=cfg.sdf_weight,
         denoise_weight=cfg.denoise_weight,
         chamfer_weight=cfg.chamfer_weight,
@@ -341,7 +369,7 @@ def main():
         t0 = time.time()
 
         for batch_idx, batch in enumerate(train_dl):
-            loss, metrics = train_step(model, batch, cfg, device)
+            loss, metrics = train_step(model, batch, cfg, device, dataset=train_ds)
 
             optimizer.zero_grad()
             loss.backward()
@@ -372,7 +400,7 @@ def main():
 
         with torch.no_grad():
             for batch in val_dl:
-                loss, metrics = train_step(model, batch, cfg, device)
+                loss, metrics = train_step(model, batch, cfg, device, dataset=val_ds)
                 val_loss += loss.item()
                 for k, v in metrics.items():
                     val_metrics[k] = val_metrics.get(k, 0) + v

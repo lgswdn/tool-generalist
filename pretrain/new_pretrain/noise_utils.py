@@ -143,22 +143,30 @@ def sample_noised_poses_batch(
     interp: bool = True,
     precise_prob: bool = False,
     # For rejection sampling
-    tool_canonical: torch.Tensor = None,  # (B, P, 3)
-    obj_pc: torch.Tensor = None,          # (B, Q, 3)
+    tool_canonical: torch.Tensor = None,   # (B, P, 3) centered
+    obj_pc: torch.Tensor = None,           # (B, Q, 3) centered
+    obj_centroid: torch.Tensor = None,     # (B, 3)    object centroid in world
+    mesh_cache_entry: dict = None,         # from dataset._mesh_cache[pt_path]
     pen_threshold: float = 0.001,
     max_retries: int = 10,
 ) -> dict:
-    """Fully batched SE(3) noise sampling with GPU rejection.
+    """Fully batched SE(3) noise sampling with GPU rejection (signed SDF).
 
     All operations are vectorized on GPU — no Python loops over batch items.
 
-    Guard: min tool-to-object NN distance >= pen_threshold.
+    Rejection: tool must not penetrate object by more than pen_threshold.
+    Uses kaolin signed SDF when mesh_cache_entry is available;
+    falls back to unsigned NN distance otherwise.
     Fallback: rejected items get contact pose (t_idx=0).
     """
     B = contact_R.shape[0]
     device = contact_R.device
     T = num_steps
-    do_guards = (tool_canonical is not None and obj_pc is not None)
+    do_guards = (
+        tool_canonical is not None
+        and obj_pc is not None
+        and obj_centroid is not None
+    )
 
     # Identity quaternion (w, x, y, z)
     q_id = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).expand(B, -1)
@@ -239,24 +247,54 @@ def sample_noised_poses_batch(
             target_trans[is_zero] = 0.0
             target_rot[is_zero] = torch.eye(3, device=device)
 
-        # ── 6. Rejection: min NN distance guard ──────────────────────
+        # ── 6. Rejection: signed SDF penetration guard ───────────────
         accepted = torch.ones(n_pending, dtype=torch.bool, device=device)
 
         if do_guards:
-            # Only check non-zero timesteps
+            # Only check non-zero timesteps (t_idx=0 is the contact pose itself)
             check_mask = ~is_zero
             if check_mask.any():
-                # Transform canonical tool to world frame at noised pose
-                tool_p = tool_canonical[pending]  # (n, P, 3)
-                obj_p = obj_pc[pending]            # (n, Q, 3)
-                tool_world = torch.bmm(tool_p, noised_R.transpose(1, 2)) + noised_t.unsqueeze(1)
+                tool_p  = tool_canonical[pending]   # (n, P, 3) centered
+                obj_p   = obj_pc[pending]            # (n, Q, 3) centered
+                obj_cen = obj_centroid[pending]      # (n, 3)
 
-                # Pairwise NN distances (n, P, Q) → min per sample
-                dist_matrix = torch.cdist(tool_world, obj_p, p=2)
-                min_dists = dist_matrix.min(dim=-1).values.min(dim=-1).values  # (n,)
+                tool_world = (
+                    torch.bmm(tool_p, noised_R.transpose(1, 2))
+                    + noised_t.unsqueeze(1)
+                )  # (n, P, 3)
+                obj_world = obj_p + obj_cen.unsqueeze(1)   # (n, Q, 3)
 
-                # Reject if too close
-                rejected = check_mask & (min_dists < pen_threshold)
+                if (
+                    _KAOLIN_AVAILABLE
+                    and mesh_cache_entry is not None
+                    and mesh_cache_entry.get("obj_verts") is not None
+                ):
+                    # Signed SDF: reject only if tool is penetrating the object
+                    # (min signed SDF < -pen_threshold  →  inside the object)
+                    obj_v = mesh_cache_entry["obj_verts"].to(device)
+                    obj_f = mesh_cache_entry["obj_faces"].to(device)
+                    fv = kaolin.ops.mesh.index_vertices_by_faces(
+                        obj_v.unsqueeze(0), obj_f
+                    ).expand(n_pending, -1, -1, -1)
+                    sq_d, _, _ = kaolin.metrics.trianglemesh.point_to_mesh_distance(
+                        tool_world.contiguous(), fv
+                    )
+                    dist = torch.sqrt(sq_d.clamp(min=0))   # (n, P)
+                    inside = kaolin.ops.mesh.check_sign(
+                        obj_v.unsqueeze(0).expand(n_pending, -1, -1),
+                        obj_f.long(), tool_world.contiguous(),
+                    )  # (n, P)
+                    signed = torch.where(inside, -dist, dist)  # (n, P)
+                    min_sdf = signed.min(dim=-1).values         # (n,)
+                    # Reject if penetrating (min_sdf < -pen_threshold)
+                    rejected = check_mask & (min_sdf < -pen_threshold)
+                else:
+                    # Fallback: reject if any tool point is within pen_threshold
+                    # of any object point (approximate, may reject valid poses)
+                    dist_matrix = torch.cdist(tool_world, obj_world, p=2)
+                    min_dists = dist_matrix.min(dim=-1).values.min(dim=-1).values
+                    rejected = check_mask & (min_dists < pen_threshold)
+
                 accepted[rejected] = False
 
         # ── 7. Write accepted results ─────────────────────────────────
@@ -282,23 +320,103 @@ def sample_noised_poses_batch(
 
 
 # ============================================================================ #
-# On-the-fly SDF via NN distances
+# Kaolin signed SDF helpers
+# ============================================================================ #
+
+try:
+    import kaolin.ops.mesh
+    import kaolin.metrics.trianglemesh
+    _KAOLIN_AVAILABLE = True
+except ImportError:
+    _KAOLIN_AVAILABLE = False
+
+
+def _kaolin_signed_sdf(
+    points: torch.Tensor,       # (B, P, 3)  query points in mesh frame
+    mesh_verts: torch.Tensor,   # (V, 3)
+    mesh_faces: torch.Tensor,   # (F, 3) int64
+) -> torch.Tensor:
+    """Signed SDF: positive = outside mesh, negative = inside."""
+    B = points.shape[0]
+    device = points.device
+    verts = mesh_verts.to(device)
+    faces = mesh_faces.to(device)
+    face_verts = kaolin.ops.mesh.index_vertices_by_faces(
+        verts.unsqueeze(0), faces
+    ).expand(B, -1, -1, -1)          # (B, F, 3, 3)
+    sq_dist, _, _ = kaolin.metrics.trianglemesh.point_to_mesh_distance(
+        points.contiguous(), face_verts
+    )
+    dist = torch.sqrt(sq_dist.clamp(min=0))   # (B, P)
+    inside = kaolin.ops.mesh.check_sign(
+        verts.unsqueeze(0).expand(B, -1, -1),
+        faces.long(),
+        points.contiguous(),
+    )                                # (B, P) bool  True = inside
+    return torch.where(inside, -dist, dist)   # signed: inside < 0
+
+
+# ============================================================================ #
+# On-the-fly SDF (signed, positive = outside)
 # ============================================================================ #
 
 def compute_on_the_fly_sdf(
-    tool_canonical: torch.Tensor,  # (B, P, 3)
-    obj_pc: torch.Tensor,          # (B, Q, 3)
-    noised_R: torch.Tensor,        # (B, 3, 3)
-    noised_t: torch.Tensor,        # (B, 3)
+    tool_canonical: torch.Tensor,   # (B, P, 3) centered canonical (R=I)
+    obj_pc: torch.Tensor,           # (B, Q, 3) centered at origin
+    noised_R: torch.Tensor,         # (B, 3, 3)
+    noised_t: torch.Tensor,         # (B, 3)   tool centroid world pos
+    obj_centroid: torch.Tensor,     # (B, 3)   object centroid world pos
+    mesh_cache_entry: dict = None,  # from dataset._mesh_cache[pt_path]
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute approximate unsigned mutual SDF using point-to-point NN distance.
+    """Compute signed SDF (positive=outside) for tool and object point clouds.
+
+    Uses kaolin with mesh data when available; falls back to unsigned NN otherwise.
+
+    Convention (NEW):
+      - tool_canonical is centered; encoder input is tool_canonical @ noised_R.T
+      - obj_pc is centered; its world position is obj_centroid
+      - Tool world pts  = tool_canonical @ noised_R.T + noised_t
+      - Object world pts = obj_pc + obj_centroid
 
     Returns:
-        tool_sdf: (B, P) unsigned NN distance from each tool point to object.
-        obj_sdf:  (B, Q) unsigned NN distance from each object point to tool.
+        tool_sdf: (B, P) signed — positive = tool point is outside the object mesh
+        obj_sdf:  (B, Q) signed — positive = obj point is outside the tool mesh
     """
-    tool_world = torch.bmm(tool_canonical, noised_R.transpose(1, 2)) + noised_t.unsqueeze(1)
-    dist_matrix = torch.cdist(tool_world, obj_pc, p=2)
-    tool_sdf = dist_matrix.min(dim=-1).values  # (B, P)
-    obj_sdf = dist_matrix.min(dim=-2).values   # (B, Q)
+    # Tool points in world frame
+    tool_world = (
+        torch.bmm(tool_canonical, noised_R.transpose(1, 2))
+        + noised_t.unsqueeze(1)
+    )  # (B, P, 3)
+
+    # Object points in world frame
+    obj_world = obj_pc + obj_centroid.unsqueeze(1)   # (B, Q, 3)
+
+    if (
+        _KAOLIN_AVAILABLE
+        and mesh_cache_entry is not None
+        and mesh_cache_entry.get("obj_verts") is not None
+        and mesh_cache_entry.get("tool_verts") is not None
+    ):
+        obj_verts  = mesh_cache_entry["obj_verts"]    # (V_o, 3) world frame
+        obj_faces  = mesh_cache_entry["obj_faces"]
+        tool_verts = mesh_cache_entry["tool_verts"]   # (V_t, 3) centered
+        tool_faces = mesh_cache_entry["tool_faces"]
+
+        # tool SDF: how far are tool world pts from object surface? (signed)
+        tool_sdf = _kaolin_signed_sdf(tool_world, obj_verts, obj_faces)
+
+        # obj SDF: transform obj world pts into tool frame, then query tool mesh
+        # tool frame = centered tool at (0,0,0) with noised_R applied
+        # world → tool frame: (p - noised_t) @ noised_R  (undo rotation + translation)
+        obj_in_tool = torch.bmm(
+            obj_world - noised_t.unsqueeze(1),
+            noised_R,                              # (B, Q, 3) @ (B, 3, 3)
+        )
+        obj_sdf = _kaolin_signed_sdf(obj_in_tool, tool_verts, tool_faces)
+    else:
+        # Fallback: unsigned NN distance (no sign info)
+        dist_matrix = torch.cdist(tool_world, obj_world, p=2)
+        tool_sdf = dist_matrix.min(dim=-1).values
+        obj_sdf  = dist_matrix.min(dim=-2).values
+
     return tool_sdf, obj_sdf

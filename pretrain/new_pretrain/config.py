@@ -37,7 +37,7 @@ class NewPretrainConfig:
     # ── Cross-attention (pose conditioning) ──────────────────────────────
     cross_attn_heads: int = 4
     cross_attn_layers: int = 2
-    pose_dim: int = 7              # 3 (trans) + 4 (quaternion)
+    pose_dim: int = 6              # [tool_centroid(3), obj_centroid(3)]  (no quaternion)
 
     # ── Denoising head ───────────────────────────────────────────────────
     denoise_hidden: int = 256
@@ -48,6 +48,9 @@ class NewPretrainConfig:
     noise_max_rot_deg: float = 90.0
     interp_trajectory: bool = True  # True=SLERP interp, False=random walk
     precise_diff_prob: bool = False  # bias toward smaller steps
+    # "uniform" → sample t_idx uniformly in [0, T] (incremental steps)
+    # "last"    → always t_idx=T, target = full correction to clean contact (one-shot)
+    diffusion_t_mode: str = "last"
 
     # ── Loss weights ─────────────────────────────────────────────────────
     sdf_weight: float = 1.0
