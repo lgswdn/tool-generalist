@@ -258,21 +258,6 @@ def train_step(
         child_final_pcd=child_final_pcd,
     )
 
-�────────────────────────────────────────────
-    return model(
-        tool_canonical=tool_rotated,          # encoder sees rotated tool (centered)
-        obj_pc=obj_pc,                        # encoder sees centered object
-        tool_sdf_gt=tool_sdf_noised,
-        obj_sdf_gt=obj_sdf_noised,
-        noised_pose_7d=pose_6d,               # 6D: [noised_t, obj_centroid]
-        timestep=noise_out["t_idx"],
-        movement_cond=movement_cond,          # 14D or zeros
-        target_trans=noise_out["target_trans"],
-        target_rot_mat=noise_out["target_rot_mat"],
-        child_start_pcd=child_start_pcd,
-        child_final_pcd=child_final_pcd,
-    )
-
 
 # ============================================================================ #
 # Main training loop
