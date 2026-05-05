@@ -106,14 +106,19 @@ def load_ckpt(path: str, model: torch.nn.Module, optimizer=None):
 # Collate: skip None-valued optional fields
 # ============================================================================ #
 
+# Keys that should be passed through as lists (not stacked into tensors)
+_LIST_KEYS = {"tool_verts", "tool_faces", "obj_verts", "obj_faces", "pt_path"}
+
+
 def collate_fn(batch):
-    """Stack tensors from batch dicts, skip None fields."""
+    """Stack tensors from batch dicts; pass string/list fields through as lists."""
     out = {}
     for key in batch[0]:
         vals = [b[key] for b in batch]
         if vals[0] is None:
             out[key] = None
-        elif key in ("tool_verts", "tool_faces", "obj_verts", "obj_faces"):
+        elif key in _LIST_KEYS or not isinstance(vals[0], torch.Tensor):
+            # strings, lists, variable-length tensors → keep as list
             out[key] = vals
         else:
             out[key] = torch.stack(vals)
