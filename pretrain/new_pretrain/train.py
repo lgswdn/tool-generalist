@@ -107,14 +107,14 @@ def load_ckpt(path: str, model: torch.nn.Module, optimizer=None):
 # ============================================================================ #
 
 def collate_fn(batch):
-    """Stack tensors from batch dicts, skip None fields. Keep strings as lists."""
+    """Stack tensors from batch dicts, skip None fields."""
     out = {}
     for key in batch[0]:
         vals = [b[key] for b in batch]
         if vals[0] is None:
             out[key] = None
-        elif isinstance(vals[0], str):
-            out[key] = vals          # keep as list of strings
+        elif key in ("tool_verts", "tool_faces", "obj_verts", "obj_faces"):
+            out[key] = vals
         else:
             out[key] = torch.stack(vals)
     return out
@@ -129,15 +129,16 @@ def train_step(
     batch: dict,
     cfg: NewPretrainConfig,
     device: torch.device,
-    dataset=None,           # passed to look up _mesh_cache for signed SDF
+    dataset=None,
 ) -> tuple[torch.Tensor, dict]:
     """One training step: encode → noise → cross-attend → SDF + denoise loss.
 
-    Architecture (new):
-      - Encoder input: tool_rotated (tool_canonical @ noised_R.T, centered) +
-                       obj_pc_centered
-      - Cross-attn:   pose_6d = [noised_t(3), obj_centroid(3)]  (no quaternion)
-      - Denoising:    predict (delta_R, delta_t) as before
+    Encoder receives:
+      - tool_rotated = tool_canonical @ noised_R.T  (centered, current rotation applied)
+      - obj_pc                                       (centered at origin)
+    Cross-attention receives:
+      - pose_6d      = [noised_t(3), obj_centroid(3)]
+      - movement_cond = [delta_tool_t(3), delta_tool_quat(4), delta_obj_t(3), delta_obj_quat(4)]
     """
 
     tool_canonical = batch["tool_canonical"].to(device)   # (B, P, 3) centered
@@ -147,30 +148,29 @@ def train_step(
     contact_t      = batch["contact_t"].to(device)        # (B, 3)
     tool_sdf_gt    = batch["tool_sdf"].to(device)         # (B, P)  signed
     obj_sdf_gt     = batch["obj_sdf"].to(device)          # (B, Q)  signed
+    B = tool_canonical.shape[0]
 
-    # Mesh cache for kaolin signed SDF (one entry per unique pt_path in batch)
+    # Mesh cache for kaolin signed SDF
     mesh_entry = None
     if dataset is not None and "pt_path" in batch:
-        # All items in a batch may come from different pt files;
-        # use the first entry's mesh as an approximation for rejection.
         first_path = batch["pt_path"][0] if isinstance(batch["pt_path"], list) else batch["pt_path"]
         mesh_entry = dataset._mesh_cache.get(first_path)
 
     raw_model = model.module if isinstance(model, DDP) else model
 
     if raw_model.task == "sdf":
-        # SDF-only: encoder sees canonical tool (R=I) + centered object
+        # SDF-only: encoder sees canonical tool (R=I) + centered object.
+        # movement_cond still required even for SDF-only mode.
+        movement_cond = torch.zeros(B, 14, device=device)   # no denoising step → zero delta
         return model(
             tool_canonical=tool_canonical,
             obj_pc=obj_pc,
             tool_sdf_gt=tool_sdf_gt,
             obj_sdf_gt=obj_sdf_gt,
+            movement_cond=movement_cond,
         )
 
-    # ── sdf-diff: sample noised pose and compute losses ──────────────
-    B = tool_canonical.shape[0]
-
-    # 1. Sample noised pose (on-the-fly, RPDiff-style, with signed SDF rejection)
+    # ── 1. Sample noised pose ─────────────────────────────────────────────
     noise_out = sample_noised_poses_batch(
         contact_R=contact_R,
         contact_t=contact_t,
@@ -188,50 +188,54 @@ def train_step(
     noised_R = noise_out["noised_R"]   # (B, 3, 3)
     noised_t = noise_out["noised_t"]   # (B, 3)
 
-    # 2. Build encoder inputs (both centered at origin)
-    #    Tool: rotate canonical by noised_R so encoder sees the actual orientation
+    # ── 2. Build encoder inputs (both centered at origin) ─────────────────
     tool_rotated = torch.bmm(tool_canonical, noised_R.transpose(1, 2))  # (B, P, 3)
-    # obj_pc is already centered (from dataset)
+    # obj_pc is already centered; obj_centroid carries its world position
 
-    # 3. Compute on-the-fly SIGNED SDF at the noised pose
+    # ── 3. Compute on-the-fly SIGNED SDF ──────────────────────────────────
     tool_sdf_noised, obj_sdf_noised = compute_on_the_fly_sdf(
         tool_canonical, obj_pc,
         noised_R, noised_t, obj_centroid,
         mesh_cache_entry=mesh_entry,
     )
-
-    # For t=0 (contact pose), use the exact signed SDF from dataset
     is_contact = (noise_out["t_idx"] == 0)
     if is_contact.any():
         tool_sdf_noised[is_contact] = tool_sdf_gt[is_contact]
         obj_sdf_noised[is_contact]  = obj_sdf_gt[is_contact]
 
-    # 4. Build 6D pose conditioning: [tool_centroid_world(3), obj_centroid_world(3)]
-    #    (no quaternion — rotation is baked into the encoder's tool_rotated input)
-    pose_6d = torch.cat([noised_t, obj_centroid], dim=-1)  # (B, 6)
+    # ── 4. Build 6D pose conditioning ─────────────────────────────────────
+    pose_6d = torch.cat([noised_t, obj_centroid], dim=-1)   # (B, 6)
 
-    # 5. Build child point clouds for chamfer loss
-    #    child_start = tool in world frame at noised pose
+    # ── 5. Build movement conditioning (14D) ──────────────────────────────
+    # [delta_tool_t(3), delta_tool_quat(4), delta_obj_t(3), delta_obj_quat(4)]
+    delta_tool_t   = batch["delta_tool_t"].to(device)   # (B, 3)
+    delta_tool_R   = batch["delta_tool_R"].to(device)   # (B, 3, 3)
+    delta_obj_t    = batch["delta_obj_t"].to(device)    # (B, 3)
+    delta_obj_R    = batch["delta_obj_R"].to(device)    # (B, 3, 3)
+    delta_tool_quat = matrix_to_quaternion(delta_tool_R)  # (B, 4)
+    delta_obj_quat  = matrix_to_quaternion(delta_obj_R)   # (B, 4)
+    movement_cond = torch.cat(
+        [delta_tool_t, delta_tool_quat, delta_obj_t, delta_obj_quat], dim=-1
+    )  # (B, 14)
+
+    # ── 6. Child point clouds for chamfer loss ────────────────────────────
     child_start_pcd = tool_rotated + noised_t.unsqueeze(1)   # (B, P, 3)
 
-    #    child_final = tool in world frame at previous timestep
-    #    = tool_canonical @ prev_R.T + prev_t
-    #    = target_rot @ noised_R applied to canonical, + (noised_t + target_trans)
-    prev_R = torch.bmm(noise_out["target_rot_mat"], noised_R)  # (B, 3, 3)
-    prev_t = noised_t + noise_out["target_trans"]               # (B, 3)
+    prev_R = torch.bmm(noise_out["target_rot_mat"], noised_R)
+    prev_t = noised_t + noise_out["target_trans"]
     child_final_pcd = (
-        torch.bmm(tool_canonical, prev_R.transpose(1, 2))
-        + prev_t.unsqueeze(1)
+        torch.bmm(tool_canonical, prev_R.transpose(1, 2)) + prev_t.unsqueeze(1)
     )  # (B, P, 3)
 
-    # 6. Forward
+    # ── 7. Forward ────────────────────────────────────────────────────────
     return model(
-        tool_canonical=tool_rotated,          # encoder sees rotated tool
+        tool_canonical=tool_rotated,          # encoder sees rotated tool (centered)
         obj_pc=obj_pc,                        # encoder sees centered object
         tool_sdf_gt=tool_sdf_noised,
         obj_sdf_gt=obj_sdf_noised,
-        noised_pose_7d=pose_6d,               # cross-attn: 6D [noised_t, obj_centroid]
+        noised_pose_7d=pose_6d,               # 6D: [noised_t, obj_centroid]
         timestep=noise_out["t_idx"],
+        movement_cond=movement_cond,          # 14D or zeros
         target_trans=noise_out["target_trans"],
         target_rot_mat=noise_out["target_rot_mat"],
         child_start_pcd=child_start_pcd,
@@ -279,6 +283,7 @@ def main():
         seed=cfg.seed,
         augment=cfg.augment,
         max_files=cfg.max_files,
+        require_movement=(cfg.task == "sdf-diff"),
     )
 
     if is_main():
@@ -314,6 +319,7 @@ def main():
     model = ContactDiffusionModel(
         head_mode=cfg.head_mode,
         patch_agg=cfg.patch_agg,
+        head_hidden=cfg.head_hidden,
         num_pts=cfg.num_pts,
         patch_size=cfg.patch_size,
         encoder_channel=cfg.encoder_channel,
@@ -323,10 +329,13 @@ def main():
         cross_attn_heads=cfg.cross_attn_heads,
         cross_attn_layers=cfg.cross_attn_layers,
         pose_dim=cfg.pose_dim,
+        movement_cond_dim=cfg.movement_cond_dim,
         denoise_hidden=cfg.denoise_hidden,
         sdf_weight=cfg.sdf_weight,
         denoise_weight=cfg.denoise_weight,
+        denoise_rot_weight=cfg.denoise_rot_weight,
         chamfer_weight=cfg.chamfer_weight,
+        quat_norm_beta=cfg.quat_norm_beta,
         num_diffusion_steps=cfg.num_diffusion_steps,
         task=cfg.task,
     ).to(device)
@@ -369,7 +378,7 @@ def main():
         t0 = time.time()
 
         for batch_idx, batch in enumerate(train_dl):
-            loss, metrics = train_step(model, batch, cfg, device, dataset=train_ds)
+            loss, metrics = train_step(model, batch, cfg, device)
 
             optimizer.zero_grad()
             loss.backward()
@@ -400,7 +409,7 @@ def main():
 
         with torch.no_grad():
             for batch in val_dl:
-                loss, metrics = train_step(model, batch, cfg, device, dataset=val_ds)
+                loss, metrics = train_step(model, batch, cfg, device)
                 val_loss += loss.item()
                 for k, v in metrics.items():
                     val_metrics[k] = val_metrics.get(k, 0) + v

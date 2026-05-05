@@ -95,6 +95,7 @@ class PoseCrossAttention(nn.Module):
         self,
         token_dim: int,
         pose_dim: int = 7,
+        movement_cond_dim: int = 14,
         n_heads: int = 4,
         n_layers: int = 2,
         max_timestep: int = 100,
@@ -115,6 +116,12 @@ class PoseCrossAttention(nn.Module):
         self.time_proj = nn.Sequential(
             nn.Linear(token_dim, token_dim),
             nn.GELU(),
+        )
+        self.movement_proj = nn.Sequential(
+            nn.Linear(movement_cond_dim, token_dim),
+            nn.LayerNorm(token_dim),
+            nn.GELU(),
+            nn.Linear(token_dim, token_dim),
         )
 
         # Cross-attention layers: pose queries attend to encoder tokens
@@ -140,6 +147,7 @@ class PoseCrossAttention(nn.Module):
         tokens: torch.Tensor,       # (B, 2P, D) encoder patch tokens
         pose_7d: torch.Tensor,       # (B, 7) noised pose: trans(3) + quat(4)
         timestep: torch.Tensor,      # (B,) int timestep index
+        movement_cond: torch.Tensor, # (B, 14) delta_T trans+quat and delta_O trans+quat
     ) -> torch.Tensor:
         """Returns pose-conditioned tokens P' with same shape (B, 2P, D)."""
         B = tokens.shape[0]
@@ -150,9 +158,10 @@ class PoseCrossAttention(nn.Module):
         # Timestep embedding
         time_emb = self.time_emb(timestep.float())      # (B, D)
         time_emb = self.time_proj(time_emb)              # (B, D)
+        movement_emb = self.movement_proj(movement_cond) # (B, D)
 
         # Combine pose + time as a single conditioning token
-        cond = (pose_emb + time_emb).unsqueeze(1)        # (B, 1, D)
+        cond = (pose_emb + time_emb + movement_emb).unsqueeze(1)  # (B, 1, D)
 
         # Cross-attention: tokens attend to pose condition
         out = tokens
@@ -178,6 +187,15 @@ class PoseCrossAttention(nn.Module):
 # DenoisingHead — RPDiff-style MLP heads for translation + rotation
 # ============================================================================ #
 
+def _make_relu_mlp(dims: tuple[int, ...]) -> nn.Sequential:
+    layers: list[nn.Module] = []
+    for i in range(len(dims) - 1):
+        layers.append(nn.Linear(dims[i], dims[i + 1]))
+        if i < len(dims) - 2:
+            layers.append(nn.ReLU())
+    return nn.Sequential(*layers)
+
+
 class DenoisingHead(nn.Module):
     """RPDiff-style denoising head: predicts one-step inverse transform.
 
@@ -189,18 +207,12 @@ class DenoisingHead(nn.Module):
     Gram-Schmidt orthogonalization on (vec1, vec2) → rotation matrix → quaternion.
     """
 
-    def __init__(self, input_dim: int, hidden_dim: int = 256):
+    def __init__(self, input_dim: int, hidden_dims: tuple[int, ...] = (256,)):
         super().__init__()
-        # Exactly RPDiff's output heads (2-layer MLPs)
-        self.out_trans = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, 3)
-        )
-        self.out_vec1 = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, 3)
-        )
-        self.out_vec2 = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, 3)
-        )
+        dims = (input_dim,) + hidden_dims + (3,)
+        self.out_trans = _make_relu_mlp(dims)
+        self.out_vec1 = _make_relu_mlp(dims)
+        self.out_vec2 = _make_relu_mlp(dims)
 
     def forward(
         self,
@@ -260,13 +272,15 @@ class ContactDiffusionModel(nn.Module):
     """RPDiff-style joint SDF + pose denoising model.
 
     Architecture:
-      1. encoder: SDFPointCloudEncoder — encodes canonical tool + object → tokens P
-      2. pose_cross_attn: PoseCrossAttention — conditions P on noised pose → P'
-      3. SDF heads: predict tool/obj SDF from P' (point or patch mode)
-      4. denoising_head: RPDiff-style MLP → one-step inverse transform
-
-    The encoder ALWAYS sees canonical tool (origin, R=I) + object (world pose).
-    Pose variation enters ONLY via cross-attention.
+      1. encoder: SDFPointCloudEncoder
+           - Tool input:   tool_canonical @ noised_R.T  (centered, rotation applied)
+           - Object input: obj_pc                       (centered at origin)
+      2. pose_cross_attn: PoseCrossAttention
+           - pose_6d:      [noised_t(3), obj_centroid(3)]  (world-frame translations)
+           - movement_cond:[delta_tool_t(3), delta_tool_quat(4),
+                            delta_obj_t(3), delta_obj_quat(4)]
+      3. SDF heads: predict per-point/per-patch SDF from conditioned tokens
+      4. denoising_head: separate mean-pool of tool/object tokens → (2D) → MLP
     """
 
     def __init__(
@@ -286,11 +300,13 @@ class ContactDiffusionModel(nn.Module):
         cross_attn_heads: int = 4,
         cross_attn_layers: int = 2,
         pose_dim: int = 7,
+        movement_cond_dim: int = 14,
         # Denoising
-        denoise_hidden: int = 256,
+        denoise_hidden: tuple[int, ...] = (256,),
         # Loss
         sdf_weight: float = 1.0,
         denoise_weight: float = 1.0,
+        denoise_rot_weight: float = 1.0,
         chamfer_weight: float = 1.0,
         quat_norm_beta: float = 0.1,
         # Diffusion
@@ -307,6 +323,7 @@ class ContactDiffusionModel(nn.Module):
         self.task = task
         self.sdf_weight = sdf_weight
         self.denoise_weight = denoise_weight
+        self.denoise_rot_weight = denoise_rot_weight
         self.chamfer_weight = chamfer_weight
         self.quat_norm_beta = quat_norm_beta
         self.num_diffusion_steps = num_diffusion_steps
@@ -338,6 +355,7 @@ class ContactDiffusionModel(nn.Module):
             self.pose_cross_attn = PoseCrossAttention(
                 token_dim=D,
                 pose_dim=pose_dim,
+                movement_cond_dim=movement_cond_dim,
                 n_heads=cross_attn_heads,
                 n_layers=cross_attn_layers,
                 max_timestep=num_diffusion_steps + 1,
@@ -347,7 +365,7 @@ class ContactDiffusionModel(nn.Module):
             # Input: separately pooled tool tokens + object tokens concatenated (2*D)
             self.denoising_head = DenoisingHead(
                 input_dim=2 * D,
-                hidden_dim=denoise_hidden,
+                hidden_dims=denoise_hidden,
             )
 
             # ── RPDiff loss function (reuse directly) ────────────────────
@@ -407,26 +425,25 @@ class ContactDiffusionModel(nn.Module):
 
     def loss(
         self,
-        tool_canonical: torch.Tensor,     # (B, P, 3) canonical tool (origin, R=I)
-        obj_pc: torch.Tensor,             # (B, Q, 3) object (world frame)
+        tool_canonical: torch.Tensor,     # (B, P, 3) rotated tool, centered at origin
+        obj_pc: torch.Tensor,             # (B, Q, 3) object centered at origin
         tool_sdf_gt: torch.Tensor,        # (B, P) signed SDF at current pose
         obj_sdf_gt: torch.Tensor,         # (B, Q) signed SDF at current pose
         # Diffusion inputs (only used when task="sdf-diff")
-        noised_pose_7d: torch.Tensor = None,    # (B, 7) noised pose: trans(3) + quat(4)
+        noised_pose_7d: torch.Tensor = None,    # (B, 6) [noised_t(3), obj_centroid(3)]
         timestep: torch.Tensor = None,          # (B,) int
+        movement_cond: torch.Tensor = None,     # (B, 14) [delta_tool_t/quat, delta_obj_t/quat]
         target_trans: torch.Tensor = None,      # (B, 3) denoising target: translation
         target_rot_mat: torch.Tensor = None,    # (B, 3, 3) denoising target: rotation
-        # For chamfer loss: the noised child point cloud
-        child_start_pcd: torch.Tensor = None,   # (B, Q_child, 3)
-        child_final_pcd: torch.Tensor = None,   # (B, Q_child, 3)
-        # Encoder result (optional, to share across steps)
+        child_start_pcd: torch.Tensor = None,   # (B, Q_child, 3) tool at noised pose
+        child_final_pcd: torch.Tensor = None,   # (B, Q_child, 3) tool at previous pose
         encoder_result=None,
     ) -> Tuple[torch.Tensor, dict]:
         """Compute joint SDF + denoising loss.
 
-        The encoder ALWAYS sees canonical tool + object, producing tokens P.
-        For sdf-diff, cross-attention with noised pose → P', then SDF from P'.
-        For sdf-only, SDF directly from P (no cross-attention).
+        For sdf-diff: cross-attention conditions tokens with pose + movement, then
+        SDF and denoising heads operate on the conditioned tokens.
+        For sdf-only: SDF directly from unconditioned tokens (no cross-attention).
         """
         metrics = {}
 
@@ -439,7 +456,7 @@ class ContactDiffusionModel(nn.Module):
         # ── 2. Optionally apply pose cross-attention ─────────────────────
         if self.task == "sdf-diff" and noised_pose_7d is not None:
             fused = encoder_result.fused_tokens  # (B, 2P, D)
-            fused_conditioned = self.pose_cross_attn(fused, noised_pose_7d, timestep)
+            fused_conditioned = self.pose_cross_attn(fused, noised_pose_7d, timestep, movement_cond)
             tool_tok_cond = fused_conditioned[:, :P, :]
             obj_tok_cond = fused_conditioned[:, P:, :]
         else:
@@ -522,7 +539,7 @@ class ContactDiffusionModel(nn.Module):
                 quat_norm_beta=self.quat_norm_beta,
             )
 
-            d_loss = denoise_loss_dict["trans"] + denoise_loss_dict["rot"]
+            d_loss = denoise_loss_dict["trans"] + self.denoise_rot_weight * denoise_loss_dict["rot"]
             if "chamf" in denoise_loss_dict:
                 d_loss = d_loss + self.chamfer_weight * denoise_loss_dict["chamf"]
 

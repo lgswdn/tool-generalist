@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Tuple
 
 
@@ -30,31 +30,32 @@ class NewPretrainConfig:
     num_pts: int = 512
     patch_size: int = 32
     encoder_channel: int = 128
-    vit_depth: int = 6
+    vit_depth: int = 12
     vit_heads: int = 4
     freeze_encoder: bool = False
 
     # ── Cross-attention (pose conditioning) ──────────────────────────────
     cross_attn_heads: int = 4
-    cross_attn_layers: int = 2
-    pose_dim: int = 6              # [tool_centroid(3), obj_centroid(3)]  (no quaternion)
+    cross_attn_layers: int = 4
+    # [noised_t(3), obj_centroid(3)] — world-frame translations; rotation baked into encoder input
+    pose_dim: int = 6
+    # [delta_tool_t(3), delta_tool_quat(4), delta_obj_t(3), delta_obj_quat(4)]
+    movement_cond_dim: int = 14
 
     # ── Denoising head ───────────────────────────────────────────────────
-    denoise_hidden: int = 256
+    denoise_hidden: Tuple[int, ...] = (512, 256, 128)
 
     # ── Diffusion noising ────────────────────────────────────────────────
     num_diffusion_steps: int = 10
-    noise_max_trans: float = 0.2  # metres
-    noise_max_rot_deg: float = 90.0
+    noise_max_trans: float = 0.1   # metres
+    noise_max_rot_deg: float = 30.0
     interp_trajectory: bool = True  # True=SLERP interp, False=random walk
     precise_diff_prob: bool = False  # bias toward smaller steps
-    # "uniform" → sample t_idx uniformly in [0, T] (incremental steps)
-    # "last"    → always t_idx=T, target = full correction to clean contact (one-shot)
-    diffusion_t_mode: str = "last"
 
     # ── Loss weights ─────────────────────────────────────────────────────
     sdf_weight: float = 1.0
     denoise_weight: float = 1.0
+    denoise_rot_weight: float = 50.0
     chamfer_weight: float = 1.0    # RPDiff chamfer term weight
     quat_norm_beta: float = 0.1   # RPDiff quaternion norm regularization
 
