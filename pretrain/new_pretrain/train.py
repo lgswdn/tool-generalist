@@ -148,26 +148,19 @@ def train_step(
 
     tool_canonical = batch["tool_canonical"].to(device)   # (B, P, 3) centered
     obj_pc         = batch["obj_pc"].to(device)           # (B, Q, 3) centered
-    obj_centroid   = batch["obj_centroid"].to(device)     # (B, 3)    world pos
+    obj_centroid   = batch["obj_centroid"].to(device)     # (B, 3)
     contact_R      = batch["contact_R"].to(device)        # (B, 3, 3)
     contact_t      = batch["contact_t"].to(device)        # (B, 3)
     tool_sdf_gt    = batch["tool_sdf"].to(device)         # (B, P)  signed
     obj_sdf_gt     = batch["obj_sdf"].to(device)          # (B, Q)  signed
     B = tool_canonical.shape[0]
 
-    # Mesh cache for kaolin signed SDF (not used in new format — SDF is pre-baked)
-    mesh_entry = None
-
     raw_model = model.module if isinstance(model, DDP) else model
 
     if raw_model.task == "sdf":
-        # SDF-only mode uses the SAME noising pipeline as sdf-diff so that the
-        # SDF head trains at many different orientations, not just the single
-        # contact pose.  Without this, the encoder only sees one orientation per
-        # item and the SDF head degenerates to memorisation.
-        #
-        # The only difference from sdf-diff: denoising targets are dummies
-        # (the model's denoising heads are absent / not supervised in this task).
+        # SDF-only: noise the pose so the encoder sees many orientations, but
+        # use the pre-baked SDF as supervision (it is the ground-truth at contact;
+        # for noised poses it is an approximation, which is fine for SDF pretraining).
         noise_out_sdf = sample_noised_poses_batch(
             contact_R=contact_R,
             contact_t=contact_t,
@@ -178,7 +171,6 @@ def train_step(
             precise_prob=cfg.precise_diff_prob,
             tool_canonical=tool_canonical,
             obj_pc=obj_pc,
-            obj_centroid=obj_centroid,
         )
         noised_R_sdf = noise_out_sdf["noised_R"]   # (B, 3, 3)
         noised_t_sdf = noise_out_sdf["noised_t"]   # (B, 3)
@@ -186,16 +178,12 @@ def train_step(
         # Apply noised rotation so encoder sees tool in its current orientation
         tool_rotated_sdf = torch.bmm(tool_canonical, noised_R_sdf.transpose(1, 2))  # (B, P, 3)
 
-        # On-the-fly SDF at the noised pose; fall back to pre-baked at t=0
-        tool_sdf_noised_sdf, obj_sdf_noised_sdf = compute_on_the_fly_sdf(
-            tool_canonical, obj_pc,
-            noised_R_sdf, noised_t_sdf, obj_centroid,
-            mesh_cache_entry=None,
-        )
-        is_contact_sdf = (noise_out_sdf["t_idx"] == 0)
-        if is_contact_sdf.any():
-            tool_sdf_noised_sdf[is_contact_sdf] = tool_sdf_gt[is_contact_sdf]
-            obj_sdf_noised_sdf[is_contact_sdf]  = obj_sdf_gt[is_contact_sdf]
+        # Use pre-baked SDF as supervision target (always valid at contact pose).
+        # For noised poses (t_idx > 0) this is an approximation; exact values
+        # would require an additional mesh query which is expensive and not needed
+        # for the SDF pretraining objective.
+        tool_sdf_noised_sdf = tool_sdf_gt
+        obj_sdf_noised_sdf  = obj_sdf_gt
 
         movement_cond = torch.zeros(B, 14, device=device)
         return model(
@@ -217,8 +205,6 @@ def train_step(
         precise_prob=cfg.precise_diff_prob,
         tool_canonical=tool_canonical,
         obj_pc=obj_pc,
-        obj_centroid=obj_centroid,
-        mesh_cache_entry=mesh_entry,
     )
 
     noised_R = noise_out["noised_R"]   # (B, 3, 3)
@@ -226,18 +212,12 @@ def train_step(
 
     # ── 2. Build encoder inputs (both centered at origin) ─────────────────
     tool_rotated = torch.bmm(tool_canonical, noised_R.transpose(1, 2))  # (B, P, 3)
-    # obj_pc is already centered; obj_centroid carries its world position
 
-    # ── 3. Compute on-the-fly SIGNED SDF ──────────────────────────────────
-    tool_sdf_noised, obj_sdf_noised = compute_on_the_fly_sdf(
-        tool_canonical, obj_pc,
-        noised_R, noised_t, obj_centroid,
-        mesh_cache_entry=mesh_entry,
-    )
-    is_contact = (noise_out["t_idx"] == 0)
-    if is_contact.any():
-        tool_sdf_noised[is_contact] = tool_sdf_gt[is_contact]
-        obj_sdf_noised[is_contact]  = obj_sdf_gt[is_contact]
+    # ── 3. SDF supervision: use pre-baked (contact pose) values ───────────
+    # For the joint sdf-diff task the SDF head still sees pre-baked values.
+    # Items at t_idx==0 (contact pose) are exactly correct; others are approximate.
+    tool_sdf_noised = tool_sdf_gt
+    obj_sdf_noised  = obj_sdf_gt
 
     # ── 4. Build 6D pose conditioning ─────────────────────────────────────
     pose_6d = torch.cat([noised_t, obj_centroid], dim=-1)   # (B, 6)
@@ -264,6 +244,21 @@ def train_step(
     )  # (B, P, 3)
 
     # ── 7. Forward ────────────────────────────────────────────────────────
+    return model(
+        tool_canonical=tool_rotated,          # encoder sees rotated tool (centered)
+        obj_pc=obj_pc,                        # encoder sees centered object
+        tool_sdf_gt=tool_sdf_noised,
+        obj_sdf_gt=obj_sdf_noised,
+        noised_pose_7d=pose_6d,               # 6D: [noised_t, obj_centroid]
+        timestep=noise_out["t_idx"],
+        movement_cond=movement_cond,          # 14D or zeros
+        target_trans=noise_out["target_trans"],
+        target_rot_mat=noise_out["target_rot_mat"],
+        child_start_pcd=child_start_pcd,
+        child_final_pcd=child_final_pcd,
+    )
+
+�────────────────────────────────────────────
     return model(
         tool_canonical=tool_rotated,          # encoder sees rotated tool (centered)
         obj_pc=obj_pc,                        # encoder sees centered object
