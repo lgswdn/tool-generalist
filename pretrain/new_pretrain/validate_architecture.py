@@ -52,7 +52,7 @@ def check_item(item: dict, ds: NewPretrainDataset, device: str) -> bool:
     obj     = item["obj_pc"].to(device)           # (Q, 3) centered
     obj_cen = item["obj_centroid"].to(device)     # (3,)   world pos
     R       = item["contact_R"].to(device)        # (3, 3)
-    t       = item["contact_t"].to(device)        # (3,)   world pos
+    t       = item["contact_t"].to(device)        # (3,)   world pos of tool centroid
     t_sdf   = item["tool_sdf"].to(device)         # (P,)
     o_sdf   = item["obj_sdf"].to(device)          # (Q,)
 

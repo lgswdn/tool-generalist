@@ -532,18 +532,18 @@ def process_pt_file(
     tool_verts = tool_verts_raw * tool_scale
     obj_verts_scaled = obj_verts_raw * obj_scale
 
-    # ---- Ground object (same transform as contact_gen) ----
-    R_obj = data["object_rotation"].to(device)  # (3, 3)
-    z_shift = data["obj_z_shift"]
+    # ---- Reconstruct world-frame object mesh ----
+    # Uses private metadata saved by contact_gen.py (not needed by training code).
+    R_obj   = data["_object_rotation"].to(device)   # (3, 3)
+    z_shift = data["_obj_z_shift"]
     if isinstance(z_shift, torch.Tensor):
         z_shift = z_shift.to(device)
-
     obj_verts = obj_verts_scaled @ R_obj.T
     obj_verts = obj_verts.clone()
     obj_verts[:, 2] -= z_shift
 
-    # ---- Canonical tool cloud ----
-    P_tool = data["tool_pts_canonical"].to(device)  # (P, 3)
+    # ---- Tool cloud (already centered in new format) ----
+    P_tool = data["tool_pts_canonical"].to(device)  # (P, 3) centered
 
     torch.manual_seed(seed)
 

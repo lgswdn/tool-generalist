@@ -36,44 +36,47 @@ import kaolin
 import kaolin.ops.mesh
 import kaolin.metrics.trianglemesh
 
+from contact_config import CONTACT_GEN
+
 # ==============================================================================
 #                          CONFIGURATION
 # ==============================================================================
 
 @dataclass
 class Config:
-    """All tuneable knobs in one place."""
+    """Per-run configuration: I/O paths, device, seed, and batch controls.
 
-    # ----- I/O -----
+    All loss weights, thresholds, and learning-rate defaults come from
+    contact_config.CONTACT_GEN so they live in ONE canonical place.
+    """
+
+    # ── I/O ────────────────────────────────────────────────────────────────
     object_mesh_path: str = "object.obj"
-    tool_mesh_path: str = "tool.obj"
-    output_path: str = "contact_configs.pt"
-    save_init_path: str = ""        # if set, dump initial poses (pre-optimisation)
-    tools_json_path: str = ""       # path to tools_adjusted.json (for head_area)
+    tool_mesh_path:   str = "tool.obj"
+    output_path:      str = "contact_configs.pt"
+    save_init_path:   str = ""   # if set, dump initial poses (pre-optimisation)
+    tools_json_path:  str = ""   # path to tools_adjusted.json (for head_area)
 
-    # ----- Scale (matches RL) -----
-    tool_scale: float = 0.1         # tool uniform scale (fixed, from paths.yaml)
-    object_scale_range: tuple[float, float] = (0.1, 0.2)  # object scale randomized per run
+    # ── Batch & runtime ──────────────────────────────────────────────────────
+    batch_size: int = 512
+    device:     str = "cuda:0"
+    seed:       int = 42
 
-    # ----- Batch & sampling -----
-    batch_size: int = 512           # number of random tool poses
-    num_tool_surface_pts: int = 512   # uniform surface cloud (all losses)
-    contact_mode_prob: float = 0.7   # prob of targeting head (vs handle/body)
-    device: str = "cuda:0"
-    seed: int = 42                  # random seed (change for different object poses)
-
-    # ----- Optimisation -----
-    opt_steps: int = 200
-    lr: float = 1e-3
-    # Loss weights
-    w_pen: float = 10.0             # penetration penalty
-    w_contact: float = 1.0          # attraction loss
-    w_floor: float = 20.0           # below-floor penalty
-    k_closest: int = 4              # how many closest points for attraction
-
-    # ----- Convergence thresholds -----
-    pen_max_eps: float = 1e-3       # max allowed single-point penetration depth
-    contact_eps: float = 3e-3        # max avg distance for "in contact"
+    # ── From contact_config.CONTACT_GEN (edit there to change defaults) ────────
+    tool_scale:            float = CONTACT_GEN.tool_scale
+    object_scale_range:    tuple  = CONTACT_GEN.object_scale_range
+    num_tool_surface_pts:  int   = CONTACT_GEN.num_surface_pts
+    contact_mode_prob:     float = CONTACT_GEN.contact_mode_prob
+    opt_steps:             int   = CONTACT_GEN.opt_steps
+    lr:                    float = CONTACT_GEN.lr
+    w_pen:                 float = CONTACT_GEN.w_pen
+    w_contact:             float = CONTACT_GEN.w_contact
+    w_floor:               float = CONTACT_GEN.w_floor
+    w_upright:             float = CONTACT_GEN.w_upright
+    upright_threshold:     float = CONTACT_GEN.upright_threshold
+    k_closest:             int   = CONTACT_GEN.k_closest
+    pen_max_eps:           float = CONTACT_GEN.pen_max_eps
+    contact_eps:           float = CONTACT_GEN.contact_eps
 
 
 # ==============================================================================
@@ -468,6 +471,9 @@ def compute_losses(
     L_pen:     penalises points INSIDE the object.
     L_contact: attracts the K-closest OUTSIDE points toward the surface.
     L_floor:   penalises points below z=0.
+    L_upright: penalises the tool's local +Z axis from pointing upward.
+               Matches the hard orientation constraint in _project_orientation,
+               but as a soft, differentiable penalty during optimisation.
     """
     B, P, _ = pts_world.shape
 
@@ -497,20 +503,29 @@ def compute_losses(
     L_floor_per_sample = below.mean(dim=1)
     L_floor = L_floor_per_sample.mean()
 
+    # ====== L_upright — penalise any upward component of tool +Z ======
+    # R_batch[:, 2, 2] = dot(tool +Z, world +Z).
+    # With threshold=0: zero cost when pointing horizontal or downward,
+    # linearly penalised as soon as the tool has any upward component.
+    tool_z_world = R_batch[:, 2, 2]                              # (B,)
+    L_upright = F.relu(tool_z_world - cfg.upright_threshold).mean()
+
     # ====== Total ======
     total = (
-        cfg.w_pen * L_pen
+        cfg.w_pen     * L_pen
         + cfg.w_contact * L_contact
-        + cfg.w_floor * L_floor
+        + cfg.w_floor   * L_floor
+        + cfg.w_upright * L_upright
     )
 
     return {
-        "total": total,
-        "pen": L_pen,
-        "contact": L_contact,
-        "floor": L_floor,
-        "pen_max_ps": L_pen_max_per_sample.detach(),
-        "contact_ps": L_contact_per_sample.detach(),
+        "total":    total,
+        "pen":      L_pen,
+        "contact":  L_contact,
+        "floor":    L_floor,
+        "upright":  L_upright,
+        "pen_max_ps":  L_pen_max_per_sample.detach(),
+        "contact_ps":  L_contact_per_sample.detach(),
     }
 
 
@@ -548,6 +563,7 @@ def _log_step(step: int, losses: dict) -> None:
             f"pen {losses['pen'].item():.5f}  "
             f"contact {losses['contact'].item():.5f}  "
             f"floor {losses['floor'].item():.5f}  "
+            f"upright {losses['upright'].item():.4f}"
         )
 
 
@@ -859,30 +875,61 @@ def filter_and_save(
     )  # (N, Q)
     print(f"  Done.")
 
+    # ── Bake coordinate transforms so consumers need zero frame math ─────────
+
+    # 1. Center tool canonical cloud at (0,0,0)
+    tool_centroid = P_uniform.mean(dim=0)                          # (3,) mesh frame
+    P_tool_c      = (P_uniform - tool_centroid).cpu()              # (P, 3) centered
+
+    # 2. tool_translations → world-frame pos of tool CENTROID
+    #    t_adj = R @ centroid + t_origin  (gives identical world pts)
+    t_adj = torch.einsum("nij,j->ni", R_tool, tool_centroid) + trans[valid]  # (N, 3)
+
+    # 3. World-frame object cloud → centered
+    obj_world    = P_obj_canonical @ R_obj.T                       # (Q, 3)
+    obj_world    = obj_world.clone()
+    obj_world[:, 2] -= z_shift                                     # ground to z_min≈0
+    obj_centroid = obj_world.mean(dim=0)                           # (3,) world centroid
+    P_obj_c      = (obj_world - obj_centroid).cpu()                # (Q, 3) centered
+
+    # 4. contact_pts_tool_frame → centered tool frame
+    contact_pts_tool_c = (
+        contact_info["contact_pts_tool_frame"]
+        - tool_centroid.cpu().unsqueeze(0).unsqueeze(0)
+    )
+
     result = {
         "object_mesh_path": str(Path(cfg.object_mesh_path).resolve()),
         "tool_mesh_path":   str(Path(cfg.tool_mesh_path).resolve()),
-        # ---- Scales (matches RL) ----
-        "tool_scale":       cfg.tool_scale,
-        "object_scale":     obj_scale,
-        # ---- Canonical clouds (stored ONCE, shared across all configs) ----
-        "tool_pts_canonical": P_uniform.cpu(),          # (P, 3)
-        "obj_pts_canonical":  P_obj_canonical.cpu(),    # (Q, 3)
-        # ---- Object pose (same for all configs in this file) ----
-        "object_rotation":    R_obj.cpu(),              # (3, 3)
-        "obj_z_shift":        z_shift.cpu(),            # scalar
-        # ---- Per-config poses ----
-        "tool_translations":  trans[valid].cpu(),       # (N, 3)
-        "tool_rotations":     R_tool.cpu(),             # (N, 3, 3)
-        "pen_loss":           losses["pen_max_ps"][valid].cpu(),
-        "contact_loss":       losses["contact_ps"][valid].cpu(),
-        # ---- Per-config SDF (same point order as canonical clouds above) ----
-        "tool_pts_sdf":       tool_pts_sdf,             # (N, P)  signed
-        "obj_pts_sdf":        obj_pts_sdf,              # (N, Q)  signed
-        # ---- Sparse contact geometry ----
-        "contact_pts_world":      contact_info["contact_pts_world"],       # (N, 5, 3) world frame
-        "contact_pts_tool_frame": contact_info["contact_pts_tool_frame"],  # (N, 5, 3)
-        "contact_normals":        contact_info["contact_normals"],         # (N, 5, 3)
+        # ── Scales ──────────────────────────────────────────────────────────
+        "tool_scale":   cfg.tool_scale,
+        "object_scale": obj_scale,
+        # ── Canonical clouds — load and use directly, no transforms needed ──
+        #   tool_pts_canonical : (P,3) centered at (0,0,0), R=I
+        #   obj_pts_canonical  : (Q,3) centered at (0,0,0), world frame
+        #   obj_centroid       : (3,)  world-frame centroid, z>0
+        "tool_pts_canonical": P_tool_c,
+        "obj_pts_canonical":  P_obj_c,
+        "obj_centroid":       obj_centroid.cpu(),
+        # ── Per-config poses ─────────────────────────────────────────────────
+        #   tool_translations : (N,3) world-frame position of tool CENTROID
+        #   tool_rotations    : (N,3,3) unchanged
+        "tool_translations":  t_adj.cpu(),
+        "tool_rotations":     R_tool.cpu(),
+        "pen_loss":    losses["pen_max_ps"][valid].cpu(),
+        "contact_loss": losses["contact_ps"][valid].cpu(),
+        # ── Per-config SDF ──────────────────────────────────────────────────
+        "tool_pts_sdf": tool_pts_sdf,   # (N,P) signed: +outside object
+        "obj_pts_sdf":  obj_pts_sdf,    # (N,Q) signed: +outside tool
+        # ── Sparse contact geometry ──────────────────────────────────────────
+        "contact_pts_world":      contact_info["contact_pts_world"],  # (N,C,3) world
+        "contact_pts_tool_frame": contact_pts_tool_c,                 # (N,C,3) centered tool
+        "contact_normals":        contact_info["contact_normals"],    # (N,C,3)
+        # ── Private metadata — ONLY for gen_movement_delta mesh SDF ─────────
+        #   Not used by dataset.py or any training code.
+        "_object_rotation": R_obj.cpu(),
+        "_obj_z_shift":     z_shift.cpu() if isinstance(z_shift, torch.Tensor)
+                            else torch.tensor(float(z_shift)),
     }
 
     os.makedirs(os.path.dirname(cfg.output_path) or ".", exist_ok=True)
@@ -1008,31 +1055,20 @@ def parse_args() -> Config:
     p = argparse.ArgumentParser(
         description="Generate collision-free tool–object contact configurations."
     )
-    p.add_argument("--object", type=str, required=True, help="Path to watertight object .obj")
-    p.add_argument("--tool", type=str, required=True, help="Path to tool .obj")
-    p.add_argument("--output", type=str, default="contact_configs.pt", help="Output .pt file")
-    p.add_argument("--save-init", type=str, default="",
-                   help="If set, save initial poses (pre-opt) to this .pt for debugging")
-    p.add_argument("--tools-json", type=str, default="",
+    # ── I/O ──────────────────────────────────────────────────────────────────────
+    p.add_argument("--object",     required=True, help="Path to watertight object .obj")
+    p.add_argument("--tool",       required=True, help="Path to tool .obj")
+    p.add_argument("--output",     default="contact_configs.pt", help="Output .pt file")
+    p.add_argument("--save-init",  default="",
+                   help="Save initial poses (pre-opt) here for debugging")
+    p.add_argument("--tools-json", default="",
                    help="Path to tools_adjusted.json for head_area lookup")
-    p.add_argument("--batch-size", type=int, default=512)
-    p.add_argument("--num-pts", type=int, default=512,
-                   help="Uniform surface cloud points (all losses)")
-    p.add_argument("--contact-mode-prob", type=float, default=0.7,
-                   help="Fraction of batch targeting head vs body for init")
-    p.add_argument("--opt-steps", type=int, default=200)
-    p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--device", type=str, default="cuda:0")
-    p.add_argument("--seed", type=int, default=42,
+    # ── Batch & runtime ──────────────────────────────────────────────────────────
+    p.add_argument("--batch-size", type=int,   default=512)
+    p.add_argument("--device",     type=str,   default="cuda:0")
+    p.add_argument("--seed",       type=int,   default=42,
                    help="Random seed (change for different object poses)")
-    # Loss weights
-    p.add_argument("--w-pen", type=float, default=30.0)
-    p.add_argument("--w-contact", type=float, default=1.0)
-    p.add_argument("--w-floor", type=float, default=20.0)
-    # Thresholds
-
-    p.add_argument("--pen-max-eps", type=float, default=3e-4)
-    p.add_argument("--contact-eps", type=float, default=8e-3)
+    # ── All loss weights / thresholds live in contact_config.py ────────────────
 
     args = p.parse_args()
     return Config(
@@ -1042,18 +1078,8 @@ def parse_args() -> Config:
         save_init_path=args.save_init,
         tools_json_path=args.tools_json,
         batch_size=args.batch_size,
-        num_tool_surface_pts=args.num_pts,
-        contact_mode_prob=args.contact_mode_prob,
         device=args.device,
         seed=args.seed,
-        opt_steps=args.opt_steps,
-        lr=args.lr,
-        w_pen=args.w_pen,
-        w_contact=args.w_contact,
-        w_floor=args.w_floor,
-
-        pen_max_eps=args.pen_max_eps,
-        contact_eps=args.contact_eps,
     )
 
 

@@ -13,7 +13,7 @@ from typing import Tuple
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Contact Generation  (contact_gen.py / contact_gen_gradient.py)
+#  Contact Generation  (contact_gen.py)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @dataclass
@@ -36,6 +36,8 @@ class ContactGenHyperparams:
     w_pen: float = 30.0              # penetration penalty
     w_contact: float = 1.0           # attraction loss
     w_floor: float = 20.0            # below-floor penalty
+    w_upright: float = 5.0           # penalise tool +Z pointing upward
+    upright_threshold: float = 0.0   # relu(R[2,2] - threshold):
     k_closest: int = 4               # how many closest points for attraction
 
     # ---- Convergence thresholds ----
@@ -89,34 +91,9 @@ class MovementDeltaHyperparams:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Gradient-based Contact Generation  (contact_gen_gradient.py)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-@dataclass
-class GradientGenHyperparams:
-    """Hyperparameters for the gradient-based (corn.py-style) generator."""
-
-    # ---- Scale (matches RL) ----
-    tool_scale: float = 0.1
-    object_scale_range: Tuple[float, float] = (0.1, 0.2)
-
-    # ---- Surface sampling ----
-    num_surface_pts: int = 512
-
-    # ---- Workspace bounds ----
-    workspace_min: Tuple[float, float, float] = (-0.15, -0.15, -0.05)
-    workspace_max: Tuple[float, float, float] = (0.15, 0.15, 0.25)
-
-    # ---- Contact / penetration thresholds ----
-    contact_threshold: float = 0.005
-    penetration_threshold: float = 0.001
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
 #  Singleton defaults (import and use directly)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-CONTACT_GEN = ContactGenHyperparams()
+CONTACT_GEN  = ContactGenHyperparams()
 INITIAL_POSE = InitialPoseHyperparams()
 MOVEMENT_DELTA = MovementDeltaHyperparams()
-GRADIENT_GEN = GradientGenHyperparams()
