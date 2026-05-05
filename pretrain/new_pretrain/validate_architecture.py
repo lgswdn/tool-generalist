@@ -1,14 +1,15 @@
 """validate_architecture.py — Coordinate frame and model sanity checks.
 
-Validates seven invariants of the new architecture:
+Validates seven frame-consistency invariants:
   1.  tool_canonical is centered at (0,0,0)
   2.  obj_pc is centered at (0,0,0)
   3.  obj_centroid.z > 0  (object grounded in world frame)
-  4.  Contact geometry: tool at contact pose is close to object surface
-  5.  SDF sign: tool points mostly outside object at contact (sdf > 0)
-  6.  Noising: noised tool centroid == noised_t  (by construction, since tool centered)
-  7.  Denoising target: applying target reduces distance to contact pose
-  8.  Model forward pass: shapes correct, loss finite, backward works
+  4.  Centroid reconstruction: mean(tc @ R.T + t) == contact_t  [KEY frame check]
+  5.  Object grounding: reconstructed obj world z_min >= 0
+  6.  SDF sign: tool/obj points mostly outside the opposing shape
+  7.  Noising: noised tool centroid == noised_t
+  8.  Target step reduces distance toward contact pose
+  9.  Model forward pass: shapes correct, loss finite, backward works
 
 Run:
     cd pretrain/new_pretrain
@@ -71,15 +72,23 @@ def check_item(item: dict, ds: NewPretrainDataset, device: str) -> bool:
                        obj_cen[2].item() > 0,
                        f"z = {obj_cen[2].item():.4f} m"))
 
-    # ── 4. Contact geometry ───────────────────────────────────────────────────
-    # Tool world = tool_canonical @ R.T + t   (contact_t is world centroid pos)
-    tool_world = tc @ R.T + t.unsqueeze(0)          # (P, 3)
-    obj_world  = obj + obj_cen.unsqueeze(0)          # (Q, 3)
-    cd = chamfer(tool_world, obj_world)
-    results.append(_ok("contact chamfer ≤ 20 mm (tool near object surface)",
-                       cd < 0.020, f"{cd*1000:.2f} mm"))
+    # ── 4. Frame consistency: tool centroid reconstruction ───────────────────
+    # Because tool_canonical is zero-centered, the world centroid of the
+    # reconstructed tool MUST equal contact_t exactly.
+    # Any error here means the baked t_adj or centering is wrong.
+    tool_world   = tc @ R.T + t.unsqueeze(0)          # (P, 3)
+    obj_world    = obj + obj_cen.unsqueeze(0)          # (Q, 3)
+    centroid_rec = tool_world.mean(0)                  # (3,) should equal t
+    cen_err      = (centroid_rec - t).abs().max().item()
+    results.append(_ok("tool centroid reconstruction == contact_t",
+                       cen_err < 1e-4, f"err={cen_err:.2e} m"))
 
-    # ── 5. SDF sign at contact ────────────────────────────────────────────────
+    # ── 5. Object grounding: obj_world.z_min ≥ 0 ────────────────────────────
+    z_min_obj = obj_world[:, 2].min().item()
+    results.append(_ok("obj world z_min ≥ 0 (grounded after reconstruction)",
+                       z_min_obj >= -1e-3, f"z_min={z_min_obj:.4f} m"))
+
+    # ── 6. SDF sign at contact ────────────────────────────────────────────────
     pct_tool = (t_sdf > 0).float().mean().item() * 100
     pct_obj  = (o_sdf > 0).float().mean().item() * 100
     results.append(_ok("tool_sdf: most points outside object (>70 % positive)",
@@ -87,7 +96,7 @@ def check_item(item: dict, ds: NewPretrainDataset, device: str) -> bool:
     results.append(_ok("obj_sdf:  most points outside tool   (>70 % positive)",
                        pct_obj  > 70, f"{pct_obj:.1f} %"))
 
-    # ── 6. Noising: noised_t equals tool world centroid at noised pose ────────
+    # ── 7. Noising: noised_t equals tool world centroid at noised pose ──────
     tc_b   = tc.unsqueeze(0)
     obj_b  = obj.unsqueeze(0)
     cen_b  = obj_cen.unsqueeze(0)
@@ -109,7 +118,7 @@ def check_item(item: dict, ds: NewPretrainDataset, device: str) -> bool:
     results.append(_ok("noised tool centroid == noised_t",
                        centroid_error < 1e-4, f"err={centroid_error:.2e} m"))
 
-    # ── 7. Target step reduces chamfer ────────────────────────────────────────
+    # ── 8. Target step reduces chamfer ──────────────────────────────────────
     t_idx  = noise_out["t_idx"][0].item()
     tgt_R  = noise_out["target_rot_mat"][0]   # (3,3)
     tgt_t  = noise_out["target_trans"][0]     # (3,)

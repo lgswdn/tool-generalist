@@ -150,23 +150,54 @@ def train_step(
     obj_sdf_gt     = batch["obj_sdf"].to(device)          # (B, Q)  signed
     B = tool_canonical.shape[0]
 
-    # Mesh cache for kaolin signed SDF
+    # Mesh cache for kaolin signed SDF (not used in new format — SDF is pre-baked)
     mesh_entry = None
-    if dataset is not None and "pt_path" in batch:
-        first_path = batch["pt_path"][0] if isinstance(batch["pt_path"], list) else batch["pt_path"]
-        mesh_entry = dataset._mesh_cache.get(first_path)
 
     raw_model = model.module if isinstance(model, DDP) else model
 
     if raw_model.task == "sdf":
-        # SDF-only: encoder sees canonical tool (R=I) + centered object.
-        # movement_cond still required even for SDF-only mode.
-        movement_cond = torch.zeros(B, 14, device=device)   # no denoising step → zero delta
-        return model(
+        # SDF-only mode uses the SAME noising pipeline as sdf-diff so that the
+        # SDF head trains at many different orientations, not just the single
+        # contact pose.  Without this, the encoder only sees one orientation per
+        # item and the SDF head degenerates to memorisation.
+        #
+        # The only difference from sdf-diff: denoising targets are dummies
+        # (the model's denoising heads are absent / not supervised in this task).
+        noise_out_sdf = sample_noised_poses_batch(
+            contact_R=contact_R,
+            contact_t=contact_t,
+            num_steps=cfg.num_diffusion_steps,
+            max_trans=cfg.noise_max_trans,
+            max_rot_deg=cfg.noise_max_rot_deg,
+            interp=cfg.interp_trajectory,
+            precise_prob=cfg.precise_diff_prob,
             tool_canonical=tool_canonical,
             obj_pc=obj_pc,
-            tool_sdf_gt=tool_sdf_gt,
-            obj_sdf_gt=obj_sdf_gt,
+            obj_centroid=obj_centroid,
+        )
+        noised_R_sdf = noise_out_sdf["noised_R"]   # (B, 3, 3)
+        noised_t_sdf = noise_out_sdf["noised_t"]   # (B, 3)
+
+        # Apply noised rotation so encoder sees tool in its current orientation
+        tool_rotated_sdf = torch.bmm(tool_canonical, noised_R_sdf.transpose(1, 2))  # (B, P, 3)
+
+        # On-the-fly SDF at the noised pose; fall back to pre-baked at t=0
+        tool_sdf_noised_sdf, obj_sdf_noised_sdf = compute_on_the_fly_sdf(
+            tool_canonical, obj_pc,
+            noised_R_sdf, noised_t_sdf, obj_centroid,
+            mesh_cache_entry=None,
+        )
+        is_contact_sdf = (noise_out_sdf["t_idx"] == 0)
+        if is_contact_sdf.any():
+            tool_sdf_noised_sdf[is_contact_sdf] = tool_sdf_gt[is_contact_sdf]
+            obj_sdf_noised_sdf[is_contact_sdf]  = obj_sdf_gt[is_contact_sdf]
+
+        movement_cond = torch.zeros(B, 14, device=device)
+        return model(
+            tool_canonical=tool_rotated_sdf,          # rotated to noised pose, centered
+            obj_pc=obj_pc,
+            tool_sdf_gt=tool_sdf_noised_sdf,
+            obj_sdf_gt=obj_sdf_noised_sdf,
             movement_cond=movement_cond,
         )
 
