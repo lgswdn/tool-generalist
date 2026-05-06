@@ -465,6 +465,9 @@ def main():
 
     # Cleanly stop replicator (with timeout) then hard-exit to avoid
     # Isaac Sim background threads hanging the process indefinitely.
+    # NOTE: We skip _app.close() because it triggers a render callback
+    # on an already-destroyed physics scene → RuntimeError on invalid prim.
+    # os._exit(0) handles full process cleanup.
     import threading, os
     def _stop_rep():
         try:
@@ -476,10 +479,6 @@ def main():
         t = threading.Thread(target=_stop_rep, daemon=True)
         t.start()
         t.join(timeout=5.0)   # wait at most 5 s
-    try:
-        _app.close()
-    except Exception:
-        pass
     os._exit(0)   # hard-exit: kills any remaining C++ background threads
 
 
