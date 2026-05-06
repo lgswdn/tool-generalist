@@ -228,7 +228,7 @@ def build_scene(
     # Camera distance: auto-adjust to fit the larger asset
     max_dim = max(t_size[0], t_size[1], t_size[2],
                   o_size[0], o_size[1], o_size[2])
-    cam_dist = max(0.5, max_dim * 3.0)   # 3x the largest dimension
+    cam_dist = max(0.8, max_dim * 6.0)   # 6x the largest dimension, min 0.8m
 
     # ── Replicator camera (only when recording) ──────────────────────────
     rep_annotator = None
