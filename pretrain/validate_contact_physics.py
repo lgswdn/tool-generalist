@@ -189,25 +189,36 @@ def build_scene(
     scene.reset()
 
     # ── Replicator camera (only when recording) ─────────────────────────────
-    # Grid layout: Isaac Lab places envs in ceil(sqrt(N)) columns × rows.
-    # Camera sits directly above the grid centre at a height that covers
-    # both the X-width and Y-depth (16:9 sensor has tighter vertical FOV).
+    # Isaac Lab places num_envs envs in a grid of num_cols_total columns.
+    # With 2048 envs num_cols_total≈46, so envs 0-15 are all in row 0 and
+    # span 15m in a line.  Instead, we sample envs that form a compact
+    # vcols×vrows square by stepping across full rows of the Isaac Lab grid.
     rep_annotator = None
     if record_video:
         import omni.replicator.core as rep
-        n    = max(1, num_video_envs)
-        cols = math.ceil(math.sqrt(n))
-        rows = math.ceil(n / cols)
-        # centre of the cols×rows grid
-        cx = (cols - 1) * ENV_SPACING / 2.0
-        cy = (rows - 1) * ENV_SPACING / 2.0
-        # half-extents including one env margin on each side
-        hx = cols * ENV_SPACING / 2.0 * 1.1
-        hy = rows * ENV_SPACING / 2.0 * 1.1
-        # pinhole FOV: aperture=20.955 mm, focal=24 mm → tan(hFOV/2)=0.437
-        # vertical FOV is tighter for 16:9: tan(vFOV/2)=0.437*(720/1280)=0.246
-        h = max(hx / 0.437, hy / 0.246)   # height to cover both axes
-        cam_pos  = (cx, cy, h)             # directly above grid centre
+        n = max(1, num_video_envs)
+        vcols = math.ceil(math.sqrt(n))
+        vrows = math.ceil(n / vcols)
+        num_cols_total = math.ceil(math.sqrt(num_envs))   # Isaac Lab grid width
+
+        # Sample env indices that land on a vcols×vrows patch of the grid
+        _video_env_indices = []
+        for vr in range(vrows):
+            for vc in range(vcols):
+                idx = vr * num_cols_total + vc
+                if idx < num_envs and len(_video_env_indices) < n:
+                    _video_env_indices.append(idx)
+
+        # Position camera from actual env origins (true bounding box)
+        _env_np = scene.env_origins.cpu().numpy()  # (num_envs, 3)
+        _vis    = _env_np[_video_env_indices]       # (n, 3)
+        cx = float(_vis[:, 0].mean())
+        cy = float(_vis[:, 1].mean())
+        hx = (float(_vis[:, 0].max()) - float(_vis[:, 0].min())) / 2 + ENV_SPACING * 0.6
+        hy = (float(_vis[:, 1].max()) - float(_vis[:, 1].min())) / 2 + ENV_SPACING * 0.6
+        # tan(hFOV/2)=0.437,  tan(vFOV/2)=0.437*(720/1280)=0.246
+        h = max(hx / 0.437, hy / 0.246)
+        cam_pos  = (cx, cy, h)
         cam_look = (cx, cy, 0.0)
         rep_cam    = rep.create.camera(
             position=cam_pos, look_at=cam_look,
@@ -216,9 +227,9 @@ def build_scene(
         render_prod = rep.create.render_product(rep_cam, (1280, 720))
         rep_annotator = rep.AnnotatorRegistry.get_annotator("rgb")
         rep_annotator.attach(render_prod)
-        print(f"  [Video] {cols}×{rows} grid  cam_h={h:.1f}m  "
-              f"centre=({cx:.1f}, {cy:.1f})  span=({cols*ENV_SPACING:.1f}×"
-              f"{rows*ENV_SPACING:.1f} m)")
+        print(f"  [Video] {vcols}x{vrows} grid  cam_h={h:.2f}m  "
+              f"centre=({cx:.2f}, {cy:.2f})  "
+              f"env_indices={_video_env_indices[:4]}...")
 
     tool_obj   = scene["tool"]
     object_obj = scene["object"]
@@ -330,24 +341,25 @@ def validate_file(pt_path: Path, out_path: Path, args) -> None:
         # Env origins: use actual Isaac Lab grid positions (2-D grid in XY plane)
         env_origins = scene_env_origins   # (num_envs, 3)
 
-        # Object pose: env_origin + (0, 0, obj_centroid.z)
-        # We translate the whole scene so obj_centroid_xy → env_origin_xy
+        # Both object and tool share the same base offset:
+        #   base = env_origin - obj_centroid
+        # This shifts the generation frame (where obj centroid = 0) to the
+        # env origin, keeping the tool→object relative pose intact.
+        base = env_origins[:, :3] - obj_centroid[np.newaxis, :]  # (num_envs, 3)
+
         obj_pos_np = np.zeros((args.num_envs, 3))
         for i, ci in enumerate(idxs):
-            obj_pos_np[i] = env_origins[i] + np.array([
-                -obj_centroid[0], -obj_centroid[1], obj_centroid[2]
-            ])
-        # Pad last batch with first env pose if under-filled
+            obj_pos_np[i] = base[i]          # prim origin = env_origin - centroid
         for i in range(E, args.num_envs):
             obj_pos_np[i] = obj_pos_np[0]
 
-        obj_quat_batch = np.tile(obj_quat_np, (args.num_envs, 1))   # (E, 4)
+        obj_quat_batch = np.tile(obj_quat_np, (args.num_envs, 1))   # (num_envs, 4)
 
-        # Tool pose: original tool_translation shifted by same offset as object
         tool_pos_np = np.zeros((args.num_envs, 3))
         for i, ci in enumerate(idxs):
-            offset = env_origins[i] + np.array([-obj_centroid[0], -obj_centroid[1], 0.0])
-            tool_pos_np[i] = tool_translations[ci] + offset
+            # tool_translations[ci] is the tool prim position in the generation
+            # frame where obj centroid = (0,0,0).  Add the same base offset.
+            tool_pos_np[i] = tool_translations[ci] + base[i]
         for i in range(E, args.num_envs):
             tool_pos_np[i] = tool_pos_np[0]
 
