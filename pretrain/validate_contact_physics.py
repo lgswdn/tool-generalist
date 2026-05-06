@@ -42,7 +42,10 @@ for _i, _a in enumerate(sys.argv):
         _record_video = sys.argv[_i + 1]; break
 _app_cfg = {"headless": True, "anti_aliasing": 0}
 if _record_video:
-    _app_cfg["enable_cameras"] = True
+    # offscreen_render=True → RTX renders in headless without a window
+    # (without this the renderer produces nothing → black video)
+    _app_cfg["enable_cameras"]    = True
+    _app_cfg["offscreen_render"]  = True
 _app = SimulationApp(_app_cfg)
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -122,10 +125,11 @@ def build_scene(
     obj_scale: float,
     num_envs: int,
     record_video: str | None = None,
+    num_video_envs: int = 1,
 ) -> tuple:
     """Create SimulationContext + scene with N envs.
 
-    Returns (sim_ctx, scene, tool_obj, object_obj, camera_or_None).
+    Returns (sim_ctx, scene, tool_obj, object_obj, rep_annotator_or_None).
     """
     sim_cfg = sim_utils.SimulationCfg(dt=SIM_DT, gravity=GRAVITY)
     sim_ctx = SimulationContext(sim_cfg)
@@ -180,18 +184,26 @@ def build_scene(
     scene.reset()
 
     # ── Replicator camera (only when recording) ─────────────────────────────
-    # Much simpler than CameraCfg: replicator creates a camera prim + render
-    # product directly, no IsaacLab sensor pipeline needed.
+    # Camera is positioned to frame `num_video_envs` environments in a row.
+    # Environments are spaced ENV_SPACING apart along +X; we pull back
+    # proportionally so all requested envs fit in the frame.
     rep_annotator = None
     if record_video:
         import omni.replicator.core as rep
+        n   = max(1, num_video_envs)
+        cx  = (n - 1) * ENV_SPACING / 2.0   # X centre of the viewed envs
+        d   = 1.5 + (n - 1) * ENV_SPACING   # pull-back distance
+        cam_pos  = (cx, -d * 0.8, d * 0.8)
+        cam_look = (cx, 0.0, 0.0)
         rep_cam    = rep.create.camera(
-            position=(0.6, -0.6, 0.6), look_at=(0.0, 0.0, 0.0),
+            position=cam_pos, look_at=cam_look,
             focal_length=24.0, clipping_range=(0.01, 1000.0),
         )
         render_prod = rep.create.render_product(rep_cam, (1280, 720))
         rep_annotator = rep.AnnotatorRegistry.get_annotator("rgb")
         rep_annotator.attach(render_prod)
+        print(f"  [Video] camera pos={cam_pos}  look_at={cam_look}  "
+              f"(framing {n} envs)")
 
     tool_obj   = scene["tool"]
     object_obj = scene["object"]
@@ -229,8 +241,8 @@ def run_batch(
         sim_ctx.step()
         scene.update(SIM_DT)
         if camera is not None and step % capture_every == 0:
-            import omni.replicator.core as rep
-            rep.orchestrator.step(rt_subframes=1, delta_time=0.0, pause_timeline=False)
+            # sim_ctx.step(render=True) already triggered the RTX renderer;
+            # rep annotators are updated automatically — just read the data.
             rgba = camera.get_data()   # numpy (H, W, 4) uint8
             if rgba is not None and rgba.size > 0:
                 frames.append(rgba[:, :, :3])  # (H, W, 3)
@@ -275,6 +287,7 @@ def validate_file(pt_path: Path, out_path: Path, args) -> None:
     sim_ctx, scene, tool_obj, object_obj, cam = build_scene(
         tool_usd, tool_scale, obj_usd, obj_scale, args.num_envs,
         record_video=getattr(args, "record_video", None),
+        num_video_envs=getattr(args, "num_video_envs", 1),
     )
     device = sim_ctx.device
 
@@ -403,7 +416,9 @@ def main():
     p.add_argument("--settle-steps",  type=int,   default=200,   help="Physics steps to settle")
     p.add_argument("--threshold",     type=float, default=0.002, help="Contact distance threshold (m)")
     p.add_argument("--record-video",  default=None, metavar="PATH",
-                   help="If given, record a video of env-0 settling to this .mp4 path")
+                   help="If given, record a video of settling to this .mp4 path")
+    p.add_argument("--num-video-envs", type=int, default=16,
+                   help="Number of environments visible in the video (default: 4)")
     p.add_argument("--capture-every", type=int,   default=4,
                    help="Capture one frame every N physics steps (default: 4)")
     args = p.parse_args()
@@ -422,6 +437,14 @@ def main():
             print(f"[ERROR] {pt_path.name}: {e}")
             import traceback; traceback.print_exc()
 
+    # Stop the replicator orchestrator before closing the app.
+    # Without this, _app.close() deadlocks waiting for background render threads.
+    if getattr(args, "record_video", None):
+        try:
+            import omni.replicator.core as rep
+            rep.orchestrator.stop()
+        except Exception:
+            pass
     _app.close()
 
 
