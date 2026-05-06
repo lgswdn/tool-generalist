@@ -562,10 +562,6 @@ def save_results(
     t_tool_origin:   torch.Tensor,   # (N, 3)  mesh-origin trans (before centroid adj)
     P_uniform:       torch.Tensor,   # (K, 3)  canonical tool surface pts
     P_obj_canonical: torch.Tensor,   # (Q, 3)  canonical object pts (pre R_obj)
-    obj_verts:       torch.Tensor,   # (V, 3)  world frame
-    obj_faces:       torch.Tensor,   # (F, 3)
-    tool_verts:      torch.Tensor,   # (T, 3)  canonical tool frame
-    tool_faces:      torch.Tensor,   # (G, 3)
     R_obj:           torch.Tensor,   # (3, 3)
     z_shift:         torch.Tensor,   # scalar
     obj_scale:       float,
@@ -573,49 +569,35 @@ def save_results(
     contact_pt_tool: torch.Tensor,   # (N, 3)  tool contact pt in canonical frame
     contact_pt_obj:  torch.Tensor,   # (N, 3)  obj  contact pt in world frame
 ) -> int:
-    """Compute final SDF fields, bake centroid-shifted coordinates, save to disk.
+    """Bake centroid-shifted coordinates and save contact configs to disk.
 
-    .pt layout (identical to contact_gen.py minus contact_pts_* fields):
+    .pt layout:
 
     Shared:
       tool_pts_canonical  (P,3)  centroid-subtracted
       obj_pts_canonical   (Q,3)  centroid-subtracted world frame
       obj_centroid        (3,)
-      object_rotation / _object_rotation  (3,3)   R_obj
-      obj_z_shift / _obj_z_shift          scalar
+      tool_centroid_raw   (3,)   raw mesh-frame centroid (for on-the-fly SDF)
+      object_rotation     (3,3)  R_obj
+      obj_z_shift         scalar
       tool_scale, object_scale, mesh paths
 
     Per-config (N entries):
-      tool_translations (N,3)  world centroid position
-      tool_rotations    (N,3,3)
-      tool_pts_sdf      (N,P)  signed SDF tool canonical → object
-      obj_pts_sdf       (N,Q)  signed SDF object canonical → tool
-      pen_loss          (N,)   pseudo-metric (min SDF value per config)
-      contact_loss      (N,)   placeholder zeros
+      tool_translations   (N,3)   world centroid position
+      tool_rotations      (N,3,3)
+      contact_pt_tool     (N,3)   tool surface pt — canonical (centroid-subtracted)
+      contact_pt_obj      (N,3)   obj  surface pt — world frame
     """
     N = R_tool.shape[0]
     device = cfg.device
 
-    R_tool = R_tool.to(device)
+    R_tool        = R_tool.to(device)
     t_tool_origin = t_tool_origin.to(device)
 
-    print(f"  Computing tool→object SDF ({P_uniform.shape[0]} pts × {N} configs) …")
-    tool_pts_sdf = compute_tool_pts_sdf(
-        P_uniform.to(device), R_tool, t_tool_origin,
-        obj_verts, obj_faces,
-    )   # (N, P) on cpu
-
-    print(f"  Computing object→tool SDF ({P_obj_canonical.shape[0]} pts × {N} configs) …")
-    obj_pts_sdf = compute_obj_pts_sdf(
-        P_obj_canonical.to(device), R_obj, z_shift,
-        tool_verts, tool_faces,
-        R_tool, t_tool_origin,
-    )   # (N, Q) on cpu
-
-    # ── Bake centroid-shifted coordinates (identical logic to contact_gen.py) ──
+    # ── Bake centroid-shifted coordinates ──────────────────────────────────────
 
     # 1. Center tool canonical cloud
-    tool_centroid = P_uniform.mean(dim=0)           # (3,) mesh frame (device)
+    tool_centroid = P_uniform.mean(dim=0)              # (3,) mesh frame (device)
     P_tool_c      = (P_uniform - tool_centroid).cpu()  # (P,3) centered
 
     # 2. Adjust translation: world pos of tool CENTROID
@@ -629,8 +611,7 @@ def save_results(
     obj_centroid = obj_world.mean(dim=0)                     # (3,) world
     P_obj_c      = (obj_world - obj_centroid).cpu()          # (Q,3) centered
 
-    # pen_loss proxy: per-config min SDF (higher = more clearance)
-    pen_proxy = tool_pts_sdf.min(dim=1).values   # (N,) — already on cpu
+    z_shift_t = z_shift.cpu() if isinstance(z_shift, torch.Tensor) else torch.tensor(float(z_shift))
 
     result = {
         # ── Mesh paths ─────────────────────────────────────────────────────
@@ -643,28 +624,18 @@ def save_results(
         "tool_pts_canonical": P_tool_c,                   # (P,3)
         "obj_pts_canonical":  P_obj_c,                    # (Q,3)
         "obj_centroid":       obj_centroid.cpu(),          # (3,)
-        # exact surface centroid used to define t_adj — needed for on-the-fly SDF
         "tool_centroid_raw":  tool_centroid.cpu(),         # (3,)
-        # ── Object pose (stored with both public and private keys) ──────────
+        # ── Object canonical pose ───────────────────────────────────────────
         "object_rotation":  R_obj.cpu(),
         "_object_rotation": R_obj.cpu(),
-        "obj_z_shift":   z_shift.cpu() if isinstance(z_shift, torch.Tensor)
-                         else torch.tensor(float(z_shift)),
-        "_obj_z_shift":  z_shift.cpu() if isinstance(z_shift, torch.Tensor)
-                         else torch.tensor(float(z_shift)),
+        "obj_z_shift":      z_shift_t,
+        "_obj_z_shift":     z_shift_t,
         # ── Per-config ──────────────────────────────────────────────────────
         "tool_translations": t_adj.cpu(),        # (N,3)
         "tool_rotations":    R_tool.cpu(),        # (N,3,3)
-        "pen_loss":          pen_proxy,           # (N,)  min SDF per config
-        "contact_loss":      torch.zeros(N),      # (N,)  placeholder
         # ── Contact points (one per config) ─────────────────────────────────
-        # contact_pt_tool: tool surface point in CANONICAL (centroid-subtracted) frame
-        # contact_pt_obj:  object surface point in WORLD frame
-        "contact_pt_tool":  (contact_pt_tool - tool_centroid.cpu()).cpu(),   # (N,3) canonical
-        "contact_pt_obj":   contact_pt_obj.cpu(),                      # (N,3) world
-        # ── SDF arrays ──────────────────────────────────────────────────────
-        "tool_pts_sdf": tool_pts_sdf,             # (N,P)
-        "obj_pts_sdf":  obj_pts_sdf,              # (N,Q)
+        "contact_pt_tool":  (contact_pt_tool - tool_centroid.cpu()).cpu(),  # (N,3)
+        "contact_pt_obj":   contact_pt_obj.cpu(),                           # (N,3)
     }
 
     os.makedirs(os.path.dirname(cfg.output_path) or ".", exist_ok=True)
@@ -741,12 +712,10 @@ def main(cfg: Config) -> None:
         print("⚠  No valid poses found. Try increasing B or M.")
         return
 
-    # ── 10. Compute final SDF outputs & save ──────────────────────────────────
+    # ── 10. Save ──────────────────────────────────────────────────────────────
     n_saved = save_results(
         R_valid, t_valid,
         P_uniform, P_obj_canonical,
-        obj_verts, obj_faces,
-        tool_verts, tool_faces,
         R_obj, z_shift, obj_scale, cfg,
         contact_pt_tool=pt_tool,
         contact_pt_obj=pt_obj,
