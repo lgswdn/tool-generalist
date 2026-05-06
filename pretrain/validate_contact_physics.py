@@ -50,7 +50,6 @@ _app = SimulationApp(_app_cfg)
 # ────────────────────────────────────────────────────────────────────────────
 
 import argparse
-import math
 from pathlib import Path
 
 import imageio
@@ -125,7 +124,6 @@ def build_scene(
     obj_scale: float,
     num_envs: int,
     record_video: str | None = None,
-    num_video_envs: int = 1,
 ) -> tuple:
     """Create SimulationContext + scene with N envs.
 
@@ -189,37 +187,14 @@ def build_scene(
     scene.reset()
 
     # ── Replicator camera (only when recording) ─────────────────────────────
-    # Isaac Lab places num_envs envs in a grid of num_cols_total columns.
-    # With 2048 envs num_cols_total≈46, so envs 0-15 are all in row 0 and
-    # span 15m in a line.  Instead, we sample envs that form a compact
-    # vcols×vrows square by stepping across full rows of the Isaac Lab grid.
+    # Simple perspective camera aimed at env 0 from a fixed offset.
     rep_annotator = None
     if record_video:
         import omni.replicator.core as rep
-        n = max(1, num_video_envs)
-        vcols = math.ceil(math.sqrt(n))
-        vrows = math.ceil(n / vcols)
-        num_cols_total = math.ceil(math.sqrt(num_envs))   # Isaac Lab grid width
-
-        # Sample env indices that land on a vcols×vrows patch of the grid
-        _video_env_indices = []
-        for vr in range(vrows):
-            for vc in range(vcols):
-                idx = vr * num_cols_total + vc
-                if idx < num_envs and len(_video_env_indices) < n:
-                    _video_env_indices.append(idx)
-
-        # Position camera from actual env origins (true bounding box)
         _env_np = scene.env_origins.cpu().numpy()  # (num_envs, 3)
-        _vis    = _env_np[_video_env_indices]       # (n, 3)
-        cx = float(_vis[:, 0].mean())
-        cy = float(_vis[:, 1].mean())
-        hx = (float(_vis[:, 0].max()) - float(_vis[:, 0].min())) / 2 + ENV_SPACING * 0.6
-        hy = (float(_vis[:, 1].max()) - float(_vis[:, 1].min())) / 2 + ENV_SPACING * 0.6
-        # tan(hFOV/2)=0.437,  tan(vFOV/2)=0.437*(720/1280)=0.246
-        h = max(hx / 0.437, hy / 0.246)
-        cam_pos  = (cx, cy, h)
-        cam_look = (cx, cy, 0.0)
+        e0 = _env_np[0]   # env 0 origin
+        cam_pos  = (e0[0] + 0.4, e0[1] - 0.4, 0.35)
+        cam_look = (e0[0], e0[1], 0.05)
         rep_cam    = rep.create.camera(
             position=cam_pos, look_at=cam_look,
             focal_length=24.0, clipping_range=(0.01, 1000.0),
@@ -227,9 +202,7 @@ def build_scene(
         render_prod = rep.create.render_product(rep_cam, (1280, 720))
         rep_annotator = rep.AnnotatorRegistry.get_annotator("rgb")
         rep_annotator.attach(render_prod)
-        print(f"  [Video] {vcols}x{vrows} grid  cam_h={h:.2f}m  "
-              f"centre=({cx:.2f}, {cy:.2f})  "
-              f"env_indices={_video_env_indices[:4]}...")
+        print(f"  [Video] Perspective camera at env 0")
 
     tool_obj   = scene["tool"]
     object_obj = scene["object"]
@@ -297,6 +270,10 @@ def validate_file(pt_path: Path, out_path: Path, args) -> None:
     R_obj             = data["object_rotation"].numpy()     # (3, 3)
     tool_scale        = float(data["tool_scale"])
     obj_scale         = float(data["object_scale"])
+    # tool_centroid_raw: mesh-frame centroid offset.  tool_translations stores
+    # world-frame *centroid* positions, but Isaac Sim needs *prim origin*.
+    # Prim origin = centroid - R @ centroid_raw
+    tool_centroid_raw = data["tool_centroid_raw"].numpy()  # (3,)
     N = tool_translations.shape[0]
 
     # Contact point in object-local frame (used after settling to track moved obj)
@@ -317,7 +294,6 @@ def validate_file(pt_path: Path, out_path: Path, args) -> None:
     sim_ctx, scene, tool_obj, object_obj, cam, scene_env_origins = build_scene(
         tool_usd, tool_scale, obj_usd, obj_scale, args.num_envs,
         record_video=getattr(args, "record_video", None),
-        num_video_envs=getattr(args, "num_video_envs", 16),
     )
     device = sim_ctx.device
     # scene_env_origins: (num_envs, 3) actual XY grid positions from Isaac Lab.
@@ -338,18 +314,18 @@ def validate_file(pt_path: Path, out_path: Path, args) -> None:
         E    = end - start
         idxs = np.arange(start, end)
 
-        # Env origins: use actual Isaac Lab grid positions (2-D grid in XY plane)
-        env_origins = scene_env_origins   # (num_envs, 3)
-
-        # Both object and tool share the same base offset:
-        #   base = env_origin - obj_centroid
-        # This shifts the generation frame (where obj centroid = 0) to the
-        # env origin, keeping the tool→object relative pose intact.
-        base = env_origins[:, :3] - obj_centroid[np.newaxis, :]  # (num_envs, 3)
+        # XY-only offset: shift generation frame so obj prim centres at env_origin XY.
+        # Z is NOT shifted — the generation had obj prim at z=0 (floor) with the
+        # centroid at z=+0.062m above, and tool at z=tool_translations.z.
+        # Subtracting centroid.z would bury the object 6cm underground.
+        xy_offset = np.zeros((args.num_envs, 3))
+        xy_offset[:, 0] = scene_env_origins[:, 0] - obj_centroid[0]
+        xy_offset[:, 1] = scene_env_origins[:, 1] - obj_centroid[1]
+        # z column stays 0
 
         obj_pos_np = np.zeros((args.num_envs, 3))
         for i, ci in enumerate(idxs):
-            obj_pos_np[i] = base[i]          # prim origin = env_origin - centroid
+            obj_pos_np[i] = xy_offset[i]           # z=0: prim at floor (gen frame)
         for i in range(E, args.num_envs):
             obj_pos_np[i] = obj_pos_np[0]
 
@@ -357,14 +333,15 @@ def validate_file(pt_path: Path, out_path: Path, args) -> None:
 
         tool_pos_np = np.zeros((args.num_envs, 3))
         for i, ci in enumerate(idxs):
-            # tool_translations[ci] is the tool prim position in the generation
-            # frame where obj centroid = (0,0,0).  Add the same base offset.
-            tool_pos_np[i] = tool_translations[ci] + base[i]
+            # tool_translations[ci] is the world-frame CENTROID position.
+            # Isaac Sim expects PRIM ORIGIN: origin = centroid - R @ centroid_raw
+            R_t = tool_rotations[ci]
+            tool_prim_origin = tool_translations[ci] - R_t @ tool_centroid_raw
+            tool_pos_np[i] = tool_prim_origin + xy_offset[i]
         for i in range(E, args.num_envs):
             tool_pos_np[i] = tool_pos_np[0]
 
         tool_quat_np = np.stack([mat3_to_quat_wxyz(tool_rotations[ci]) for ci in idxs])
-        # pad
         if E < args.num_envs:
             pad = np.tile(tool_quat_np[0:1], (args.num_envs - E, 1))
             tool_quat_np = np.concatenate([tool_quat_np, pad], axis=0)
@@ -380,15 +357,14 @@ def validate_file(pt_path: Path, out_path: Path, args) -> None:
             cp_dist = float(np.linalg.norm(pt_tw - pt_ow))
             print(f"  [DEBUG batch 0 env 0]")
             print(f"    obj_centroid           = {obj_centroid}")
-            print(f"    base[0]                = {base[0]}")
-            print(f"    obj_pos[0]  (prim)     = {o0}")
-            print(f"    tool_pos[0] (prim)     = {t0}")
-            print(f"    prim-to-prim dist      = {dist0:.4f} m  "
-                  f"(can be large; these are mesh ORIGINS not surfaces)")
+            print(f"    xy_offset[0]           = {xy_offset[0]}")
+            print(f"    obj_pos[0]  (prim z=0) = {o0}")
+            print(f"    tool_pos[0] (gen z)    = {t0}")
+            print(f"    prim-to-prim dist      = {dist0:.4f} m")
             print(f"    pt_tool_world[0]       = {pt_tw}")
             print(f"    contact_pt_obj[0]      = {pt_ow}")
-            print(f"    contact-pt distance    = {cp_dist:.6f} m  "
-                  f"(should be ~0 if surfaces are in contact in the data)")
+            print(f"    contact-pt distance    = {cp_dist:.6f} m "
+                  f"(~0 means surfaces touching in gen data)")
 
         # To tensors
         tp = torch.tensor(tool_pos_np,  dtype=torch.float32, device=device)
@@ -412,10 +388,8 @@ def validate_file(pt_path: Path, out_path: Path, args) -> None:
             p_new  = pos_f_np[i]
             # Object contact pt in new world frame
             pt_contact_new = R_new @ pt_obj_local[ci] + p_new      # (3,)
-            # Tool contact pt in sim frame: tool_translations[ci] is the contact
-            # point position in generation frame (obj centroid = 0).  Apply the
-            # same base offset used for the object to shift into sim world frame.
-            pt_tool_sim = pt_tool_world[ci] + base[i]   # (3,)
+            # Tool contact pt: apply same XY-only offset as object pose.
+            pt_tool_sim = pt_tool_world[ci] + xy_offset[i]   # (3,)
             dist = np.linalg.norm(pt_contact_new - pt_tool_sim)
             if dist < args.threshold:
                 valid_indices.append(ci)
@@ -471,8 +445,6 @@ def main():
     p.add_argument("--threshold",     type=float, default=0.002, help="Contact distance threshold (m)")
     p.add_argument("--record-video",  default=None, metavar="PATH",
                    help="If given, record a video of settling to this .mp4 path")
-    p.add_argument("--num-video-envs", type=int, default=4,
-                   help="Number of environments visible in the video (default: 16)")
     p.add_argument("--capture-every", type=int,   default=4,
                    help="Capture one frame every N physics steps (default: 4)")
     args = p.parse_args()
