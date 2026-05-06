@@ -403,6 +403,17 @@ def validate_file(pt_path: Path, out_path: Path, args) -> None:
     print(f"  → {len(valid_indices)} / {N} configs passed  "
           f"({100*len(valid_indices)/max(N,1):.1f}%)")
 
+    # ── Write video (always, even if no configs survived) ─────────────────
+    rv = getattr(args, "record_video", None)
+    if rv and all_frames:
+        vid_path = Path(rv)
+        vid_path.parent.mkdir(parents=True, exist_ok=True)
+        fps = max(1, int(1.0 / SIM_DT / getattr(args, "capture_every", 4)))
+        imageio.mimwrite(str(vid_path), all_frames, fps=fps, quality=8)
+        print(f"  ✓ Video  → {vid_path}  ({len(all_frames)} frames @ {fps} fps)")
+    elif rv:
+        print(f"  ⚠ No frames captured — video not written")
+
     if not valid_indices:
         print("  ⚠  No valid configs — skipping output.")
         return
@@ -423,15 +434,6 @@ def validate_file(pt_path: Path, out_path: Path, args) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(filtered, out_path)
     print(f"  ✓ Saved  → {out_path}")
-
-    # ── Write video ───────────────────────────────────────────────────────────
-    rv = getattr(args, "record_video", None)
-    if rv and all_frames:
-        vid_path = Path(rv)
-        vid_path.parent.mkdir(parents=True, exist_ok=True)
-        fps = max(1, int(1.0 / SIM_DT / getattr(args, "capture_every", 4)))
-        imageio.mimwrite(str(vid_path), all_frames, fps=fps, quality=8)
-        print(f"  ✓ Video  → {vid_path}  ({len(all_frames)} frames @ {fps} fps)")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
