@@ -369,6 +369,21 @@ def validate_file(pt_path: Path, out_path: Path, args) -> None:
             pad = np.tile(tool_quat_np[0:1], (args.num_envs - E, 1))
             tool_quat_np = np.concatenate([tool_quat_np, pad], axis=0)
 
+        # ── Diagnostic: print initial separation for env 0 (first batch only) ─
+        if start == 0:
+            o0 = obj_pos_np[0]
+            t0 = tool_pos_np[0]
+            diff = t0 - o0
+            dist0 = float(np.linalg.norm(diff))
+            print(f"  [DEBUG batch 0 env 0]")
+            print(f"    obj_centroid      = {obj_centroid}")
+            print(f"    base[0]           = {base[0]}")
+            print(f"    obj_pos[0]        = {o0}")
+            print(f"    tool_pos[0]       = {t0}")
+            print(f"    tool-obj delta    = {diff}")
+            print(f"    tool-obj distance = {dist0:.4f} m")
+            print(f"    tool_translations[0] = {tool_translations[0]}")
+
         # To tensors
         tp = torch.tensor(tool_pos_np,  dtype=torch.float32, device=device)
         tq = torch.tensor(tool_quat_np, dtype=torch.float32, device=device)
@@ -391,9 +406,10 @@ def validate_file(pt_path: Path, out_path: Path, args) -> None:
             p_new  = pos_f_np[i]
             # Object contact pt in new world frame
             pt_contact_new = R_new @ pt_obj_local[ci] + p_new      # (3,)
-            # Tool contact pt (static, already in shifted sim frame)
-            offset = env_origins[i] + np.array([-obj_centroid[0], -obj_centroid[1], 0.0])
-            pt_tool_sim = pt_tool_world[ci] + offset                # (3,)
+            # Tool contact pt in sim frame: tool_translations[ci] is the contact
+            # point position in generation frame (obj centroid = 0).  Apply the
+            # same base offset used for the object to shift into sim world frame.
+            pt_tool_sim = pt_tool_world[ci] + base[i]   # (3,)
             dist = np.linalg.norm(pt_contact_new - pt_tool_sim)
             if dist < args.threshold:
                 valid_indices.append(ci)
