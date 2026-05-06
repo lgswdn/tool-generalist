@@ -57,7 +57,6 @@ from isaaclab.sensors import CameraCfg, Camera
 from isaaclab.sim.schemas.schemas_cfg import RigidBodyPropertiesCfg
 from isaaclab.utils.configclass import configclass
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
-from isaaclab.terrains import TerrainImporterCfg
 
 # ── Patch: Isaac Sim installations sometimes lack rendering preset .kit files
 #    (e.g. balanced.kit).  Since we run headless physics-only, skip silently.
@@ -128,16 +127,18 @@ def build_scene(
     sim_ctx = SimulationContext(sim_cfg)
     sim_ctx.set_camera_view(eye=[3, 3, 3], target=[0, 0, 0])
 
+    # ── Ground plane ─────────────────────────────────────────────────────────
+    # Spawn directly (avoids TerrainImporterCfg stage-init issues in standalone)
+    ground_cfg = sim_utils.GroundPlaneCfg(
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            static_friction=0.7, dynamic_friction=0.7, restitution=0.0
+        )
+    )
+    ground_cfg.func("/World/GroundPlane", ground_cfg)
+
+    # ── Scene (rigid bodies only, no terrain) ─────────────────────────────────
     @configclass
     class SceneCfg(InteractiveSceneCfg):
-        terrain = TerrainImporterCfg(
-            prim_path="/World/ground",
-            terrain_type="plane",
-            collision_group=-1,
-            physics_material=sim_utils.RigidBodyMaterialCfg(
-                static_friction=0.7, dynamic_friction=0.7, restitution=0.0
-            ),
-        )
         # Kinematic tool — gravity disabled, does not move
         tool = RigidObjectCfg(
             prim_path="{ENV_REGEX_NS}/Tool",
