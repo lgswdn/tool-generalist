@@ -23,9 +23,9 @@ class ContactGenHyperparams:
     num_surface_pts: int = 512          # K: tool surface pts used in both sampling & SDF
 
     # ── Rejection sampler ─────────────────────────────────────────────────────
-    B:            int   = 4096          # contact pairs (tool_pt × obj_pt) per call
-    M:            int   = 2048          # candidate rotations tested per pair
-    chunk_B:      int   = 1024          # how many pairs processed per GPU kernel
+    B:            int   = 2048          # contact pairs (tool_pt × obj_pt) per call
+    M:            int   = 4096          # candidate rotations tested per pair
+    chunk_B:      int   = 256           # how many pairs processed per GPU kernel
 
     # ── SDF grid ──────────────────────────────────────────────────────────────
     sdf_grid_res: int   = 128           # voxel grid resolution (128³)
@@ -35,6 +35,7 @@ class ContactGenHyperparams:
     upright_threshold: float = 0.0      # reject rotations where R[2,2] > threshold
     epsilon:           float = 2e-3     # penetration tolerance (metres).
     floor_eps:         float = 1e-3     # min world-z allowed for any tool point
+    contact_mode_prob: float = 0.7
 
     # ── Convergence thresholds (kept for output compat with old pipeline) ──────
     pen_max_eps: float = 3e-4
