@@ -30,6 +30,7 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn.functional as F
+import trimesh
 
 # Kaolin: used only for final per-config SDF outputs (GPU-accelerated mesh queries)
 import kaolin
