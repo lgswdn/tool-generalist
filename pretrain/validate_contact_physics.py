@@ -108,6 +108,31 @@ def derive_usd_paths(tool_obj_path: str, object_obj_path: str):
 
 # ── Scene builder ─────────────────────────────────────────────────────────────
 
+def _setup_collision_and_visuals(root_prim):
+    """Walk the prim subtree: hide collision meshes, apply CollisionAPI.
+
+    URDF-converted USDs have:
+      link_*/visuals/   → visual geometry (should render)
+      link_*/collisions/ → CoACD convex hulls (should NOT render, used for physics)
+
+    Without this, both render and the convex hulls make the asset appear bloated.
+    """
+    from pxr import Usd, UsdGeom, UsdPhysics
+    for prim in Usd.PrimRange(root_prim):
+        if prim == root_prim:
+            continue
+        path_str = str(prim.GetPath())
+
+        # Hide collision geometry from renderer
+        if "/collisions" in path_str:
+            if prim.IsA(UsdGeom.Imageable):
+                UsdGeom.Imageable(prim).CreatePurposeAttr().Set(
+                    UsdGeom.Tokens.guide)
+            # Apply collision API to mesh children under collisions/
+            if prim.IsA(UsdGeom.Mesh):
+                UsdPhysics.CollisionAPI.Apply(prim)
+                UsdPhysics.MeshCollisionAPI.Apply(prim)
+
 def _compute_env_origins(num_envs: int, spacing: float) -> np.ndarray:
     """Compute grid-based env origins (matching Isaac Lab's layout)."""
     cols = int(np.ceil(np.sqrt(num_envs)))
@@ -187,10 +212,7 @@ def build_scene(
         txf.AddScaleOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(ts, ts, ts))
         UsdPhysics.RigidBodyAPI.Apply(tool_prim)
         tool_prim.GetAttribute("physics:kinematicEnabled").Set(True)
-        for ch in tool_prim.GetAllChildren():
-            if ch.IsA(UsdGeom.Mesh):
-                UsdPhysics.CollisionAPI.Apply(ch)
-                UsdPhysics.MeshCollisionAPI.Apply(ch)
+        _setup_collision_and_visuals(tool_prim)
 
         # Object (dynamic rigid body)
         obj_prim = UsdGeom.Xform.Define(stage, f"{env_path}/Object").GetPrim()
@@ -201,10 +223,7 @@ def build_scene(
             Gf.Vec3d(float(env_origins[i, 0]), float(env_origins[i, 1]), 0.1))
         oxf.AddScaleOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(os_, os_, os_))
         UsdPhysics.RigidBodyAPI.Apply(obj_prim)
-        for ch in obj_prim.GetAllChildren():
-            if ch.IsA(UsdGeom.Mesh):
-                UsdPhysics.CollisionAPI.Apply(ch)
-                UsdPhysics.MeshCollisionAPI.Apply(ch)
+        _setup_collision_and_visuals(obj_prim)
 
     sim_ctx.reset()
 
