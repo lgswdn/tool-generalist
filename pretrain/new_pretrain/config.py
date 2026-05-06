@@ -19,12 +19,18 @@ class NewPretrainConfig:
     # ── Task selector ────────────────────────────────────────────────────
     # "sdf"      → SDF-only (contact pose)
     # "sdf-diff" → SDF + diffusion joint training
+    # "corn"     → CORN object-patch contact prediction
     task: str = "sdf-diff"
 
     # ── SDF head ─────────────────────────────────────────────────────────
     head_mode: str = "point"       # "point" or "patch"
     patch_agg: str = "mean"        # "mean", "min", "max" (patch mode only)
     head_hidden: Tuple[int, ...] = (256, 128)
+
+    # ── CORN contact head ────────────────────────────────────────────────
+    corn_tool_root: str = "/home/galbot/tool/eef/meshdata_adjusted"
+    corn_head_hidden: Tuple[int, ...] = (256, 128)
+    corn_pos_weight: float = 0.0  # 0 = no explicit BCE pos_weight
 
     # ── Shared ViT encoder ───────────────────────────────────────────────
     num_pts: int = 512

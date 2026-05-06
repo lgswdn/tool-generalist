@@ -16,6 +16,7 @@ Reuses:
 from __future__ import annotations
 
 import sys
+import importlib.util
 from pathlib import Path
 from typing import Tuple
 
@@ -35,11 +36,15 @@ for p in [str(_REPO_ROOT), str(_RPDIFF_SRC)]:
     if p not in sys.path:
         sys.path.insert(0, p)
 
-# ── Reuse from existing pipeline ─────────────────────────────────────────────
-from rsl_rl.modules.models.cloud.sdf_encoder import (
-    SDFPointCloudEncoder,
-    SDFEncoderCfg,
+_SDF_ENCODER_PATH = _REPO_ROOT / "rsl_rl" / "modules" / "models" / "cloud" / "sdf_encoder.py"
+_SDF_ENCODER_SPEC = importlib.util.spec_from_file_location(
+    "_new_pretrain_sdf_encoder", _SDF_ENCODER_PATH,
 )
+_SDF_ENCODER_MODULE = importlib.util.module_from_spec(_SDF_ENCODER_SPEC)
+sys.modules[_SDF_ENCODER_SPEC.name] = _SDF_ENCODER_MODULE
+_SDF_ENCODER_SPEC.loader.exec_module(_SDF_ENCODER_MODULE)
+SDFPointCloudEncoder = _SDF_ENCODER_MODULE.SDFPointCloudEncoder
+SDFEncoderCfg = _SDF_ENCODER_MODULE.SDFEncoderCfg
 
 # ── Reuse from RPDiff ────────────────────────────────────────────────────────
 from rpdiff.utils.torch_util import SinusoidalPosEmb
@@ -262,6 +267,91 @@ class DenoisingHead(nn.Module):
         u2 = F.normalize(u2, dim=-1)
         u3 = torch.cross(u1, u2, dim=-1)
         return torch.stack([u1, u2, u3], dim=-1)  # (B, 3, 3) columns
+
+
+# ============================================================================ #
+# CornContactModel — MLP patch decoder for object-tool contact
+# ============================================================================ #
+
+class CornContactModel(nn.Module):
+    """CORN pretraining with the same decoder style as SDF patch mode.
+
+    The shared encoder already runs joint tool-object attention.  The decoder is
+    therefore a per-object-patch MLP head over object patch tokens, matching the
+    SDF patch head style instead of adding another Transformer decoder.
+    """
+
+    def __init__(
+        self,
+        num_pts: int = 512,
+        patch_size: int = 32,
+        encoder_channel: int = 128,
+        vit_depth: int = 12,
+        vit_heads: int = 4,
+        freeze_encoder: bool = False,
+        head_hidden: tuple[int, ...] = (256, 128),
+        pos_weight: float = 0.0,
+    ):
+        super().__init__()
+        enc_cfg = SDFEncoderCfg(
+            num_pts=num_pts,
+            patch_size=patch_size,
+            encoder_channel=encoder_channel,
+            vit_depth=vit_depth,
+            vit_heads=vit_heads,
+            freeze=freeze_encoder,
+        )
+        self.encoder = SDFPointCloudEncoder(enc_cfg)
+        self.num_patches = self.encoder.num_patches
+        self.contact_head = _make_mlp((self.encoder.feature_dim,) + head_hidden + (1,))
+        self.pos_weight = float(pos_weight)
+
+    def _patch_labels(
+        self,
+        point_contact: torch.Tensor,
+        obj_patch_idx: torch.Tensor,
+    ) -> torch.Tensor:
+        B, P, K = obj_patch_idx.shape
+        gathered = point_contact.gather(1, obj_patch_idx.reshape(B, P * K))
+        return gathered.view(B, P, K).amax(dim=-1).float()
+
+    def forward(
+        self,
+        tool_pc: torch.Tensor,
+        obj_pc: torch.Tensor,
+        obj_contact_flag: torch.Tensor | None = None,
+    ):
+        enc = self.encoder.encode(tool_pc, obj_pc)
+        _, obj_tok = _split_tokens(enc, self.num_patches)
+        logits = self.contact_head(obj_tok).squeeze(-1)
+        if obj_contact_flag is None:
+            return logits
+
+        labels = self._patch_labels(obj_contact_flag.float(), enc.obj_patch_idx)
+        pos_weight = None
+        if self.pos_weight > 0:
+            pos_weight = torch.tensor(
+                self.pos_weight, device=logits.device, dtype=logits.dtype,
+            )
+        loss = F.binary_cross_entropy_with_logits(
+            logits, labels, pos_weight=pos_weight,
+        )
+
+        with torch.no_grad():
+            pred = (torch.sigmoid(logits) >= 0.5).float()
+            tp = (pred * labels).sum()
+            fp = (pred * (1.0 - labels)).sum()
+            fn = ((1.0 - pred) * labels).sum()
+            metrics = {
+                "corn_loss": loss.item(),
+                "corn_pos_rate": labels.mean().item(),
+                "corn_pred_pos_rate": pred.mean().item(),
+                "corn_acc": (pred == labels).float().mean().item(),
+                "corn_precision": (tp / (tp + fp).clamp_min(1.0)).item(),
+                "corn_recall": (tp / (tp + fn).clamp_min(1.0)).item(),
+                "total_loss": loss.item(),
+            }
+        return loss, metrics
 
 
 # ============================================================================ #

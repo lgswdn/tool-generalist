@@ -54,12 +54,9 @@ for p in [str(_REPO_ROOT), str(_RPDIFF_SRC), str(_THIS_DIR)]:
         sys.path.insert(0, p)
 
 from config import NewPretrainConfig
+from corn_dataset import make_corn_split
 from dataset import make_split
-from model import ContactDiffusionModel
-from noise_utils import sample_noised_poses_batch, compute_on_the_fly_sdf
-
-# ── Reuse RPDiff's quaternion conversion ─────────────────────────────────────
-from rpdiff.utils.torch3d_util import matrix_to_quaternion
+from model import ContactDiffusionModel, CornContactModel
 
 
 # ============================================================================ #
@@ -76,7 +73,8 @@ def setup_ddp() -> tuple[int, int]:
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     if world_size > 1:
         dist.init_process_group("nccl")
-    torch.cuda.set_device(local_rank)
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
     return rank, local_rank
 
 
@@ -211,6 +209,9 @@ def train_step(
       - SDF head always sees movement_cond = zeros  (pose-only conditioning)
       - Denoising head (sdf-diff only) sees real movement deltas
     """
+    from noise_utils import sample_noised_poses_batch, compute_on_the_fly_sdf
+    from rpdiff.utils.torch3d_util import matrix_to_quaternion
+
     tool_canonical  = batch["tool_canonical"].to(device)   # (B, P, 3) centered
     obj_pc          = batch["obj_pc"].to(device)           # (B, Q, 3) centered
     obj_centroid    = batch["obj_centroid"].to(device)     # (B, 3)
@@ -320,6 +321,18 @@ def train_step(
     )
 
 
+def train_step_corn(
+    model: CornContactModel,
+    batch: dict,
+    device: torch.device,
+) -> tuple[torch.Tensor, dict]:
+    """Training step for CORN object-patch contact prediction."""
+    tool_pc = batch["tool_pc"].to(device)
+    obj_pc = batch["obj_pc"].to(device)
+    obj_contact_flag = batch["obj_contact_flag"].to(device)
+    return model(tool_pc, obj_pc, obj_contact_flag)
+
+
 # ============================================================================ #
 # Main training loop
 # ============================================================================ #
@@ -327,12 +340,16 @@ def train_step(
 def main():
     parser = argparse.ArgumentParser(description="RPDiff-style joint SDF + denoising pretraining")
     parser.add_argument("--data-dir",    type=str, required=True)
-    parser.add_argument("--task",        type=str, default=None, choices=["sdf", "sdf-diff"])
+    parser.add_argument("--task",        type=str, default=None, choices=["sdf", "sdf-diff", "corn"])
     parser.add_argument("--head-mode",   type=str, default=None, choices=["point", "patch"])
     parser.add_argument("--resume",      type=str, default="")
     parser.add_argument("--wandb",       action="store_true")
     parser.add_argument("--max-files",   type=int, default=0,
                         help="Limit number of config files (0 = all)")
+    parser.add_argument("--epochs",      type=int, default=0)
+    parser.add_argument("--batch-size",  type=int, default=0)
+    parser.add_argument("--num-workers", type=int, default=-1)
+    parser.add_argument("--ckpt-dir",    type=str, default="")
     parser.add_argument("--no-require-movement", action="store_true",
                         help="(sdf-diff only) Do not skip files lacking movement data. "
                              "Missing movement deltas are replaced by zeros so all "
@@ -351,24 +368,43 @@ def main():
         cfg.wandb = True
     if args.max_files:
         cfg.max_files = args.max_files
+    if args.epochs:
+        cfg.epochs = args.epochs
+    if args.batch_size:
+        cfg.batch_size = args.batch_size
+    if args.num_workers >= 0:
+        cfg.num_workers = args.num_workers
+    if args.ckpt_dir:
+        cfg.ckpt_dir = args.ckpt_dir
 
     # movement requirement: sdf-diff needs it by default, but can be relaxed
     require_movement = (cfg.task == "sdf-diff") and not args.no_require_movement
 
     # ── Setup ────────────────────────────────────────────────────────────
     rank, local_rank = setup_ddp()
-    device = torch.device(f"cuda:{local_rank}")
+    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(cfg.seed + rank)
 
     # ── Data ─────────────────────────────────────────────────────────────
-    train_ds, val_ds = make_split(
-        data_dir=cfg.data_dir,
-        val_ratio=cfg.val_ratio,
-        seed=cfg.seed,
-        augment=cfg.augment,
-        max_files=cfg.max_files,
-        require_movement=require_movement,
-    )
+    if cfg.task == "corn":
+        train_ds, val_ds = make_corn_split(
+            data_dir=cfg.data_dir,
+            val_ratio=cfg.val_ratio,
+            seed=cfg.seed,
+            augment=cfg.augment,
+            max_files=cfg.max_files,
+            tool_root=cfg.corn_tool_root,
+            num_pts=cfg.num_pts,
+        )
+    else:
+        train_ds, val_ds = make_split(
+            data_dir=cfg.data_dir,
+            val_ratio=cfg.val_ratio,
+            seed=cfg.seed,
+            augment=cfg.augment,
+            max_files=cfg.max_files,
+            require_movement=require_movement,
+        )
 
     if is_main():
         print(f"Train: {len(train_ds)} configs, Val: {len(val_ds)} configs")
@@ -387,7 +423,7 @@ def main():
         shuffle=(train_sampler is None),
         num_workers=cfg.num_workers,
         pin_memory=True,
-        drop_last=True,
+        drop_last=False,
         collate_fn=collate_fn,
     )
     val_dl = DataLoader(
@@ -397,34 +433,46 @@ def main():
         shuffle=False,
         num_workers=cfg.num_workers,
         pin_memory=True,
-        drop_last=True,
+        drop_last=False,
         collate_fn=collate_fn,
     )
 
     # ── Model ────────────────────────────────────────────────────────────
-    model = ContactDiffusionModel(
-        head_mode=cfg.head_mode,
-        patch_agg=cfg.patch_agg,
-        head_hidden=cfg.head_hidden,
-        num_pts=cfg.num_pts,
-        patch_size=cfg.patch_size,
-        encoder_channel=cfg.encoder_channel,
-        vit_depth=cfg.vit_depth,
-        vit_heads=cfg.vit_heads,
-        freeze_encoder=cfg.freeze_encoder,
-        cross_attn_heads=cfg.cross_attn_heads,
-        cross_attn_layers=cfg.cross_attn_layers,
-        pose_dim=cfg.pose_dim,
-        movement_cond_dim=cfg.movement_cond_dim,
-        denoise_hidden=cfg.denoise_hidden,
-        sdf_weight=cfg.sdf_weight,
-        denoise_weight=cfg.denoise_weight,
-        denoise_rot_weight=cfg.denoise_rot_weight,
-        chamfer_weight=cfg.chamfer_weight,
-        quat_norm_beta=cfg.quat_norm_beta,
-        num_diffusion_steps=cfg.num_diffusion_steps,
-        task=cfg.task,
-    ).to(device)
+    if cfg.task == "corn":
+        model = CornContactModel(
+            num_pts=cfg.num_pts,
+            patch_size=cfg.patch_size,
+            encoder_channel=cfg.encoder_channel,
+            vit_depth=cfg.vit_depth,
+            vit_heads=cfg.vit_heads,
+            freeze_encoder=cfg.freeze_encoder,
+            head_hidden=cfg.corn_head_hidden,
+            pos_weight=cfg.corn_pos_weight,
+        ).to(device)
+    else:
+        model = ContactDiffusionModel(
+            head_mode=cfg.head_mode,
+            patch_agg=cfg.patch_agg,
+            head_hidden=cfg.head_hidden,
+            num_pts=cfg.num_pts,
+            patch_size=cfg.patch_size,
+            encoder_channel=cfg.encoder_channel,
+            vit_depth=cfg.vit_depth,
+            vit_heads=cfg.vit_heads,
+            freeze_encoder=cfg.freeze_encoder,
+            cross_attn_heads=cfg.cross_attn_heads,
+            cross_attn_layers=cfg.cross_attn_layers,
+            pose_dim=cfg.pose_dim,
+            movement_cond_dim=cfg.movement_cond_dim,
+            denoise_hidden=cfg.denoise_hidden,
+            sdf_weight=cfg.sdf_weight,
+            denoise_weight=cfg.denoise_weight,
+            denoise_rot_weight=cfg.denoise_rot_weight,
+            chamfer_weight=cfg.chamfer_weight,
+            quat_norm_beta=cfg.quat_norm_beta,
+            num_diffusion_steps=cfg.num_diffusion_steps,
+            task=cfg.task,
+        ).to(device)
 
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
@@ -464,7 +512,11 @@ def main():
         t0 = time.time()
 
         for batch_idx, batch in enumerate(train_dl):
-            loss, metrics = train_step(model, batch, cfg, device)
+            raw_model = model.module if isinstance(model, DDP) else model
+            if isinstance(raw_model, CornContactModel):
+                loss, metrics = train_step_corn(model, batch, device)
+            else:
+                loss, metrics = train_step(model, batch, cfg, device)
 
             optimizer.zero_grad()
             loss.backward()
@@ -495,7 +547,11 @@ def main():
 
         with torch.no_grad():
             for batch in val_dl:
-                loss, metrics = train_step(model, batch, cfg, device)
+                raw_model = model.module if isinstance(model, DDP) else model
+                if isinstance(raw_model, CornContactModel):
+                    loss, metrics = train_step_corn(model, batch, device)
+                else:
+                    loss, metrics = train_step(model, batch, cfg, device)
                 val_loss += loss.item()
                 for k, v in metrics.items():
                     val_metrics[k] = val_metrics.get(k, 0) + v
