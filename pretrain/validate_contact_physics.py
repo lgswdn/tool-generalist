@@ -138,7 +138,7 @@ def build_scene(
     # ── Ground plane (USD-API, no asset file needed) ──────────────────────────
     # GroundPlaneCfg looks for a Plane-typed child prim inside the asset USD,
     # which is absent in some Isaac Sim versions → use pure USD APIs instead.
-    from pxr import UsdGeom, UsdPhysics, Gf as UsdGf
+    from pxr import UsdGeom, UsdPhysics, UsdLux
     stage = sim_utils.get_current_stage()
     _gnd  = "/World/GroundPlane"
     UsdGeom.Xform.Define(stage, _gnd)
@@ -147,6 +147,11 @@ def build_scene(
     plane.CreateDoubleSidedAttr(False)
     UsdPhysics.CollisionAPI.Apply(plane.GetPrim())   # enable physics collision
 
+    # ── Lighting (required for non-black render output) ───────────────────────
+    if record_video:
+        dome = UsdLux.DomeLight.Define(stage, "/World/DomeLight")
+        dome.CreateIntensityAttr(1000.0)
+        dome.CreateColorAttr((1.0, 1.0, 1.0))
 
     # ── Scene (one simple class, no camera sensor) ──────────────────────────
     @configclass
@@ -241,10 +246,12 @@ def run_batch(
         sim_ctx.step()
         scene.update(SIM_DT)
         if camera is not None and step % capture_every == 0:
-            # sim_ctx.step(render=True) already triggered the RTX renderer;
-            # rep annotators are updated automatically — just read the data.
+            # Explicitly trigger a render pass so the RTX frame is ready
+            # before reading from the annotator (step() alone is not enough
+            # to guarantee the annotator buffer is populated).
+            sim_ctx.render()
             rgba = camera.get_data()   # numpy (H, W, 4) uint8
-            if rgba is not None and rgba.size > 0:
+            if rgba is not None and rgba.size > 0 and rgba.max() > 0:
                 frames.append(rgba[:, :, :3])  # (H, W, 3)
 
     pos_final  = object_obj.data.root_pos_w.clone()
@@ -437,15 +444,24 @@ def main():
             print(f"[ERROR] {pt_path.name}: {e}")
             import traceback; traceback.print_exc()
 
-    # Stop the replicator orchestrator before closing the app.
-    # Without this, _app.close() deadlocks waiting for background render threads.
-    if getattr(args, "record_video", None):
+    # Cleanly stop replicator (with timeout) then hard-exit to avoid
+    # Isaac Sim background threads hanging the process indefinitely.
+    import threading, os
+    def _stop_rep():
         try:
             import omni.replicator.core as rep
             rep.orchestrator.stop()
         except Exception:
             pass
-    _app.close()
+    if getattr(args, "record_video", None):
+        t = threading.Thread(target=_stop_rep, daemon=True)
+        t.start()
+        t.join(timeout=5.0)   # wait at most 5 s
+    try:
+        _app.close()
+    except Exception:
+        pass
+    os._exit(0)   # hard-exit: kills any remaining C++ background threads
 
 
 if __name__ == "__main__":
