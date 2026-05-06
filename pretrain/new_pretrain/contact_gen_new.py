@@ -660,7 +660,7 @@ def save_results(
         # ── Contact points (one per config) ─────────────────────────────────
         # contact_pt_tool: tool surface point in CANONICAL (centroid-subtracted) frame
         # contact_pt_obj:  object surface point in WORLD frame
-        "contact_pt_tool":  (contact_pt_tool - tool_centroid).cpu(),   # (N,3) canonical
+        "contact_pt_tool":  (contact_pt_tool - tool_centroid.cpu()).cpu(),   # (N,3) canonical
         "contact_pt_obj":   contact_pt_obj.cpu(),                      # (N,3) world
         # ── SDF arrays ──────────────────────────────────────────────────────
         "tool_pts_sdf": tool_pts_sdf,             # (N,P)
