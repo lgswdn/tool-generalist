@@ -58,7 +58,6 @@ from scipy.spatial.transform import Rotation as ScipyR
 import isaaclab.sim as sim_utils
 from isaaclab.sim import SimulationContext
 from isaaclab.assets import RigidObjectCfg, RigidObject
-from isaaclab.sensors import CameraCfg, Camera
 from isaaclab.sim.schemas.schemas_cfg import RigidBodyPropertiesCfg
 from isaaclab.utils.configclass import configclass
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
@@ -145,82 +144,58 @@ def build_scene(
     UsdPhysics.CollisionAPI.Apply(plane.GetPrim())   # enable physics collision
 
 
-    # ── Scene ─────────────────────────────────────────────────────────────────
-    # Two explicit configclasses avoid the fragile `if` inside @configclass
-    # (the conditional camera field was leaking into the dataclass registry).
-    _tool_cfg = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/Tool",
-        spawn=sim_utils.UsdFileCfg(
-            usd_path=tool_usd,
-            scale=(tool_scale, tool_scale, tool_scale),
-            rigid_props=RigidBodyPropertiesCfg(
-                disable_gravity=True,
-                kinematic_enabled=True,
-            ),
-        ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0, 0, 1)),
-    )
-    _obj_cfg = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/Object",
-        spawn=sim_utils.UsdFileCfg(
-            usd_path=obj_usd,
-            scale=(obj_scale, obj_scale, obj_scale),
-            rigid_props=RigidBodyPropertiesCfg(
-                disable_gravity=False,
-                solver_position_iteration_count=16,
-                solver_velocity_iteration_count=1,
-                max_depenetration_velocity=5.0,
-            ),
-        ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0, 0, 0.1)),
-    )
-
-    if record_video:
-        @configclass
-        class SceneCfg(InteractiveSceneCfg):
-            tool   = _tool_cfg
-            object = _obj_cfg
-            camera = CameraCfg(
-                prim_path="/World/RecordCam",
-                update_period=0,
-                height=720,
-                width=1280,
-                data_types=["rgb"],
-                spawn=sim_utils.PinholeCameraCfg(
-                    focal_length=24.0,
-                    focus_distance=400.0,
-                    horizontal_aperture=20.955,
-                    clipping_range=(0.1, 1000.0),
+    # ── Scene (one simple class, no camera sensor) ──────────────────────────
+    @configclass
+    class SceneCfg(InteractiveSceneCfg):
+        tool = RigidObjectCfg(
+            prim_path="{ENV_REGEX_NS}/Tool",
+            spawn=sim_utils.UsdFileCfg(
+                usd_path=tool_usd,
+                scale=(tool_scale, tool_scale, tool_scale),
+                rigid_props=RigidBodyPropertiesCfg(
+                    disable_gravity=True,
+                    kinematic_enabled=True,
                 ),
-                offset=CameraCfg.OffsetCfg(
-                    pos=(0.6, -0.6, 0.6),
-                    rot=(0.693, 0.430, -0.430, -0.360),
-                    convention="world",
+            ),
+            init_state=RigidObjectCfg.InitialStateCfg(pos=(0, 0, 1)),
+        )
+        object = RigidObjectCfg(
+            prim_path="{ENV_REGEX_NS}/Object",
+            spawn=sim_utils.UsdFileCfg(
+                usd_path=obj_usd,
+                scale=(obj_scale, obj_scale, obj_scale),
+                rigid_props=RigidBodyPropertiesCfg(
+                    disable_gravity=False,
+                    solver_position_iteration_count=16,
+                    solver_velocity_iteration_count=1,
+                    max_depenetration_velocity=5.0,
                 ),
-            )
-    else:
-        @configclass
-        class SceneCfg(InteractiveSceneCfg):  # type: ignore[no-redef]
-            tool   = _tool_cfg
-            object = _obj_cfg
+            ),
+            init_state=RigidObjectCfg.InitialStateCfg(pos=(0, 0, 0.1)),
+        )
 
     scene_cfg = SceneCfg(num_envs=num_envs, env_spacing=ENV_SPACING)
     scene    = InteractiveScene(scene_cfg)
-
-    # Camera._initialize_impl() checks the carb setting "/isaaclab/cameras_enabled",
-    # NOT SimulationApp's enable_cameras key.  Set it explicitly here so the camera
-    # doesn't raise "spawned without --enable_cameras flag" on sim_ctx.reset().
-    if record_video:
-        import carb as _carb
-        _carb.settings.get_settings().set_bool("/isaaclab/cameras_enabled", True)
-
     sim_ctx.reset()
     scene.reset()
 
+    # ── Replicator camera (only when recording) ─────────────────────────────
+    # Much simpler than CameraCfg: replicator creates a camera prim + render
+    # product directly, no IsaacLab sensor pipeline needed.
+    rep_annotator = None
+    if record_video:
+        import omni.replicator.core as rep
+        rep_cam    = rep.create.camera(
+            position=(0.6, -0.6, 0.6), look_at=(0.0, 0.0, 0.0),
+            focal_length=24.0, clipping_range=(0.01, 1000.0),
+        )
+        render_prod = rep.create.render_product(rep_cam, (1280, 720))
+        rep_annotator = rep.AnnotatorRegistry.get_annotator("rgb")
+        rep_annotator.attach(render_prod)
+
     tool_obj   = scene["tool"]
     object_obj = scene["object"]
-    cam        = scene["camera"] if record_video else None
-    return sim_ctx, scene, tool_obj, object_obj, cam
+    return sim_ctx, scene, tool_obj, object_obj, rep_annotator
 
 
 # ── Batch simulation ──────────────────────────────────────────────────────────
@@ -236,22 +211,17 @@ def run_batch(
     obj_quat:   torch.Tensor,   # (E, 4) w,x,y,z
     settle_steps: int,
     device: str,
-    camera = None,              # Camera sensor or None
-    capture_every: int = 4,     # capture one frame every N steps
+    camera = None,              # rep.Annotator or None
+    capture_every: int = 4,
 ) -> tuple:
-    """Reset env poses, step physics, return (final_pos, final_quat, frames).
-
-    frames is a list of (H,W,3) uint8 RGB arrays; empty when camera is None.
-    """
+    """Reset env poses, step physics, return (final_pos, final_quat, frames)."""
     E = tool_pos.shape[0]
     zeros3 = torch.zeros(E, 3, device=device)
 
     tool_state = torch.cat([tool_pos, tool_quat, zeros3, zeros3], dim=-1)
     tool_obj.write_root_state_to_sim(tool_state)
-
-    obj_state = torch.cat([obj_pos, obj_quat, zeros3, zeros3], dim=-1)
+    obj_state  = torch.cat([obj_pos,  obj_quat,  zeros3, zeros3], dim=-1)
     object_obj.write_root_state_to_sim(obj_state)
-
     scene.write_data_to_sim()
 
     frames = []
@@ -259,9 +229,11 @@ def run_batch(
         sim_ctx.step()
         scene.update(SIM_DT)
         if camera is not None and step % capture_every == 0:
-            camera.update(dt=SIM_DT)
-            rgb = camera.data.output["rgb"]          # (1, H, W, 4) RGBA uint8
-            frames.append(rgb[0, :, :, :3].cpu().numpy())  # (H, W, 3)
+            import omni.replicator.core as rep
+            rep.orchestrator.step(rt_subframes=1, delta_time=0.0, pause_timeline=False)
+            rgba = camera.get_data()   # numpy (H, W, 4) uint8
+            if rgba is not None and rgba.size > 0:
+                frames.append(rgba[:, :, :3])  # (H, W, 3)
 
     pos_final  = object_obj.data.root_pos_w.clone()
     quat_final = object_obj.data.root_quat_w.clone()
