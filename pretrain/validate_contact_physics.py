@@ -237,8 +237,17 @@ def run_batch(
     object_obj.write_root_state_to_sim(obj_state)
     scene.write_data_to_sim()
 
+    # One step to apply kinematic targets before rendering
+    sim_ctx.step()
+    scene.update(SIM_DT)
+
+    # Readback: verify the tool actually moved from init_state (0,0,1)
+    tool_pos_rb = tool_obj.data.root_pos_w[0].cpu().numpy()
+    obj_pos_rb  = object_obj.data.root_pos_w[0].cpu().numpy()
+    print(f"    [READBACK] tool_pos = {tool_pos_rb}  obj_pos = {obj_pos_rb}")
+
     frames = []
-    # Capture t=0 frame before any physics step to show initial placement
+    # Capture t=0 frame (after first step) to show initial placement
     if camera is not None:
         sim_ctx.render()
         rgba = camera.get_data()
