@@ -282,8 +282,12 @@ class SDFActorCriticCfg:
     """Config for Actor-Critic using SDFPointCloudEncoder (joint ViT encoder).
 
     Observation layout:
-        object_cloud (512*3=1536) | tool_cloud (512*3=1536) | extra_state
+        object_cloud (512*3=1536) | tool_cloud (512*3=1536)
+        | obj_centroid (3) | tool_centroid (3) | extra_state (46)
     Uses ActorCriticSDF: joint ViT encoder processes tool + object together.
+
+    NOTE: vit_depth / encoder_channel MUST match the pretrained checkpoint.
+    The new_pretrain/config.py uses vit_depth=12, encoder_channel=128.
     """
 
     class_name: str = "ActorCriticSDF"
@@ -293,9 +297,9 @@ class SDFActorCriticCfg:
     point_dim: int = 3
     patch_size: int = 32
 
-    # Encoder architecture
+    # Encoder architecture — must match new_pretrain/config.py
     encoder_channel: int = 128
-    vit_depth: int = 4
+    vit_depth: int = 12
     vit_heads: int = 4
 
     # Encoder weights (pretrained from SDF pretraining)

@@ -381,7 +381,6 @@ class ActorCriticSDF(nn.Module):
         all_tokens = res.fused_tokens  # (B, 2P, D)
 
         # Context vector: [obj_centroid(3), tool_centroid(3), extra_state(...)]
-        # Matches pose_6d = [tool_t(3), obj_t(3)] used in pretraining cross-attn
         ctx_vec = torch.cat([obj_centroid, tool_centroid, extra_state], dim=-1)
 
         return all_tokens, ctx_vec
