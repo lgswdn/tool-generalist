@@ -193,8 +193,8 @@ def build_scene(
         import omni.replicator.core as rep
         _env_np = scene.env_origins.cpu().numpy()  # (num_envs, 3)
         e0 = _env_np[0]   # env 0 origin
-        cam_pos  = (e0[0] + 0.4, e0[1] - 0.4, 0.35)
-        cam_look = (e0[0], e0[1], 0.05)
+        cam_pos  = (float(e0[0]) + 0.4, float(e0[1]) - 0.4, 0.35)
+        cam_look = (float(e0[0]), float(e0[1]), 0.05)
         rep_cam    = rep.create.camera(
             position=cam_pos, look_at=cam_look,
             focal_length=24.0, clipping_range=(0.01, 1000.0),
