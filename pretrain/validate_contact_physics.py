@@ -127,14 +127,18 @@ def build_scene(
     sim_ctx = SimulationContext(sim_cfg)
     sim_ctx.set_camera_view(eye=[3, 3, 3], target=[0, 0, 0])
 
-    # ── Ground plane ─────────────────────────────────────────────────────────
-    # Spawn directly (avoids TerrainImporterCfg stage-init issues in standalone)
-    ground_cfg = sim_utils.GroundPlaneCfg(
-        physics_material=sim_utils.RigidBodyMaterialCfg(
-            static_friction=0.7, dynamic_friction=0.7, restitution=0.0
-        )
-    )
-    ground_cfg.func("/World/GroundPlane", ground_cfg)
+    # ── Ground plane (USD-API, no asset file needed) ──────────────────────────
+    # GroundPlaneCfg looks for a Plane-typed child prim inside the asset USD,
+    # which is absent in some Isaac Sim versions → use pure USD APIs instead.
+    from pxr import UsdGeom, UsdPhysics, Gf as UsdGf
+    stage = sim_utils.get_current_stage()
+    _gnd  = "/World/GroundPlane"
+    UsdGeom.Xform.Define(stage, _gnd)
+    plane = UsdGeom.Plane.Define(stage, f"{_gnd}/CollisionShape")
+    plane.CreateAxisAttr("Z")                        # Z-up infinite plane
+    plane.CreateDoubleSidedAttr(False)
+    UsdPhysics.CollisionAPI.Apply(plane.GetPrim())   # enable physics collision
+
 
     # ── Scene (rigid bodies only, no terrain) ─────────────────────────────────
     @configclass
