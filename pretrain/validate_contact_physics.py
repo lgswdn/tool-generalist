@@ -77,7 +77,7 @@ SimulationContext._apply_render_settings_from_cfg = _safe_render_cfg
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-ENV_SPACING = 2.0          # metres between env origins (must exceed object size)
+ENV_SPACING = 1.0          # metres between env origins; objects are small (< 20 cm)
 SIM_DT      = 1.0 / 60.0  # physics time step
 GRAVITY     = (0.0, 0.0, -9.81)
 
@@ -147,11 +147,11 @@ def build_scene(
     plane.CreateDoubleSidedAttr(False)
     UsdPhysics.CollisionAPI.Apply(plane.GetPrim())   # enable physics collision
 
-    # ── Lighting (required for non-black render output) ───────────────────────
+    # ── Lighting ─────────────────────────────────────────────────────
     if record_video:
         dome = UsdLux.DomeLight.Define(stage, "/World/DomeLight")
-        dome.CreateIntensityAttr(1000.0)
-        dome.CreateColorAttr((1.0, 1.0, 1.0))
+        dome.CreateIntensityAttr(300.0)  # 1000 over-exposes to solid white
+        dome.CreateColorAttr((0.9, 0.9, 1.0))
 
     # ── Scene (one simple class, no camera sensor) ──────────────────────────
     @configclass
@@ -189,17 +189,26 @@ def build_scene(
     scene.reset()
 
     # ── Replicator camera (only when recording) ─────────────────────────────
-    # Camera is positioned to frame `num_video_envs` environments in a row.
-    # Environments are spaced ENV_SPACING apart along +X; we pull back
-    # proportionally so all requested envs fit in the frame.
+    # Grid layout: Isaac Lab places envs in ceil(sqrt(N)) columns × rows.
+    # Camera sits directly above the grid centre at a height that covers
+    # both the X-width and Y-depth (16:9 sensor has tighter vertical FOV).
     rep_annotator = None
     if record_video:
         import omni.replicator.core as rep
-        n   = max(1, num_video_envs)
-        cx  = (n - 1) * ENV_SPACING / 2.0   # X centre of the viewed envs
-        d   = 1.5 + (n - 1) * ENV_SPACING   # pull-back distance
-        cam_pos  = (cx, -d * 0.8, d * 0.8)
-        cam_look = (cx, 0.0, 0.0)
+        n    = max(1, num_video_envs)
+        cols = math.ceil(math.sqrt(n))
+        rows = math.ceil(n / cols)
+        # centre of the cols×rows grid
+        cx = (cols - 1) * ENV_SPACING / 2.0
+        cy = (rows - 1) * ENV_SPACING / 2.0
+        # half-extents including one env margin on each side
+        hx = cols * ENV_SPACING / 2.0 * 1.1
+        hy = rows * ENV_SPACING / 2.0 * 1.1
+        # pinhole FOV: aperture=20.955 mm, focal=24 mm → tan(hFOV/2)=0.437
+        # vertical FOV is tighter for 16:9: tan(vFOV/2)=0.437*(720/1280)=0.246
+        h = max(hx / 0.437, hy / 0.246)   # height to cover both axes
+        cam_pos  = (cx, cy, h)             # directly above grid centre
+        cam_look = (cx, cy, 0.0)
         rep_cam    = rep.create.camera(
             position=cam_pos, look_at=cam_look,
             focal_length=24.0, clipping_range=(0.01, 1000.0),
@@ -207,12 +216,15 @@ def build_scene(
         render_prod = rep.create.render_product(rep_cam, (1280, 720))
         rep_annotator = rep.AnnotatorRegistry.get_annotator("rgb")
         rep_annotator.attach(render_prod)
-        print(f"  [Video] camera pos={cam_pos}  look_at={cam_look}  "
-              f"(framing {n} envs)")
+        print(f"  [Video] {cols}×{rows} grid  cam_h={h:.1f}m  "
+              f"centre=({cx:.1f}, {cy:.1f})  span=({cols*ENV_SPACING:.1f}×"
+              f"{rows*ENV_SPACING:.1f} m)")
 
     tool_obj   = scene["tool"]
     object_obj = scene["object"]
-    return sim_ctx, scene, tool_obj, object_obj, rep_annotator
+    # scene.env_origins: (num_envs, 3) actual grid positions from Isaac Lab
+    env_origins_np = scene.env_origins.cpu().numpy()   # (num_envs, 3)
+    return sim_ctx, scene, tool_obj, object_obj, rep_annotator, env_origins_np
 
 
 # ── Batch simulation ──────────────────────────────────────────────────────────
@@ -291,12 +303,15 @@ def validate_file(pt_path: Path, out_path: Path, args) -> None:
     print(f"  Tool USD  : {tool_usd}")
     print(f"  Object USD: {obj_usd}")
 
-    sim_ctx, scene, tool_obj, object_obj, cam = build_scene(
+    sim_ctx, scene, tool_obj, object_obj, cam, scene_env_origins = build_scene(
         tool_usd, tool_scale, obj_usd, obj_scale, args.num_envs,
         record_video=getattr(args, "record_video", None),
-        num_video_envs=getattr(args, "num_video_envs", 1),
+        num_video_envs=getattr(args, "num_video_envs", 16),
     )
     device = sim_ctx.device
+    # scene_env_origins: (num_envs, 3) actual XY grid positions from Isaac Lab.
+    # The validation loop uses these to correctly position each object/tool
+    # relative to its environment, matching the 2D grid Isaac Lab uses.
 
     # Pre-compute object quaternion (same R_obj for all configs in this file)
     obj_quat_np = mat3_to_quat_wxyz(R_obj)   # (4,) w,x,y,z
@@ -312,10 +327,8 @@ def validate_file(pt_path: Path, out_path: Path, args) -> None:
         E    = end - start
         idxs = np.arange(start, end)
 
-        # Env origins for this chunk: (i * ENV_SPACING, 0, 0)
-        env_origins = np.zeros((args.num_envs, 3))
-        for i in range(args.num_envs):
-            env_origins[i, 0] = i * ENV_SPACING
+        # Env origins: use actual Isaac Lab grid positions (2-D grid in XY plane)
+        env_origins = scene_env_origins   # (num_envs, 3)
 
         # Object pose: env_origin + (0, 0, obj_centroid.z)
         # We translate the whole scene so obj_centroid_xy → env_origin_xy
@@ -425,7 +438,7 @@ def main():
     p.add_argument("--record-video",  default=None, metavar="PATH",
                    help="If given, record a video of settling to this .mp4 path")
     p.add_argument("--num-video-envs", type=int, default=16,
-                   help="Number of environments visible in the video (default: 4)")
+                   help="Number of environments visible in the video (default: 16)")
     p.add_argument("--capture-every", type=int,   default=4,
                    help="Capture one frame every N physics steps (default: 4)")
     args = p.parse_args()
