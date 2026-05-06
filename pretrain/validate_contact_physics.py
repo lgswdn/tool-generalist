@@ -177,7 +177,7 @@ def build_scene(
         env_path = f"/World/envs/env_{i}"
         UsdGeom.Xform.Define(stage, env_path)
 
-        # Tool (static collider — NO RigidBodyAPI so xform ops work directly)
+        # Tool (kinematic rigid body — PhysX controls transform)
         tool_prim = UsdGeom.Xform.Define(stage, f"{env_path}/Tool").GetPrim()
         tool_prim.GetReferences().AddReference(tool_usd)
         txf = UsdGeom.Xformable(tool_prim)
@@ -185,20 +185,8 @@ def build_scene(
         txf.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(
             Gf.Vec3d(float(env_origins[i, 0]), float(env_origins[i, 1]), 0.1))
         txf.AddScaleOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(ts, ts, ts))
-        # Strip physics + internal transforms from referenced USD children.
-        # Tool USDs from COACD export have baked-in xformOps and RigidBodyAPI
-        # on child prims that compound with our parent scale → reset to identity.
-        from pxr import Usd as _Usd
-        for desc in _Usd.PrimRange(tool_prim):
-            if desc == tool_prim:
-                continue   # skip root — we set its transform above
-            if desc.HasAPI(UsdPhysics.RigidBodyAPI):
-                UsdPhysics.RigidBodyAPI(desc).GetRigidBodyEnabledAttr().Set(False)
-            if desc.IsA(UsdGeom.Xformable):
-                UsdGeom.Xformable(desc).ClearXformOpOrder()
-            if desc.IsA(UsdGeom.Mesh):
-                UsdPhysics.CollisionAPI.Apply(desc)
-                UsdPhysics.MeshCollisionAPI.Apply(desc)
+        UsdPhysics.RigidBodyAPI.Apply(tool_prim)
+        tool_prim.GetAttribute("physics:kinematicEnabled").Set(True)
 
         # Object (dynamic rigid body)
         obj_prim = UsdGeom.Xform.Define(stage, f"{env_path}/Object").GetPrim()
