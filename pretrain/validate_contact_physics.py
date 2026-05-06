@@ -370,7 +370,7 @@ def validate_file(pt_path: Path, out_path: Path, args) -> None:
     vi = valid_indices
     filtered = {}
     for k, v in data.items():
-        if isinstance(v, torch.Tensor) and v.shape[0] == N:
+        if isinstance(v, torch.Tensor) and v.ndim > 0 and v.shape[0] == N:
             filtered[k] = v[vi]       # slice per-config tensors
         else:
             filtered[k] = v           # keep shared tensors / scalars as-is
