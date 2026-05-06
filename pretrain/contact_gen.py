@@ -916,6 +916,8 @@ def filter_and_save(
         "tool_pts_canonical": P_tool_c,
         "obj_pts_canonical":  P_obj_c,
         "obj_centroid":       obj_centroid.cpu(),
+        # exact surface centroid used to define t_adj — needed for on-the-fly SDF
+        "tool_centroid_raw":  tool_centroid.cpu(),
         # ── Per-config poses ─────────────────────────────────────────────────
         #   tool_translations : (N,3) world-frame position of tool CENTROID
         #   tool_rotations    : (N,3,3) unchanged

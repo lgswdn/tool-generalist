@@ -77,6 +77,10 @@ class Config:
     epsilon:           float = CONTACT_GEN.epsilon
     floor_eps:         float = CONTACT_GEN.floor_eps
 
+    # ── Head-area bias (tool contact point sampling) ───────────────────────
+    contact_mode_prob: float = CONTACT_GEN.contact_mode_prob   # 0.7 → 70% head
+    obj_contact_z_min: float = CONTACT_GEN.obj_contact_z_min   # 0.0 → z > 0
+
     # ── Kept from CONTACT_GEN for compat (not used by sampler) ────────────
     pen_max_eps: float = CONTACT_GEN.pen_max_eps
     contact_eps: float = CONTACT_GEN.contact_eps
@@ -141,6 +145,67 @@ def sample_surface_points(
            + (r1 * (1 - r2)).unsqueeze(-1) * v1[face_idx]
            + (r1 * r2).unsqueeze(-1) * v2[face_idx])
     return pts
+
+
+# ==============================================================================
+#          HEAD-AREA BIAS  (tool contact point split, ported from contact_gen.py)
+# ==============================================================================
+
+def load_tool_head_area(
+    tools_json_path: str,
+    tool_mesh_path:  str,
+) -> Optional[Tuple[list, list]]:
+    """Return (head_lo, head_hi) normalised bbox ratios from tools_adjusted.json,
+    or None if not found / json not provided."""
+    if not tools_json_path or not Path(tools_json_path).exists():
+        return None
+    tool_stem = Path(tool_mesh_path).stem
+    with open(tools_json_path) as f:
+        tools = json.load(f)
+    for entry in tools:
+        if entry.get("name") == tool_stem:
+            ha = entry["head_area"]
+            return ha[0], ha[1]
+    print(f"  ⚠ Tool '{tool_stem}' not in {tools_json_path}; using uniform sampling.")
+    return None
+
+
+def compute_head_bounds(
+    verts: torch.Tensor,
+    head_area: Optional[Tuple[list, list]],
+) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+    """Convert normalised head_area ratios → world-space (head_min, head_max)."""
+    if head_area is None:
+        return None
+    device = verts.device
+    bbox_min = verts.min(dim=0).values
+    bbox_range = verts.max(dim=0).values - bbox_min
+    lo = torch.tensor(head_area[0], device=device, dtype=torch.float32)
+    hi = torch.tensor(head_area[1], device=device, dtype=torch.float32)
+    return bbox_min + lo * bbox_range, bbox_min + hi * bbox_range
+
+
+def split_head_body(
+    P: torch.Tensor,                               # (K, 3) tool surface pts
+    bounds: Optional[Tuple[torch.Tensor, torch.Tensor]],
+) -> Tuple[torch.Tensor, torch.Tensor]:            # (P_head, 3), (P_body, 3)
+    """Split a tool surface cloud into head and body subsets.
+    If bounds is None both tensors are the full cloud.
+    Falls back to full cloud if either region is empty.
+    """
+    if bounds is None:
+        return P, P
+    head_min, head_max = bounds
+    in_head = ((P >= head_min.unsqueeze(0)) & (P <= head_max.unsqueeze(0))).all(dim=-1)
+    P_head = P[in_head]
+    P_body = P[~in_head]
+    if P_head.shape[0] == 0:
+        print("  ⚠ No head-region pts; using full cloud as head.")
+        P_head = P
+    if P_body.shape[0] == 0:
+        print("  ⚠ No body-region pts; using full cloud as body.")
+        P_body = P
+    return P_head, P_body
 
 
 # ==============================================================================
@@ -257,6 +322,8 @@ def rejection_sample(
     bbox_min: torch.Tensor,     # (3,)
     bbox_max: torch.Tensor,     # (3,)
     cfg:      Config,
+    P_head:   Optional[torch.Tensor] = None,  # (P_h, 3)  head-region pts (or None→uniform)
+    P_body:   Optional[torch.Tensor] = None,  # (P_b, 3)  body-region pts (or None→uniform)
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Batched rejection sampling: returns valid (R, t) pairs.
 
@@ -303,6 +370,15 @@ def rejection_sample(
 
     R_cands = _sample_upright_rotations(M)   # (M, 3, 3)
 
+    # ── Pre-compute head/body split indices and z>0 obj anchors ──────────────
+    use_head = (P_head is not None) and (P_body is not None)
+    # Filter obj surface pts to z > obj_contact_z_min (z>0 on grounded object)
+    z_min_thr = cfg.obj_contact_z_min
+    obj_surf_z_ok = obj_surf[obj_surf[:, 2] > z_min_thr]
+    if obj_surf_z_ok.shape[0] < 10:
+        print("  ⚠ Too few obj pts with z>0; using all obj surf pts.")
+        obj_surf_z_ok = obj_surf
+
     R_list, t_list = [], []
     n_total_pairs  = 0
 
@@ -310,11 +386,19 @@ def rejection_sample(
         b_end  = min(b_start + chunk_B, B)
         cb     = b_end - b_start           # actual chunk size
 
-        # Step 1: sample contact pairs
-        idx_tool = torch.randint(K,              (cb,), device=device)
-        idx_obj  = torch.randint(obj_surf.shape[0], (cb,), device=device)
-        p_B = P_tool[idx_tool]       # (cb, 3)  tool contact pt (canonical frame)
-        p_A = obj_surf[idx_obj]      # (cb, 3)  obj contact pt  (world frame)
+        # Step 1: sample contact pairs with head-area bias
+        if use_head:
+            n_head = int(cb * cfg.contact_mode_prob)
+            n_body = cb - n_head
+            idx_h = torch.randint(P_head.shape[0], (n_head,), device=device)
+            idx_b = torch.randint(P_body.shape[0], (n_body,), device=device)
+            idx_tool_pts = torch.cat([P_head[idx_h], P_body[idx_b]], dim=0)  # (cb, 3)
+        else:
+            idx_tool_pts = P_tool[torch.randint(K, (cb,), device=device)]    # (cb, 3)
+
+        idx_obj  = torch.randint(obj_surf_z_ok.shape[0], (cb,), device=device)
+        p_B = idx_tool_pts           # (cb, 3)  tool contact pt (canonical frame)
+        p_A = obj_surf_z_ok[idx_obj] # (cb, 3)  obj contact pt  (world frame, z>0)
 
         # Step 2: shift tool cloud so p_B → origin  →  (cb, K, 3)
         tool_shifted = P_tool.unsqueeze(0) - p_B.unsqueeze(1)   # (cb, K, 3)
@@ -551,6 +635,8 @@ def save_results(
         "tool_pts_canonical": P_tool_c,                   # (P,3)
         "obj_pts_canonical":  P_obj_c,                    # (Q,3)
         "obj_centroid":       obj_centroid.cpu(),          # (3,)
+        # exact surface centroid used to define t_adj — needed for on-the-fly SDF
+        "tool_centroid_raw":  tool_centroid.cpu(),         # (3,)
         # ── Object pose (stored with both public and private keys) ──────────
         "object_rotation":  R_obj.cpu(),
         "_object_rotation": R_obj.cpu(),
@@ -622,10 +708,18 @@ def main(cfg: Config) -> None:
     obj_surf = sample_surface_points(obj_verts, obj_faces, max(cfg.B * 4, 16384))
     print(f"  Object contact anchors: {obj_surf.shape[0]} pts")
 
-    # ── 8. Rejection sampling ─────────────────────────────────────────────────
+    # ── 8. Head-area split for biased tool contact sampling ──────────────────
+    head_area = load_tool_head_area(cfg.tools_json_path, cfg.tool_mesh_path)
+    bounds    = compute_head_bounds(tool_verts, head_area)
+    P_head, P_body = split_head_body(P_uniform, bounds)
+    print(f"  Tool contact pts: {P_head.shape[0]} head / {P_body.shape[0]} body "
+          f"(bias {cfg.contact_mode_prob:.0%} head)")
+
+    # ── 9. Rejection sampling ─────────────────────────────────────────────────
     print(f"Running rejection sampler  (B={cfg.B}, M={cfg.M}, chunk_B={cfg.chunk_B}) …")
     R_valid, t_valid = rejection_sample(
-        P_uniform, obj_surf, sdf_grid, bbox_min, bbox_max, cfg
+        P_uniform, obj_surf, sdf_grid, bbox_min, bbox_max, cfg,
+        P_head=P_head, P_body=P_body,
     )
     N_valid = R_valid.shape[0]
     print(f"\n✓ Valid contact poses found: {N_valid}")

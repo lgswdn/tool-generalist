@@ -24,10 +24,8 @@ class ContactGenHyperparams:
 
     # ── Rejection sampler ─────────────────────────────────────────────────────
     B:            int   = 4096          # contact pairs (tool_pt × obj_pt) per call
-    M:            int   = 1024          # candidate rotations tested per pair
-    chunk_B:      int   = 512           # how many pairs processed per GPU kernel
-                                        # Memory: chunk_B × M × K × 3 × 4 bytes
-                                        # = 512 × 1024 × 512 × 12 ≈ 3 GB — safe on 48 GB
+    M:            int   = 2048          # candidate rotations tested per pair
+    chunk_B:      int   = 1024          # how many pairs processed per GPU kernel
 
     # ── SDF grid ──────────────────────────────────────────────────────────────
     sdf_grid_res: int   = 128           # voxel grid resolution (128³)
@@ -35,13 +33,14 @@ class ContactGenHyperparams:
 
     # ── Geometric constraints ─────────────────────────────────────────────────
     upright_threshold: float = 0.0      # reject rotations where R[2,2] > threshold
-                                        # (tool +Z must not point upward)
-    epsilon:           float = 5e-3     # penetration tolerance (metres)
-                                        # Must be > voxel grid spacing (~bbox/128 ≈ 1.6 mm)
-                                        # to avoid rejecting valid poses where the contact
-                                        # point reads as slightly inside due to trilinear
-                                        # interpolation error on the 128³ SDF grid.
+    epsilon:           float = 2e-3     # penetration tolerance (metres).
     floor_eps:         float = 1e-3     # min world-z allowed for any tool point
+
+    # ── Head-area bias (tool contact point sampling) ───────────────────────────
+    contact_mode_prob: float = 0.7      # fraction of tool contact pts from head region
+                                        # (same as original contact_gen.py)
+    # obj contact point z threshold
+    obj_contact_z_min: float = 0.0      # only sample obj contact pts with z > this
 
     # ── Convergence thresholds (kept for output compat with old pipeline) ──────
     pen_max_eps: float = 3e-4
