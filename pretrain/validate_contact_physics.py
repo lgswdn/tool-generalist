@@ -274,6 +274,9 @@ def validate_file(pt_path: Path, out_path: Path, args) -> None:
     # world-frame *centroid* positions, but Isaac Sim needs *prim origin*.
     # Prim origin = centroid - R @ centroid_raw
     tool_centroid_raw = data["tool_centroid_raw"].numpy()  # (3,)
+    # obj_z_shift: in generation, mesh was grounded by `verts_z -= z_shift`.
+    # In Isaac Sim the equivalent is setting prim z = -z_shift.
+    obj_z_shift = float(data["obj_z_shift"])
     N = tool_translations.shape[0]
 
     # Contact point in object-local frame (used after settling to track moved obj)
@@ -314,18 +317,17 @@ def validate_file(pt_path: Path, out_path: Path, args) -> None:
         E    = end - start
         idxs = np.arange(start, end)
 
-        # XY-only offset: shift generation frame so obj prim centres at env_origin XY.
-        # Z is NOT shifted — the generation had obj prim at z=0 (floor) with the
-        # centroid at z=+0.062m above, and tool at z=tool_translations.z.
-        # Subtracting centroid.z would bury the object 6cm underground.
+        # Lateral offset: shift generation frame so obj centroid XY aligns with env_origin.
+        # Z uses -obj_z_shift to ground the mesh (generation does `verts_z -= z_shift`).
         xy_offset = np.zeros((args.num_envs, 3))
         xy_offset[:, 0] = scene_env_origins[:, 0] - obj_centroid[0]
         xy_offset[:, 1] = scene_env_origins[:, 1] - obj_centroid[1]
-        # z column stays 0
+        # z column stays 0 — z grounding handled separately below
 
         obj_pos_np = np.zeros((args.num_envs, 3))
         for i, ci in enumerate(idxs):
-            obj_pos_np[i] = xy_offset[i]           # z=0: prim at floor (gen frame)
+            obj_pos_np[i] = xy_offset[i]
+            obj_pos_np[i, 2] = -obj_z_shift   # ground the mesh (prim z = -z_shift)
         for i in range(E, args.num_envs):
             obj_pos_np[i] = obj_pos_np[0]
 
@@ -357,9 +359,10 @@ def validate_file(pt_path: Path, out_path: Path, args) -> None:
             cp_dist = float(np.linalg.norm(pt_tw - pt_ow))
             print(f"  [DEBUG batch 0 env 0]")
             print(f"    obj_centroid           = {obj_centroid}")
+            print(f"    obj_z_shift            = {obj_z_shift:.6f}")
             print(f"    xy_offset[0]           = {xy_offset[0]}")
-            print(f"    obj_pos[0]  (prim z=0) = {o0}")
-            print(f"    tool_pos[0] (gen z)    = {t0}")
+            print(f"    obj_pos[0]  (z=-zs)    = {o0}")
+            print(f"    tool_pos[0] (prim)     = {t0}")
             print(f"    prim-to-prim dist      = {dist0:.4f} m")
             print(f"    pt_tool_world[0]       = {pt_tw}")
             print(f"    contact_pt_obj[0]      = {pt_ow}")
