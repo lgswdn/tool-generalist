@@ -175,7 +175,7 @@ def build_scene(
                     disable_gravity=False,
                     solver_position_iteration_count=16,
                     solver_velocity_iteration_count=1,
-                    max_depenetration_velocity=5.0,
+                    max_depenetration_velocity=0.5,
                 ),
             ),
             init_state=RigidObjectCfg.InitialStateCfg(pos=(0, 0, 0.1)),
@@ -238,6 +238,12 @@ def run_batch(
     scene.write_data_to_sim()
 
     frames = []
+    # Capture t=0 frame before any physics step to show initial placement
+    if camera is not None:
+        sim_ctx.render()
+        rgba = camera.get_data()
+        if rgba is not None and rgba.size > 0 and rgba.max() > 0:
+            frames.append(rgba[:, :, :3])
     for step in range(settle_steps):
         sim_ctx.step()
         scene.update(SIM_DT)
@@ -291,8 +297,8 @@ def validate_file(pt_path: Path, out_path: Path, args) -> None:
     # ── Build Isaac Sim scene ─────────────────────────────────────────────────
     print(f"\n[INFO] Building scene for {pt_path.name}  (N={N}, envs={args.num_envs})")
     tool_usd, obj_usd = derive_usd_paths(data["tool_mesh_path"], data["object_mesh_path"])
-    print(f"  Tool USD  : {tool_usd}")
-    print(f"  Object USD: {obj_usd}")
+    print(f"  Tool USD  : {tool_usd}  (scale={tool_scale})")
+    print(f"  Object USD: {obj_usd}  (scale={obj_scale})")
 
     sim_ctx, scene, tool_obj, object_obj, cam, scene_env_origins = build_scene(
         tool_usd, tool_scale, obj_usd, obj_scale, args.num_envs,
@@ -311,8 +317,11 @@ def validate_file(pt_path: Path, out_path: Path, args) -> None:
     valid_obj_quat  = []
     all_frames      = []      # collected only when --record-video is set
 
+    # Optionally limit configs for debugging
+    N_proc = min(N, args.max_configs) if args.max_configs else N
+
     # Process in chunks of num_envs
-    for start in range(0, N, args.num_envs):
+    for start in range(0, N_proc, args.num_envs):
         end  = min(start + args.num_envs, N)
         E    = end - start
         idxs = np.arange(start, end)
@@ -452,6 +461,8 @@ def main():
                    help="If given, record a video of settling to this .mp4 path")
     p.add_argument("--capture-every", type=int,   default=4,
                    help="Capture one frame every N physics steps (default: 4)")
+    p.add_argument("--max-configs",  type=int,   default=None,
+                   help="Limit configs processed per file (for debugging)")
     args = p.parse_args()
 
     out_root = Path(args.output)
