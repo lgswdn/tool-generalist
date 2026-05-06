@@ -49,7 +49,8 @@ docker/.container.cfg
 **/output/*
 **/outputs/*
 **/videos/*
-**/wandb/*
+wandb/
+**/wandb/
 **/.neptune/*
 docker/artifacts/
 *.tmp
@@ -64,10 +65,10 @@ _repo
 _build
 .lastformat
 
-# RL-Games
-**/runs/*
-**/logs/*
-**/recordings/*
+# RL-Games — exclude the directories entirely so git doesn't traverse them
+logs/
+**/runs/
+**/recordings/
 
 # Pre-Trained Checkpoints
 /.pretrained_checkpoints/
@@ -99,5 +100,8 @@ pretrain/tmp_data/
 
 Robots/
 RobotSmith/responses
+RobotSmith/assets/
+RobotSmith/meshes/
+RobotSmith/tools/
 
 .codex

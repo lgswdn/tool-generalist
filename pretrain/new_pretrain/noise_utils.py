@@ -145,7 +145,8 @@ def sample_noised_poses_batch(
     precise_prob: bool = False,
     # For rejection sampling
     tool_canonical: torch.Tensor = None,  # (B, P, 3)
-    obj_pc: torch.Tensor = None,          # (B, Q, 3)
+    obj_pc: torch.Tensor = None,          # (B, Q, 3) centered at origin
+    obj_centroid: torch.Tensor = None,    # (B, 3) world-frame object centroid; fixes guard
     pen_threshold: float = 0.001,
     max_retries: int = 10,
 ) -> dict:
@@ -249,11 +250,19 @@ def sample_noised_poses_batch(
             if check_mask.any():
                 # Transform canonical tool to world frame at noised pose
                 tool_p = tool_canonical[pending]  # (n, P, 3)
-                obj_p = obj_pc[pending]            # (n, Q, 3)
+                obj_p  = obj_pc[pending]          # (n, Q, 3)  centered at origin
                 tool_world = torch.bmm(tool_p, noised_R.transpose(1, 2)) + noised_t.unsqueeze(1)
 
+                # Reconstruct world-frame object cloud.
+                # obj_pc is centered: obj_world = obj_pc + obj_centroid.
+                # Without obj_centroid the check fires at the wrong distance (~|obj_centroid|)
+                if obj_centroid is not None:
+                    obj_world_guard = obj_p + obj_centroid[pending].unsqueeze(1)  # (n, Q, 3)
+                else:
+                    obj_world_guard = obj_p  # legacy / flat-world fallback
+
                 # Pairwise NN distances (n, P, Q) → min per sample
-                dist_matrix = torch.cdist(tool_world, obj_p, p=2)
+                dist_matrix = torch.cdist(tool_world, obj_world_guard, p=2)
                 min_dists = dist_matrix.min(dim=-1).values.min(dim=-1).values  # (n,)
 
                 # Reject if too close

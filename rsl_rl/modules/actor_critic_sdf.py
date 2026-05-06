@@ -59,7 +59,7 @@ class ActorCriticSDF(nn.Module):
         point_dim: int = 3,
         patch_size: int = 32,
         encoder_channel: int = 128,
-        vit_depth: int = 4,
+        vit_depth: int = 12,   # must match new_pretrain/config.py
         vit_heads: int = 4,
         # Encoder weights
         encoder_weights_path: Optional[str] = None,

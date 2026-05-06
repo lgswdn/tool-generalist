@@ -375,8 +375,9 @@ def rejection_sample(
     R_valid = torch.cat(R_list, dim=0)   # (N_valid, 3, 3)
     t_valid = torch.cat(t_list, dim=0)   # (N_valid, 3)
     print(f"  Rejection sampler: {R_valid.shape[0]} valid poses "
-          f"from {n_total_pairs} contact pairs × {M} rotations "
-          f"({100*R_valid.shape[0]/(n_total_pairs*M):.3f}% success rate)")
+          f"from {n_total_pairs} contact pairs "
+          f"({100*R_valid.shape[0]/max(n_total_pairs,1):.1f}% pair-success rate, "
+          f"{M} rotations tested per pair)")
     return R_valid, t_valid
 
 

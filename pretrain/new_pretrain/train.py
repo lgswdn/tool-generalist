@@ -146,14 +146,42 @@ def _load_mesh_cached(path: str) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def _load_mesh_batch(
-    tool_paths: list[str],
-    obj_paths:  list[str],
+    tool_paths:   list[str],
+    obj_paths:    list[str],
+    tool_scales:  torch.Tensor,   # (B,)     scale applied at generation time
+    obj_scales:   torch.Tensor,   # (B,)
+    obj_Rs:       torch.Tensor,   # (B, 3, 3) rotation applied to object
+    obj_z_shifts: torch.Tensor,   # (B,)     z-grounding shift
 ) -> tuple[list, list, list, list]:
-    """Return (tool_verts, tool_faces, obj_verts, obj_faces) lists for a batch."""
+    """Return (tool_verts, tool_faces, obj_verts, obj_faces) lists for a batch.
+
+    Tool mesh  : scaled then centered by its vertex centroid (approx surface centroid).
+                 This matches the centroid-frame convention used by noised_t / tool_canonical.
+    Object mesh: scaled, rotated by R_obj, and z-grounded — i.e. in world frame.
+                 This matches the frame used by tool_world in compute_on_the_fly_sdf.
+    """
     tv, tf, ov, of = [], [], [], []
-    for tp, op in zip(tool_paths, obj_paths):
-        t_v, t_f = _load_mesh_cached(tp)
-        o_v, o_f = _load_mesh_cached(op)
+    for i, (tp, op) in enumerate(zip(tool_paths, obj_paths)):
+        t_v_raw, t_f = _load_mesh_cached(tp)
+        o_v_raw, o_f = _load_mesh_cached(op)
+
+        # ---- Tool: scale then center by vertex centroid ----
+        # Centering by vertex centroid approximates the surface-point centroid used
+        # in contact_gen to define t_adj = R @ surface_centroid + t_origin.
+        # The error |vertex_centroid - surface_centroid| is typically < 1 mm.
+        t_scale = tool_scales[i].item()
+        t_v_sc  = t_v_raw * t_scale                    # (V, 3) scaled
+        t_v     = t_v_sc - t_v_sc.mean(dim=0)          # (V, 3) centered ≈ centroid frame
+
+        # ---- Object: scale + rotate (canonical → world) + z-ground ----
+        o_scale   = obj_scales[i].item()
+        R_obj_i   = obj_Rs[i]                           # (3, 3)
+        z_shift_i = obj_z_shifts[i].item()
+        o_v_sc  = o_v_raw * o_scale                    # (V, 3) scaled
+        o_v     = o_v_sc @ R_obj_i.T                   # (V, 3) rotated to world
+        o_v     = o_v.clone()
+        o_v[:, 2] -= z_shift_i                         # (V, 3) grounded (world frame)
+
         tv.append(t_v); tf.append(t_f)
         ov.append(o_v); of.append(o_f)
     return tv, tf, ov, of
@@ -190,6 +218,11 @@ def train_step(
     contact_t       = batch["contact_t"].to(device)        # (B, 3)
     tool_mesh_paths = batch["tool_mesh_path"]              # list[str]
     obj_mesh_paths  = batch["obj_mesh_path"]               # list[str]
+    # Mesh pose/scale metadata (for geometrically correct on-the-fly SDF)
+    tool_scales  = batch["tool_scale"].to(device)          # (B,)
+    obj_scales   = batch["object_scale"].to(device)        # (B,)
+    obj_Rs       = batch["obj_R"].to(device)               # (B, 3, 3)
+    obj_z_shifts = batch["obj_z_shift"].to(device)         # (B,)
     B = tool_canonical.shape[0]
 
     raw_model = model.module if isinstance(model, DDP) else model
@@ -205,6 +238,7 @@ def train_step(
         precise_prob=cfg.precise_diff_prob,
         tool_canonical=tool_canonical,
         obj_pc=obj_pc,
+        obj_centroid=obj_centroid,   # fixes world-frame mismatch in rejection guard
     )
     noised_R = noise_out["noised_R"]   # (B, 3, 3)
     noised_t = noise_out["noised_t"]   # (B, 3)
@@ -218,7 +252,10 @@ def train_step(
 
     # ── 4. On-the-fly SDF at the actual sampled pose ─────────────────────
     # Correct for ANY pose — no pre-baked approximation.
-    tv_list, tf_list, ov_list, of_list = _load_mesh_batch(tool_mesh_paths, obj_mesh_paths)
+    tv_list, tf_list, ov_list, of_list = _load_mesh_batch(
+        tool_mesh_paths, obj_mesh_paths,
+        tool_scales, obj_scales, obj_Rs, obj_z_shifts,
+    )
     with torch.no_grad():
         tool_sdf_gt, obj_sdf_gt = compute_on_the_fly_sdf(
             tool_canonical=tool_canonical,
@@ -233,6 +270,22 @@ def train_step(
         )
     tool_sdf_gt = tool_sdf_gt.to(device)
     obj_sdf_gt  = obj_sdf_gt.to(device)
+
+    # ── Validation: at t_idx == 0 on-the-fly SDF must match stored SDF ──────────
+    # The noised pose equals the contact pose at t_idx=0, so the on-the-fly
+    # SDF should reproduce the pre-baked dataset values.  A large error means
+    # the mesh transform (scale / rotation / centering) is still wrong.
+    if is_main() and (noise_out["t_idx"] == 0).any():
+        zero_mask = (noise_out["t_idx"] == 0)
+        stored_t_sdf = batch["stored_tool_sdf"].to(device)[zero_mask]  # (K, P)
+        stored_o_sdf = batch["stored_obj_sdf"].to(device)[zero_mask]   # (K, Q)
+        err_tool = (tool_sdf_gt[zero_mask] - stored_t_sdf).abs().mean().item()
+        err_obj  = (obj_sdf_gt[zero_mask]  - stored_o_sdf).abs().mean().item()
+        if err_tool > 5e-3 or err_obj > 5e-3:
+            print(f"  [SDF-VALIDATE] t_idx=0 MAE: tool={err_tool:.5f}  obj={err_obj:.5f}"
+                  f"  ⚠  > 5mm — mesh transform may be wrong")
+        else:
+            print(f"  [SDF-VALIDATE] t_idx=0 MAE: tool={err_tool:.5f}  obj={err_obj:.5f}  ✓")
 
     # ── 5. Movement conditioning + child point clouds (sdf-diff only) ────
     if raw_model.task == "sdf-diff":

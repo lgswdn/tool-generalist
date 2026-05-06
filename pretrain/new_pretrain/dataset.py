@@ -42,6 +42,10 @@ class NewPretrainDataset(Dataset):
       - contact_t:         (3,)   world-frame position of tool centroid at contact
       - tool_sdf:          (P,)   signed SDF at contact (positive = outside object)
       - obj_sdf:           (Q,)   signed SDF at contact (positive = outside tool)
+      - tool_scale:        ()     scale applied to tool mesh at generation time
+      - object_scale:      ()     scale applied to object mesh at generation time
+      - obj_R:             (3,3)  rotation applied to object mesh (canonical → world)
+      - obj_z_shift:       ()     z-grounding shift applied to object
       - pt_path:           str    path to the .pt file
 
     Reconstruction:
@@ -119,6 +123,18 @@ class NewPretrainDataset(Dataset):
             "obj_centroid":   obj_centroid.float(),    # (3,)   world-frame centroid
             "contact_R":      contact_R.float(),       # (3, 3)
             "contact_t":      contact_t.float(),       # (3,)   world frame centroid pos
+            # Pre-baked SDF at CONTACT pose (for validation when t_idx == 0)
+            "stored_tool_sdf": tool_sdf.float(),        # (P,)
+            "stored_obj_sdf":  obj_sdf.float(),         # (Q,)
+            # ── Mesh pose/scale — needed to correctly reconstruct meshes for
+            # on-the-fly SDF at noised poses.  All are per-file constants.
+            "tool_scale":   torch.tensor(float(data.get("tool_scale",   1.0))),
+            "object_scale": torch.tensor(float(data.get("object_scale", 1.0))),
+            "obj_R":        data.get("_object_rotation",
+                                     data.get("object_rotation", torch.eye(3))).float(),
+            "obj_z_shift":  torch.tensor(float(
+                                data.get("_obj_z_shift",
+                                         data.get("obj_z_shift", 0.0)))),
             # Mesh paths — needed for on-the-fly SDF at noised poses
             "tool_mesh_path": data.get("tool_mesh_path", ""),    # str
             "obj_mesh_path":  data.get("object_mesh_path", ""),  # str

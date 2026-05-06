@@ -36,7 +36,11 @@ class ContactGenHyperparams:
     # ── Geometric constraints ─────────────────────────────────────────────────
     upright_threshold: float = 0.0      # reject rotations where R[2,2] > threshold
                                         # (tool +Z must not point upward)
-    epsilon:           float = 1e-4     # min SDF value to be considered non-penetrating
+    epsilon:           float = 5e-3     # penetration tolerance (metres)
+                                        # Must be > voxel grid spacing (~bbox/128 ≈ 1.6 mm)
+                                        # to avoid rejecting valid poses where the contact
+                                        # point reads as slightly inside due to trilinear
+                                        # interpolation error on the 128³ SDF grid.
     floor_eps:         float = 1e-3     # min world-z allowed for any tool point
 
     # ── Convergence thresholds (kept for output compat with old pipeline) ──────

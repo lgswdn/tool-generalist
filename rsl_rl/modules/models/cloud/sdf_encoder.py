@@ -61,8 +61,8 @@ class SDFEncoderCfg:
     # Token dimension (D)
     encoder_channel: int = 128
 
-    # ViT transformer
-    vit_depth:    int = 4    # number of ViT blocks
+    # ViT transformer — must match new_pretrain/config.py (vit_depth=12)
+    vit_depth:    int = 12   # number of ViT blocks
     vit_heads:    int = 4    # attention heads
     vit_mlp_ratio: float = 4.0
     vit_dropout:  float = 0.0
@@ -380,9 +380,11 @@ class SDFPointCloudEncoder(nn.Module):
         ckpt = torch.load(path, map_location="cpu")
         # Support several checkpoint formats
         sd = ckpt.get("model", ckpt.get("model_state_dict", ckpt))
-        # Strip any 'encoder.' prefix if weights come from SDFSegmentor
+        # Keep only encoder weights — ContactDiffusionModel checkpoints also contain
+        # pose_cross_attn, tool_sdf_head, obj_sdf_head, denoising_head keys which
+        # must be excluded.  Whitelist 'encoder.*' keys and strip the prefix.
         sd = {k.removeprefix("encoder."): v for k, v in sd.items()
-              if not k.startswith("tool_head") and not k.startswith("obj_head")}
+              if k.startswith("encoder.")}
         missing, unexpected = self.load_state_dict(sd, strict=False)
         if missing:
             print(f"  Missing keys ({len(missing)}): {missing[:5]}{'...' if len(missing)>5 else ''}")
