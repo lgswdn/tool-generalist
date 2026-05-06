@@ -152,28 +152,33 @@ def load_pt(pt_path: str) -> dict:
 
 
 def gather_contact_points(data_list: list[dict]) -> np.ndarray | None:
-    """Collect all contact points from every .pt dataset.
+    """Collect object-side contact points (world frame) from every .pt dataset.
 
-    Contact points are in world frame, same as the transformed object mesh
-    (which has R_obj and z_shift applied). No coordinate transformation needed.
-
-    Returns:
-        pts: (M, 3)  all contact points in world frame, or None if absent.
+    Tries new key 'contact_pt_obj' (one per config, shape (N,3)) first,
+    then falls back to legacy 'contact_pts_world' / 'contact_pts_obj_frame'.
     """
     all_pts = []
     for data in data_list:
-        # Try new key name first, fall back to old name for backward compat
-        if "contact_pts_world" in data:
-            pts = data["contact_pts_world"]   # (N, C, 3) world frame
+        if "contact_pt_obj" in data:
+            pts = data["contact_pt_obj"]            # (N, 3)
+        elif "contact_pts_world" in data:
+            pts = data["contact_pts_world"].reshape(-1, 3)
         elif "contact_pts_obj_frame" in data:
-            # Old name was misleading - it was actually world frame
-            pts = data["contact_pts_obj_frame"]
+            pts = data["contact_pts_obj_frame"].reshape(-1, 3)
         else:
             continue
+        all_pts.append(pts.reshape(-1, 3))
+    if not all_pts:
+        return None
+    return np.concatenate(all_pts, axis=0)
 
-        pts = pts.reshape(-1, 3)  # (N*C, 3)
-        all_pts.append(pts)
 
+def gather_tool_contact_points(data_list: list[dict]) -> np.ndarray | None:
+    """Collect tool-side contact points (canonical/centroid-subtracted frame)."""
+    all_pts = []
+    for data in data_list:
+        if "contact_pt_tool" in data:
+            all_pts.append(data["contact_pt_tool"].reshape(-1, 3))
     if not all_pts:
         return None
     return np.concatenate(all_pts, axis=0)
@@ -262,6 +267,10 @@ def main() -> None:
         help="Override object mesh path (default: read from .pt file)",
     )
     p.add_argument(
+        "--tool", type=str, default=None,
+        help="Override tool mesh path (default: read from .pt file)",
+    )
+    p.add_argument(
         "--output", "-o", type=str, default=None,
         help="Output .obj path (default: <first_input_stem>_heatmap.obj)",
     )
@@ -292,55 +301,80 @@ def main() -> None:
     # ---- All datasets must share the same object rotation (first one wins) ----
     R_obj = data_list[0].get("object_rotation", np.eye(3))  # Identity if no rotation (gradient method)
 
-    # ---- Gather all contact points (world frame, same as transformed mesh) ----
-    contact_pts = gather_contact_points(data_list)
-    if contact_pts is None or contact_pts.shape[0] == 0:
-        print("ERROR: No contact points found in any input file.")
+    # ---- Gather obj contact points (world frame) ----
+    contact_pts_obj = gather_contact_points(data_list)
+    if contact_pts_obj is None or contact_pts_obj.shape[0] == 0:
+        print("ERROR: No object contact points found in any input file.")
         sys.exit(1)
-    print(f"\nTotal contact points: {contact_pts.shape[0]}")
+    print(f"\nObject contact points: {contact_pts_obj.shape[0]}")
+
+    # ---- Gather tool contact points (canonical frame) ----
+    contact_pts_tool = gather_tool_contact_points(data_list)
+    has_tool_pts = contact_pts_tool is not None and contact_pts_tool.shape[0] > 0
+    if has_tool_pts:
+        print(f"Tool   contact points: {contact_pts_tool.shape[0]}")
+    else:
+        print("⚠  No tool contact points found (old dataset). Tool heatmap skipped.")
 
     # ---- Load and transform object mesh ----
     print(f"Loading object mesh: {obj_mesh_path}")
     obj_mesh = trimesh.load(obj_mesh_path, force="mesh", process=False)
     verts = np.array(obj_mesh.vertices, dtype=np.float32)
-
-    # Apply object scale (default to RL scale if not saved)
     object_scale = data_list[0].get("object_scale", 0.15)
     verts = verts * object_scale
     print(f"  Object scale: {object_scale:.4f}")
-
-    # Apply rotation and grounding
     verts = transform_object_verts(verts, R_obj)
     faces = np.array(obj_mesh.faces, dtype=np.int32)
 
-    # ---- Compute per-vertex heat ----
-    print(f"Computing contact density (radius={args.radius:.4f}) …")
-    heat = compute_vertex_heat(verts, contact_pts, radius=args.radius)
-    print(f"  Max heat: {heat.max():.0f}  Mean (non-zero): "
-          f"{heat[heat > 0].mean():.2f} " if heat.any() else "  All zeros — try a larger --radius")
+    # ---- Object heatmap ----
+    print(f"Computing object contact density (radius={args.radius:.4f}) …")
+    heat_obj = compute_vertex_heat(verts, contact_pts_obj, radius=args.radius)
+    print(f"  Max heat: {heat_obj.max():.0f}")
+    h_max = heat_obj.max()
+    heat_obj_norm = ((heat_obj / h_max) ** args.gamma) if h_max > 0 else heat_obj
+    colours_obj = heat_to_rgb(heat_obj_norm, colormap=args.colormap)
 
-    # ---- Normalise and apply gamma ----
-    h_max = heat.max()
-    if h_max > 0:
-        heat_norm = (heat / h_max) ** args.gamma
-    else:
-        heat_norm = heat
-
-    # ---- Map to colours ----
-    colours = heat_to_rgb(heat_norm, colormap=args.colormap)
-
-    # ---- Output path ----
+    stem = Path(args.input[0]).stem
     if args.output:
-        out_path = args.output
+        obj_out = args.output
+        tool_out = str(Path(args.output).with_suffix("")) + "_tool.obj"
     else:
-        stem = Path(args.input[0]).stem
-        out_path = str(Path(args.input[0]).parent / f"{stem}_heatmap.obj")
+        obj_out  = str(Path(args.input[0]).parent / f"{stem}_obj_heatmap.obj")
+        tool_out = str(Path(args.input[0]).parent / f"{stem}_tool_heatmap.obj")
 
-    # ---- Write OBJ ----
-    write_obj_vertex_colour(out_path, verts, faces, colours)
-    print(f"\n✓ Heatmap written to {out_path}")
-    print(f"  Colormap: {args.colormap}  |  Radius: {args.radius} m  |  Gamma: {args.gamma}")
-    print(f"  Open in MeshLab: File → Import Mesh → {out_path}")
+    write_obj_vertex_colour(obj_out, verts, faces, colours_obj)
+    print(f"\n✓ Object heatmap → {obj_out}")
+
+    # ---- Tool heatmap (canonical frame) ----
+    if has_tool_pts:
+        tool_mesh_path = args.tool or data_list[0].get("tool_mesh_path")
+        if tool_mesh_path and Path(tool_mesh_path).exists():
+            print(f"Loading tool mesh: {tool_mesh_path}")
+            tool_mesh = trimesh.load(tool_mesh_path, force="mesh", process=False)
+            t_verts = np.array(tool_mesh.vertices, dtype=np.float32)
+            tool_scale = data_list[0].get("tool_scale", 0.1)
+            t_verts = t_verts * tool_scale
+            # Centre by subtracting the stored tool_centroid (same as canonical cloud)
+            tool_centroid_raw = data_list[0].get("tool_centroid_raw")
+            if tool_centroid_raw is not None:
+                t_verts = t_verts - np.array(tool_centroid_raw, dtype=np.float32)
+            else:
+                t_verts = t_verts - t_verts.mean(axis=0)
+            t_faces = np.array(tool_mesh.faces, dtype=np.int32)
+
+            print(f"Computing tool contact density (radius={args.radius:.4f}) …")
+            heat_tool = compute_vertex_heat(t_verts, contact_pts_tool, radius=args.radius)
+            print(f"  Max heat: {heat_tool.max():.0f}")
+            h_max_t = heat_tool.max()
+            heat_tool_norm = ((heat_tool / h_max_t) ** args.gamma) if h_max_t > 0 else heat_tool
+            colours_tool = heat_to_rgb(heat_tool_norm, colormap=args.colormap)
+            write_obj_vertex_colour(tool_out, t_verts, t_faces, colours_tool)
+            print(f"✓ Tool   heatmap → {tool_out}")
+        else:
+            print(f"⚠  Tool mesh not found: {tool_mesh_path}. Skipping tool heatmap.")
+
+    print(f"\n  Colormap: {args.colormap}  |  Radius: {args.radius} m  |  Gamma: {args.gamma}")
+    print(f"  Open in MeshLab: File → Import Mesh")
 
 
 if __name__ == "__main__":

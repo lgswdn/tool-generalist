@@ -380,7 +380,7 @@ def rejection_sample(
     # ── Pre-compute head/body flag ────────────────────────────────────────────
     use_head = (P_head is not None) and (P_body is not None)
 
-    R_list, t_list = [], []
+    R_list, t_list, pB_list, pA_list = [], [], [], []
     n_total_pairs  = 0
 
     for b_start in range(0, B, chunk_B):
@@ -453,17 +453,22 @@ def rejection_sample(
 
         R_list.append(R_sel.cpu())
         t_list.append(t_sel.cpu())
+        pB_list.append(p_B_valid.cpu())   # tool contact pt (canonical)
+        pA_list.append(p_A_valid.cpu())   # obj  contact pt (world frame)
 
     if not R_list:
-        return torch.zeros(0, 3, 3), torch.zeros(0, 3)
+        empty3 = torch.zeros(0, 3)
+        return torch.zeros(0, 3, 3), empty3, empty3, empty3
 
-    R_valid = torch.cat(R_list, dim=0)   # (N_valid, 3, 3)
-    t_valid = torch.cat(t_list, dim=0)   # (N_valid, 3)
+    R_valid  = torch.cat(R_list,  dim=0)   # (N_valid, 3, 3)
+    t_valid  = torch.cat(t_list,  dim=0)   # (N_valid, 3)
+    pB_valid = torch.cat(pB_list, dim=0)   # (N_valid, 3)  canonical tool contact pt
+    pA_valid = torch.cat(pA_list, dim=0)   # (N_valid, 3)  world frame obj  contact pt
     print(f"  Rejection sampler: {R_valid.shape[0]} valid poses "
           f"from {n_total_pairs} contact pairs "
           f"({100*R_valid.shape[0]/max(n_total_pairs,1):.1f}% pair-success rate, "
           f"{M} rotations tested per pair)")
-    return R_valid, t_valid
+    return R_valid, t_valid, pB_valid, pA_valid
 
 
 # ==============================================================================
@@ -565,6 +570,8 @@ def save_results(
     z_shift:         torch.Tensor,   # scalar
     obj_scale:       float,
     cfg:             Config,
+    contact_pt_tool: torch.Tensor,   # (N, 3)  tool contact pt in canonical frame
+    contact_pt_obj:  torch.Tensor,   # (N, 3)  obj  contact pt in world frame
 ) -> int:
     """Compute final SDF fields, bake centroid-shifted coordinates, save to disk.
 
@@ -650,6 +657,11 @@ def save_results(
         "tool_rotations":    R_tool.cpu(),        # (N,3,3)
         "pen_loss":          pen_proxy,           # (N,)  min SDF per config
         "contact_loss":      torch.zeros(N),      # (N,)  placeholder
+        # ── Contact points (one per config) ─────────────────────────────────
+        # contact_pt_tool: tool surface point in CANONICAL (centroid-subtracted) frame
+        # contact_pt_obj:  object surface point in WORLD frame
+        "contact_pt_tool":  (contact_pt_tool - tool_centroid).cpu(),   # (N,3) canonical
+        "contact_pt_obj":   contact_pt_obj.cpu(),                      # (N,3) world
         # ── SDF arrays ──────────────────────────────────────────────────────
         "tool_pts_sdf": tool_pts_sdf,             # (N,P)
         "obj_pts_sdf":  obj_pts_sdf,              # (N,Q)
@@ -718,7 +730,7 @@ def main(cfg: Config) -> None:
 
     # ── 9. Rejection sampling ─────────────────────────────────────────────────
     print(f"Running rejection sampler  (B={cfg.B}, M={cfg.M}, chunk_B={cfg.chunk_B}) …")
-    R_valid, t_valid = rejection_sample(
+    R_valid, t_valid, pt_tool, pt_obj = rejection_sample(
         P_uniform, obj_surf, sdf_grid, bbox_min, bbox_max, cfg,
         P_head=P_head, P_body=P_body,
     )
@@ -729,13 +741,15 @@ def main(cfg: Config) -> None:
         print("⚠  No valid poses found. Try increasing B or M.")
         return
 
-    # ── 9. Compute final SDF outputs & save ───────────────────────────────────
+    # ── 10. Compute final SDF outputs & save ──────────────────────────────────
     n_saved = save_results(
         R_valid, t_valid,
         P_uniform, P_obj_canonical,
         obj_verts, obj_faces,
         tool_verts, tool_faces,
         R_obj, z_shift, obj_scale, cfg,
+        contact_pt_tool=pt_tool,
+        contact_pt_obj=pt_obj,
     )
     print(f"\nDone.  {n_saved} valid contact configurations saved.")
 
