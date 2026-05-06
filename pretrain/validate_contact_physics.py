@@ -17,39 +17,42 @@ Usage (single file):
     python pretrain/validate_contact_physics.py \\
         --input  pretrain/new_pretrain/tmp_data/fork/mug_pose0.pt \\
         --output pretrain/new_pretrain/validated/ \\
-        --num-envs 64 --settle-steps 200 --threshold 0.008
+        --num-envs 64 --settle-steps 200 --threshold 0.008 --headless
 
-Usage (glob — shell expands):
+Usage (with video recording):
     python pretrain/validate_contact_physics.py \\
-        --input  pretrain/new_pretrain/tmp_data/**/*.pt \\
-        --output pretrain/new_pretrain/validated/ \\
-        --num-envs 128
+        --input  file.pt --output validated/ \\
+        --num-envs 1 --max-configs 5 \\
+        --record-video out.mp4 --headless --enable_cameras
 
 Note: one Isaac Sim instance is created per .pt file (different tool/object
 pairs require different USD assets in the scene).
 """
 
-# ── Isaac Sim MUST be launched before any omni/isaacsim imports ─────────────
-import sys
-from isaacsim import SimulationApp
-# Pre-parse --record-video so we can pass enable_cameras before full argparse.
-# Handle both  --record-video path.mp4  and  --record-video=path.mp4  forms.
-_record_video = None
-for _i, _a in enumerate(sys.argv):
-    if _a.startswith("--record-video="):
-        _record_video = _a.split("=", 1)[1]; break
-    if _a == "--record-video" and _i + 1 < len(sys.argv):
-        _record_video = sys.argv[_i + 1]; break
-_app_cfg = {"headless": True, "anti_aliasing": 0}
-if _record_video:
-    # offscreen_render=True → RTX renders in headless without a window
-    # (without this the renderer produces nothing → black video)
-    _app_cfg["enable_cameras"]    = True
-    _app_cfg["offscreen_render"]  = True
-_app = SimulationApp(_app_cfg)
+# ── CLI + AppLauncher bootstrap (must be before any omni/isaacsim imports) ──
+import argparse
+from isaaclab.app import AppLauncher
+
+cli_parser = argparse.ArgumentParser(description="Physics-based contact stability filter")
+cli_parser.add_argument("--input",  nargs="+", required=True, help=".pt file(s) to validate")
+cli_parser.add_argument("--output", required=True, help="Output directory")
+cli_parser.add_argument("--num-envs",      type=int,   default=2048,    help="Parallel envs per batch")
+cli_parser.add_argument("--settle-steps",  type=int,   default=200,   help="Physics steps to settle")
+cli_parser.add_argument("--threshold",     type=float, default=0.002, help="Contact distance threshold (m)")
+cli_parser.add_argument("--record-video",  default=None, metavar="PATH",
+                   help="If given, record a video of settling to this .mp4 path")
+cli_parser.add_argument("--capture-every", type=int,   default=4,
+                   help="Capture one frame every N physics steps (default: 4)")
+cli_parser.add_argument("--max-configs",  type=int,   default=None,
+                   help="Limit configs processed per file (for debugging)")
+AppLauncher.add_app_launcher_args(cli_parser)
+args = cli_parser.parse_args()
+
+# Launch with headless + offscreen_render when recording video
+app_launcher = AppLauncher(args)
+_app = app_launcher.app
 # ────────────────────────────────────────────────────────────────────────────
 
-import argparse
 from pathlib import Path
 
 import imageio
@@ -63,16 +66,6 @@ from isaaclab.assets import RigidObjectCfg, RigidObject
 from isaaclab.sim.schemas.schemas_cfg import RigidBodyPropertiesCfg
 from isaaclab.utils.configclass import configclass
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
-
-# ── Patch: Isaac Sim installations sometimes lack rendering preset .kit files
-#    (e.g. balanced.kit).  Since we run headless physics-only, skip silently.
-_orig_render_cfg = SimulationContext._apply_render_settings_from_cfg
-def _safe_render_cfg(self):
-    try:
-        _orig_render_cfg(self)
-    except (FileNotFoundError, OSError):
-        pass  # no rendering preset available; physics still works fine
-SimulationContext._apply_render_settings_from_cfg = _safe_render_cfg
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -136,7 +129,7 @@ def build_scene(
     # ── Ground plane (USD-API, no asset file needed) ──────────────────────────
     # GroundPlaneCfg looks for a Plane-typed child prim inside the asset USD,
     # which is absent in some Isaac Sim versions → use pure USD APIs instead.
-    from pxr import UsdGeom, UsdPhysics, UsdLux
+    from pxr import Gf, UsdGeom, UsdPhysics, UsdLux
     stage = sim_utils.get_current_stage()
     _gnd  = "/World/GroundPlane"
     UsdGeom.Xform.Define(stage, _gnd)
@@ -145,11 +138,16 @@ def build_scene(
     plane.CreateDoubleSidedAttr(False)
     UsdPhysics.CollisionAPI.Apply(plane.GetPrim())   # enable physics collision
 
-    # ── Lighting ─────────────────────────────────────────────────────
-    if record_video:
-        dome = UsdLux.DomeLight.Define(stage, "/World/DomeLight")
-        dome.CreateIntensityAttr(300.0)  # 1000 over-exposes to solid white
-        dome.CreateColorAttr((0.9, 0.9, 1.0))
+    # ── Lighting (dome + key light, matching view_tools.py) ────────────────
+    dome = UsdLux.DomeLight.Define(stage, "/World/DomeLight")
+    dome.CreateIntensityAttr(800.0)
+    dome.CreateColorAttr((0.95, 0.96, 1.0))
+    sun = UsdLux.DistantLight.Define(stage, "/World/KeyLight")
+    sun.CreateIntensityAttr(2200.0)
+    sun.CreateAngleAttr(0.45)
+    UsdGeom.Xformable(sun.GetPrim()).AddRotateXYZOp().Set(
+        Gf.Vec3f(-45.0, 0.0, 35.0)
+    )
 
     # ── Scene (one simple class, no camera sensor) ──────────────────────────
     @configclass
@@ -460,20 +458,7 @@ def validate_file(pt_path: Path, out_path: Path, args) -> None:
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main():
-    p = argparse.ArgumentParser(description="Physics-based contact stability filter")
-    p.add_argument("--input",  nargs="+", required=True, help=".pt file(s) to validate")
-    p.add_argument("--output", required=True, help="Output directory")
-    p.add_argument("--num-envs",      type=int,   default=2048,    help="Parallel envs per batch")
-    p.add_argument("--settle-steps",  type=int,   default=200,   help="Physics steps to settle")
-    p.add_argument("--threshold",     type=float, default=0.002, help="Contact distance threshold (m)")
-    p.add_argument("--record-video",  default=None, metavar="PATH",
-                   help="If given, record a video of settling to this .mp4 path")
-    p.add_argument("--capture-every", type=int,   default=4,
-                   help="Capture one frame every N physics steps (default: 4)")
-    p.add_argument("--max-configs",  type=int,   default=None,
-                   help="Limit configs processed per file (for debugging)")
-    args = p.parse_args()
-
+    # args already parsed at module level (before AppLauncher bootstrap)
     out_root = Path(args.output)
 
     for pt_path_str in args.input:
@@ -490,9 +475,6 @@ def main():
 
     # Cleanly stop replicator (with timeout) then hard-exit to avoid
     # Isaac Sim background threads hanging the process indefinitely.
-    # NOTE: We skip _app.close() because it triggers a render callback
-    # on an already-destroyed physics scene → RuntimeError on invalid prim.
-    # os._exit(0) handles full process cleanup.
     import threading, os
     def _stop_rep():
         try:
@@ -503,8 +485,8 @@ def main():
     if getattr(args, "record_video", None):
         t = threading.Thread(target=_stop_rep, daemon=True)
         t.start()
-        t.join(timeout=5.0)   # wait at most 5 s
-    os._exit(0)   # hard-exit: kills any remaining C++ background threads
+        t.join(timeout=5.0)
+    os._exit(0)
 
 
 if __name__ == "__main__":
