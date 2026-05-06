@@ -371,18 +371,24 @@ def validate_file(pt_path: Path, out_path: Path, args) -> None:
 
         # ── Diagnostic: print initial separation for env 0 (first batch only) ─
         if start == 0:
-            o0 = obj_pos_np[0]
-            t0 = tool_pos_np[0]
-            diff = t0 - o0
-            dist0 = float(np.linalg.norm(diff))
+            ci0 = idxs[0]
+            o0  = obj_pos_np[0]
+            t0  = tool_pos_np[0]
+            dist0 = float(np.linalg.norm(t0 - o0))
+            pt_tw = pt_tool_world[ci0]      # R_tool @ pt_canonical + t_tool (gen frame)
+            pt_ow = contact_pt_obj[ci0]     # contact pt on obj (gen frame)
+            cp_dist = float(np.linalg.norm(pt_tw - pt_ow))
             print(f"  [DEBUG batch 0 env 0]")
-            print(f"    obj_centroid      = {obj_centroid}")
-            print(f"    base[0]           = {base[0]}")
-            print(f"    obj_pos[0]        = {o0}")
-            print(f"    tool_pos[0]       = {t0}")
-            print(f"    tool-obj delta    = {diff}")
-            print(f"    tool-obj distance = {dist0:.4f} m")
-            print(f"    tool_translations[0] = {tool_translations[0]}")
+            print(f"    obj_centroid           = {obj_centroid}")
+            print(f"    base[0]                = {base[0]}")
+            print(f"    obj_pos[0]  (prim)     = {o0}")
+            print(f"    tool_pos[0] (prim)     = {t0}")
+            print(f"    prim-to-prim dist      = {dist0:.4f} m  "
+                  f"(can be large; these are mesh ORIGINS not surfaces)")
+            print(f"    pt_tool_world[0]       = {pt_tw}")
+            print(f"    contact_pt_obj[0]      = {pt_ow}")
+            print(f"    contact-pt distance    = {cp_dist:.6f} m  "
+                  f"(should be ~0 if surfaces are in contact in the data)")
 
         # To tensors
         tp = torch.tensor(tool_pos_np,  dtype=torch.float32, device=device)
@@ -465,7 +471,7 @@ def main():
     p.add_argument("--threshold",     type=float, default=0.002, help="Contact distance threshold (m)")
     p.add_argument("--record-video",  default=None, metavar="PATH",
                    help="If given, record a video of settling to this .mp4 path")
-    p.add_argument("--num-video-envs", type=int, default=16,
+    p.add_argument("--num-video-envs", type=int, default=4,
                    help="Number of environments visible in the video (default: 16)")
     p.add_argument("--capture-every", type=int,   default=4,
                    help="Capture one frame every N physics steps (default: 4)")
