@@ -45,6 +45,8 @@ cli_parser.add_argument("--capture-every", type=int,   default=4,
                    help="Capture one frame every N physics steps (default: 4)")
 cli_parser.add_argument("--max-configs",  type=int,   default=None,
                    help="Limit configs processed per file (for debugging)")
+cli_parser.add_argument("--test-canonical", action="store_true",
+                   help="Load tool+obj at origin with identity pose, record video, and exit")
 AppLauncher.add_app_launcher_args(cli_parser)
 args = cli_parser.parse_args()
 
@@ -62,10 +64,6 @@ from scipy.spatial.transform import Rotation as ScipyR
 
 import isaaclab.sim as sim_utils
 from isaaclab.sim import SimulationContext
-from isaaclab.assets import RigidObjectCfg, RigidObject
-from isaaclab.sim.schemas.schemas_cfg import RigidBodyPropertiesCfg
-from isaaclab.utils.configclass import configclass
-from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -110,6 +108,17 @@ def derive_usd_paths(tool_obj_path: str, object_obj_path: str):
 
 # ── Scene builder ─────────────────────────────────────────────────────────────
 
+def _compute_env_origins(num_envs: int, spacing: float) -> np.ndarray:
+    """Compute grid-based env origins (matching Isaac Lab's layout)."""
+    cols = int(np.ceil(np.sqrt(num_envs)))
+    origins = np.zeros((num_envs, 3))
+    for i in range(num_envs):
+        row, col = divmod(i, cols)
+        origins[i, 0] = col * spacing
+        origins[i, 1] = row * spacing
+    return origins
+
+
 def build_scene(
     tool_usd: str,
     tool_scale: float,
@@ -118,27 +127,38 @@ def build_scene(
     num_envs: int,
     record_video: str | None = None,
 ) -> tuple:
-    """Create SimulationContext + scene with N envs.
+    """Create SimulationContext + scene with N envs using AddReference.
 
-    Returns (sim_ctx, scene, tool_obj, object_obj, rep_annotator_or_None).
+    Returns (sim_ctx, stage, env_origins_np, tool_scale, obj_scale, rep_annotator).
     """
     sim_cfg = sim_utils.SimulationCfg(dt=SIM_DT, gravity=GRAVITY)
     sim_ctx = SimulationContext(sim_cfg)
     sim_ctx.set_camera_view(eye=[3, 3, 3], target=[0, 0, 0])
 
-    # ── Ground plane (USD-API, no asset file needed) ──────────────────────────
-    # GroundPlaneCfg looks for a Plane-typed child prim inside the asset USD,
-    # which is absent in some Isaac Sim versions → use pure USD APIs instead.
-    from pxr import Gf, UsdGeom, UsdPhysics, UsdLux
+    from pxr import Gf, Sdf, UsdGeom, UsdPhysics, UsdLux, UsdShade
     stage = sim_utils.get_current_stage()
-    _gnd  = "/World/GroundPlane"
-    UsdGeom.Xform.Define(stage, _gnd)
-    plane = UsdGeom.Plane.Define(stage, f"{_gnd}/CollisionShape")
-    plane.CreateAxisAttr("Z")                        # Z-up infinite plane
-    plane.CreateDoubleSidedAttr(False)
-    UsdPhysics.CollisionAPI.Apply(plane.GetPrim())   # enable physics collision
 
-    # ── Lighting (dome + key light, matching view_tools.py) ────────────────
+    # ── Ground plane (visible mesh + physics collision) ───────────────────
+    ground = UsdGeom.Mesh.Define(stage, "/World/GroundPlane")
+    e = 50.0
+    ground.CreatePointsAttr().Set([
+        Gf.Vec3f(-e, -e, 0), Gf.Vec3f(e, -e, 0),
+        Gf.Vec3f(e, e, 0),   Gf.Vec3f(-e, e, 0),
+    ])
+    ground.CreateFaceVertexCountsAttr().Set([4])
+    ground.CreateFaceVertexIndicesAttr().Set([0, 1, 2, 3])
+    ground.CreateSubdivisionSchemeAttr().Set("none")
+    UsdPhysics.CollisionAPI.Apply(ground.GetPrim())
+    gnd_mat = UsdShade.Material.Define(stage, "/World/Materials/Ground")
+    gnd_shd = UsdShade.Shader.Define(stage, "/World/Materials/Ground/Shader")
+    gnd_shd.CreateIdAttr("UsdPreviewSurface")
+    gnd_shd.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(
+        Gf.Vec3f(0.78, 0.78, 0.74))
+    gnd_shd.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.65)
+    gnd_mat.CreateSurfaceOutput().ConnectToSource(gnd_shd.ConnectableAPI(), "surface")
+    UsdShade.MaterialBindingAPI.Apply(ground.GetPrim()).Bind(gnd_mat)
+
+    # ── Lighting (dome + key light, matching view_tools.py) ───────────────
     dome = UsdLux.DomeLight.Define(stage, "/World/DomeLight")
     dome.CreateIntensityAttr(800.0)
     dome.CreateColorAttr((0.95, 0.96, 1.0))
@@ -146,125 +166,145 @@ def build_scene(
     sun.CreateIntensityAttr(2200.0)
     sun.CreateAngleAttr(0.45)
     UsdGeom.Xformable(sun.GetPrim()).AddRotateXYZOp().Set(
-        Gf.Vec3f(-45.0, 0.0, 35.0)
-    )
+        Gf.Vec3f(-45.0, 0.0, 35.0))
 
-    # ── Scene (one simple class, no camera sensor) ──────────────────────────
-    @configclass
-    class SceneCfg(InteractiveSceneCfg):
-        tool = RigidObjectCfg(
-            prim_path="{ENV_REGEX_NS}/Tool",
-            spawn=sim_utils.UsdFileCfg(
-                usd_path=tool_usd,
-                scale=(tool_scale, tool_scale, tool_scale),
-                rigid_props=RigidBodyPropertiesCfg(
-                    disable_gravity=True,
-                    kinematic_enabled=True,
-                ),
-            ),
-            init_state=RigidObjectCfg.InitialStateCfg(pos=(0, 0, 1)),
-        )
-        object = RigidObjectCfg(
-            prim_path="{ENV_REGEX_NS}/Object",
-            spawn=sim_utils.UsdFileCfg(
-                usd_path=obj_usd,
-                scale=(obj_scale, obj_scale, obj_scale),
-                rigid_props=RigidBodyPropertiesCfg(
-                    disable_gravity=False,
-                    solver_position_iteration_count=16,
-                    solver_velocity_iteration_count=1,
-                    max_depenetration_velocity=0.5,
-                ),
-            ),
-            init_state=RigidObjectCfg.InitialStateCfg(pos=(0, 0, 0.1)),
-        )
+    # ── Spawn envs with AddReference (like view_tools.py) ─────────────────
+    env_origins = _compute_env_origins(num_envs, ENV_SPACING)
+    UsdGeom.Xform.Define(stage, "/World/envs")
+    ts, os_ = tool_scale, obj_scale
 
-    scene_cfg = SceneCfg(num_envs=num_envs, env_spacing=ENV_SPACING)
-    scene    = InteractiveScene(scene_cfg)
+    for i in range(num_envs):
+        env_path = f"/World/envs/env_{i}"
+        UsdGeom.Xform.Define(stage, env_path)
+
+        # Tool (kinematic rigid body)
+        tool_prim = UsdGeom.Xform.Define(stage, f"{env_path}/Tool").GetPrim()
+        tool_prim.GetReferences().AddReference(tool_usd)
+        txf = UsdGeom.Xformable(tool_prim)
+        txf.ClearXformOpOrder()
+        txf.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(
+            Gf.Vec3d(float(env_origins[i, 0]), float(env_origins[i, 1]), 1.0))
+        txf.AddScaleOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(ts, ts, ts))
+        UsdPhysics.RigidBodyAPI.Apply(tool_prim)
+        tool_prim.GetAttribute("physics:kinematicEnabled").Set(True)
+        for ch in tool_prim.GetAllChildren():
+            if ch.IsA(UsdGeom.Mesh):
+                UsdPhysics.CollisionAPI.Apply(ch)
+                UsdPhysics.MeshCollisionAPI.Apply(ch)
+
+        # Object (dynamic rigid body)
+        obj_prim = UsdGeom.Xform.Define(stage, f"{env_path}/Object").GetPrim()
+        obj_prim.GetReferences().AddReference(obj_usd)
+        oxf = UsdGeom.Xformable(obj_prim)
+        oxf.ClearXformOpOrder()
+        oxf.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(
+            Gf.Vec3d(float(env_origins[i, 0]), float(env_origins[i, 1]), 0.1))
+        oxf.AddScaleOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(os_, os_, os_))
+        UsdPhysics.RigidBodyAPI.Apply(obj_prim)
+        for ch in obj_prim.GetAllChildren():
+            if ch.IsA(UsdGeom.Mesh):
+                UsdPhysics.CollisionAPI.Apply(ch)
+                UsdPhysics.MeshCollisionAPI.Apply(ch)
+
     sim_ctx.reset()
-    scene.reset()
 
-    # ── Replicator camera (only when recording) ─────────────────────────────
-    # Simple perspective camera aimed at env 0 from a fixed offset.
+    # ── Replicator camera (only when recording) ──────────────────────────
     rep_annotator = None
     if record_video:
         import omni.replicator.core as rep
-        _env_np = scene.env_origins.cpu().numpy()  # (num_envs, 3)
-        e0 = _env_np[0]   # env 0 origin
+        e0 = env_origins[0]
         cam_pos  = (float(e0[0]) + 0.4, float(e0[1]) - 0.4, 0.35)
         cam_look = (float(e0[0]), float(e0[1]), 0.05)
-        rep_cam    = rep.create.camera(
+        rep_cam = rep.create.camera(
             position=cam_pos, look_at=cam_look,
-            focal_length=24.0, clipping_range=(0.01, 1000.0),
-        )
+            focal_length=24.0, clipping_range=(0.01, 1000.0))
         render_prod = rep.create.render_product(rep_cam, (1280, 720))
         rep_annotator = rep.AnnotatorRegistry.get_annotator("rgb")
         rep_annotator.attach(render_prod)
         print(f"  [Video] Perspective camera at env 0")
 
-    tool_obj   = scene["tool"]
-    object_obj = scene["object"]
-    # scene.env_origins: (num_envs, 3) actual grid positions from Isaac Lab
-    env_origins_np = scene.env_origins.cpu().numpy()   # (num_envs, 3)
-    return sim_ctx, scene, tool_obj, object_obj, rep_annotator, env_origins_np
+    return sim_ctx, stage, env_origins, tool_scale, obj_scale, rep_annotator
 
 
-# ── Batch simulation ──────────────────────────────────────────────────────────
+def _set_prim_pose(stage, prim_path, pos, quat_wxyz, scale):
+    """Set translate + orient + scale on a prim via USD xform ops."""
+    from pxr import Gf, UsdGeom
+    prim = stage.GetPrimAtPath(prim_path)
+    xf = UsdGeom.Xformable(prim)
+    xf.ClearXformOpOrder()
+    xf.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(
+        Gf.Vec3d(float(pos[0]), float(pos[1]), float(pos[2])))
+    w, x, y, z = float(quat_wxyz[0]), float(quat_wxyz[1]), float(quat_wxyz[2]), float(quat_wxyz[3])
+    xf.AddOrientOp(UsdGeom.XformOp.PrecisionDouble).Set(
+        Gf.Quatd(w, Gf.Vec3d(x, y, z)))
+    xf.AddScaleOp(UsdGeom.XformOp.PrecisionDouble).Set(
+        Gf.Vec3d(float(scale), float(scale), float(scale)))
+
+
+def _get_prim_world_pose(stage, prim_path):
+    """Read world position and quaternion (w,x,y,z) from a prim."""
+    from pxr import UsdGeom
+    prim = stage.GetPrimAtPath(prim_path)
+    xf = UsdGeom.Xformable(prim)
+    world_tf = xf.ComputeLocalToWorldTransform(0)
+    t = world_tf.ExtractTranslation()
+    rot = world_tf.ExtractRotation()
+    q = rot.GetQuat()
+    imag = q.GetImaginary()
+    pos = np.array([t[0], t[1], t[2]])
+    quat = np.array([q.GetReal(), imag[0], imag[1], imag[2]])
+    return pos, quat
+
 
 def run_batch(
     sim_ctx,
-    scene,
-    tool_obj:   RigidObject,
-    object_obj: RigidObject,
-    tool_pos:   torch.Tensor,   # (E, 3)
-    tool_quat:  torch.Tensor,   # (E, 4) w,x,y,z
-    obj_pos:    torch.Tensor,   # (E, 3)
-    obj_quat:   torch.Tensor,   # (E, 4) w,x,y,z
+    stage,
+    num_envs: int,
+    tool_scale: float,
+    obj_scale: float,
+    tool_pos:   np.ndarray,   # (num_envs, 3)
+    tool_quat:  np.ndarray,   # (num_envs, 4) w,x,y,z
+    obj_pos:    np.ndarray,   # (num_envs, 3)
+    obj_quat:   np.ndarray,   # (num_envs, 4) w,x,y,z
     settle_steps: int,
-    device: str,
-    camera = None,              # rep.Annotator or None
+    camera = None,
     capture_every: int = 4,
 ) -> tuple:
-    """Reset env poses, step physics, return (final_pos, final_quat, frames)."""
-    E = tool_pos.shape[0]
-    zeros3 = torch.zeros(E, 3, device=device)
+    """Reset env poses via USD xform ops, step physics, return final state."""
 
-    tool_state = torch.cat([tool_pos, tool_quat, zeros3, zeros3], dim=-1)
-    tool_obj.write_root_state_to_sim(tool_state)
-    obj_state  = torch.cat([obj_pos,  obj_quat,  zeros3, zeros3], dim=-1)
-    object_obj.write_root_state_to_sim(obj_state)
-    scene.write_data_to_sim()
+    for i in range(num_envs):
+        _set_prim_pose(stage, f"/World/envs/env_{i}/Tool",
+                       tool_pos[i], tool_quat[i], tool_scale)
+        _set_prim_pose(stage, f"/World/envs/env_{i}/Object",
+                       obj_pos[i], obj_quat[i], obj_scale)
 
-    # One step to apply kinematic targets before rendering
-    sim_ctx.step()
-    scene.update(SIM_DT)
-
-    # Readback: verify the tool actually moved from init_state (0,0,1)
-    tool_pos_rb = tool_obj.data.root_pos_w[0].cpu().numpy()
-    obj_pos_rb  = object_obj.data.root_pos_w[0].cpu().numpy()
-    print(f"    [READBACK] tool_pos = {tool_pos_rb}  obj_pos = {obj_pos_rb}")
+    # Readback env 0 for debug
+    t_rb, _ = _get_prim_world_pose(stage, "/World/envs/env_0/Tool")
+    o_rb, _ = _get_prim_world_pose(stage, "/World/envs/env_0/Object")
+    print(f"    [READBACK] tool_pos = {t_rb}  obj_pos = {o_rb}")
 
     frames = []
-    # Capture t=0 frame (after first step) to show initial placement
+    # Capture t=0 frame
     if camera is not None:
         sim_ctx.render()
         rgba = camera.get_data()
         if rgba is not None and rgba.size > 0 and rgba.max() > 0:
             frames.append(rgba[:, :, :3])
+
     for step in range(settle_steps):
         sim_ctx.step()
-        scene.update(SIM_DT)
         if camera is not None and step % capture_every == 0:
-            # Explicitly trigger a render pass so the RTX frame is ready
-            # before reading from the annotator (step() alone is not enough
-            # to guarantee the annotator buffer is populated).
             sim_ctx.render()
-            rgba = camera.get_data()   # numpy (H, W, 4) uint8
+            rgba = camera.get_data()
             if rgba is not None and rgba.size > 0 and rgba.max() > 0:
-                frames.append(rgba[:, :, :3])  # (H, W, 3)
+                frames.append(rgba[:, :, :3])
 
-    pos_final  = object_obj.data.root_pos_w.clone()
-    quat_final = object_obj.data.root_quat_w.clone()
+    # Read final object poses
+    pos_final  = np.zeros((num_envs, 3))
+    quat_final = np.zeros((num_envs, 4))
+    for i in range(num_envs):
+        pos_final[i], quat_final[i] = _get_prim_world_pose(
+            stage, f"/World/envs/env_{i}/Object")
     return pos_final, quat_final, frames
 
 
@@ -307,11 +347,10 @@ def validate_file(pt_path: Path, out_path: Path, args) -> None:
     print(f"  Tool USD  : {tool_usd}  (scale={tool_scale})")
     print(f"  Object USD: {obj_usd}  (scale={obj_scale})")
 
-    sim_ctx, scene, tool_obj, object_obj, cam, scene_env_origins = build_scene(
+    sim_ctx, stage, scene_env_origins, ts, os_, cam = build_scene(
         tool_usd, tool_scale, obj_usd, obj_scale, args.num_envs,
         record_video=getattr(args, "record_video", None),
     )
-    device = sim_ctx.device
     # scene_env_origins: (num_envs, 3) actual XY grid positions from Isaac Lab.
     # The validation loop uses these to correctly position each object/tool
     # relative to its environment, matching the 2D grid Isaac Lab uses.
@@ -385,21 +424,13 @@ def validate_file(pt_path: Path, out_path: Path, args) -> None:
             print(f"    contact-pt distance    = {cp_dist:.6f} m "
                   f"(~0 means surfaces touching in gen data)")
 
-        # To tensors
-        tp = torch.tensor(tool_pos_np,  dtype=torch.float32, device=device)
-        tq = torch.tensor(tool_quat_np, dtype=torch.float32, device=device)
-        op = torch.tensor(obj_pos_np,   dtype=torch.float32, device=device)
-        oq = torch.tensor(obj_quat_batch, dtype=torch.float32, device=device)
-
-        pos_f, quat_f, frames = run_batch(
-            sim_ctx, scene, tool_obj, object_obj,
-            tp, tq, op, oq, args.settle_steps, device,
+        pos_f_np, quat_f_np, frames = run_batch(
+            sim_ctx, stage, args.num_envs, ts, os_,
+            tool_pos_np, tool_quat_np, obj_pos_np, obj_quat_batch,
+            args.settle_steps,
             camera=cam, capture_every=getattr(args, "capture_every", 4),
         )
         all_frames.extend(frames)
-
-        pos_f_np  = pos_f.cpu().numpy()    # (num_envs, 3)
-        quat_f_np = quat_f.cpu().numpy()   # (num_envs, 4)
 
         # ── Contact check ─────────────────────────────────────────────────────
         for i, ci in enumerate(idxs):
@@ -455,10 +486,126 @@ def validate_file(pt_path: Path, out_path: Path, args) -> None:
     print(f"  ✓ Saved  → {out_path}")
 
 
+# ── Canonical test ────────────────────────────────────────────────────────────
+
+def run_canonical_test(pt_path: Path, video_path: str):
+    """Load tool+obj at origin with identity pose — pure visibility test."""
+    data = torch.load(pt_path, map_location="cpu", weights_only=False)
+    tool_scale = float(data["tool_scale"])
+    obj_scale  = float(data["object_scale"])
+    tool_usd, obj_usd = derive_usd_paths(data["tool_mesh_path"], data["object_mesh_path"])
+    print(f"\n[CANONICAL TEST]")
+    print(f"  Tool USD : {tool_usd}  (scale={tool_scale})")
+    print(f"  Obj  USD : {obj_usd}  (scale={obj_scale})")
+
+    sim_cfg = sim_utils.SimulationCfg(dt=SIM_DT, gravity=GRAVITY)
+    sim_ctx = SimulationContext(sim_cfg)
+    sim_ctx.set_camera_view(eye=[0.4, -0.4, 0.35], target=[0, 0, 0.05])
+
+    from pxr import Gf, Sdf, UsdGeom, UsdPhysics, UsdLux, UsdShade
+    stage = sim_utils.get_current_stage()
+
+    # Ground
+    ground = UsdGeom.Mesh.Define(stage, "/World/GroundPlane")
+    e = 5.0
+    ground.CreatePointsAttr().Set([
+        Gf.Vec3f(-e, -e, 0), Gf.Vec3f(e, -e, 0),
+        Gf.Vec3f(e, e, 0),   Gf.Vec3f(-e, e, 0)])
+    ground.CreateFaceVertexCountsAttr().Set([4])
+    ground.CreateFaceVertexIndicesAttr().Set([0, 1, 2, 3])
+    ground.CreateSubdivisionSchemeAttr().Set("none")
+    gnd_mat = UsdShade.Material.Define(stage, "/World/Materials/Ground")
+    gnd_shd = UsdShade.Shader.Define(stage, "/World/Materials/Ground/Shader")
+    gnd_shd.CreateIdAttr("UsdPreviewSurface")
+    gnd_shd.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(
+        Gf.Vec3f(0.78, 0.78, 0.74))
+    gnd_shd.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.65)
+    gnd_mat.CreateSurfaceOutput().ConnectToSource(gnd_shd.ConnectableAPI(), "surface")
+    UsdShade.MaterialBindingAPI.Apply(ground.GetPrim()).Bind(gnd_mat)
+
+    # Lighting
+    dome = UsdLux.DomeLight.Define(stage, "/World/DomeLight")
+    dome.CreateIntensityAttr(800.0)
+    dome.CreateColorAttr((0.95, 0.96, 1.0))
+    sun = UsdLux.DistantLight.Define(stage, "/World/KeyLight")
+    sun.CreateIntensityAttr(2200.0)
+    sun.CreateAngleAttr(0.45)
+    UsdGeom.Xformable(sun.GetPrim()).AddRotateXYZOp().Set(
+        Gf.Vec3f(-45.0, 0.0, 35.0))
+
+    # Tool at origin — NO physics, just visual
+    tool_prim = UsdGeom.Xform.Define(stage, "/World/CanonicalTool").GetPrim()
+    tool_prim.GetReferences().AddReference(tool_usd)
+    txf = UsdGeom.Xformable(tool_prim)
+    txf.ClearXformOpOrder()
+    txf.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(0, 0, 0))
+    txf.AddScaleOp(UsdGeom.XformOp.PrecisionDouble).Set(
+        Gf.Vec3d(tool_scale, tool_scale, tool_scale))
+
+    # Object slightly offset — NO physics, just visual
+    obj_prim = UsdGeom.Xform.Define(stage, "/World/CanonicalObject").GetPrim()
+    obj_prim.GetReferences().AddReference(obj_usd)
+    oxf = UsdGeom.Xformable(obj_prim)
+    oxf.ClearXformOpOrder()
+    oxf.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(0.15, 0, 0))
+    oxf.AddScaleOp(UsdGeom.XformOp.PrecisionDouble).Set(
+        Gf.Vec3d(obj_scale, obj_scale, obj_scale))
+
+    sim_ctx.reset()
+
+    # Print prim tree
+    for name, p in [("Tool", tool_prim), ("Object", obj_prim)]:
+        print(f"\n  Prim tree ({name}):")
+        def _walk(prim, depth=0):
+            print(f"    {'  '*depth}{prim.GetPath()}  type={prim.GetTypeName()}")
+            for c in prim.GetChildren():
+                _walk(c, depth+1)
+        _walk(p)
+
+    # Camera
+    import omni.replicator.core as rep
+    rep_cam = rep.create.camera(
+        position=(0.35, -0.35, 0.25),
+        look_at=(0.05, 0.0, 0.05),
+        focal_length=24.0,
+        clipping_range=(0.01, 100.0))
+    render_prod = rep.create.render_product(rep_cam, (1280, 720))
+    annotator = rep.AnnotatorRegistry.get_annotator("rgb")
+    annotator.attach(render_prod)
+
+    # Warm up + capture
+    for _ in range(10):
+        sim_ctx.render()
+
+    frames = []
+    for _ in range(60):
+        sim_ctx.render()
+        rgba = annotator.get_data()
+        if rgba is not None and rgba.size > 0 and rgba.max() > 0:
+            frames.append(rgba[:, :, :3])
+
+    if frames:
+        Path(video_path).parent.mkdir(parents=True, exist_ok=True)
+        imageio.mimwrite(video_path, frames, fps=30, quality=8)
+        print(f"\n✓ Canonical test video → {video_path}  ({len(frames)} frames)")
+    else:
+        print("\n⚠ No frames captured!")
+
+    import os; os._exit(0)
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main():
     # args already parsed at module level (before AppLauncher bootstrap)
+
+    # Canonical test mode — just load assets and render, no physics
+    if args.test_canonical:
+        pt_path = Path(args.input[0])
+        vid = args.record_video or "canonical_test.mp4"
+        run_canonical_test(pt_path, vid)
+        return  # won't reach here (os._exit in run_canonical_test)
+
     out_root = Path(args.output)
 
     for pt_path_str in args.input:
