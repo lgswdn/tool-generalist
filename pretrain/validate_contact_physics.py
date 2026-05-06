@@ -59,6 +59,16 @@ from isaaclab.utils.configclass import configclass
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
 from isaaclab.terrains import TerrainImporterCfg
 
+# ── Patch: Isaac Sim installations sometimes lack rendering preset .kit files
+#    (e.g. balanced.kit).  Since we run headless physics-only, skip silently.
+_orig_render_cfg = SimulationContext._apply_render_settings_from_cfg
+def _safe_render_cfg(self):
+    try:
+        _orig_render_cfg(self)
+    except (FileNotFoundError, OSError):
+        pass  # no rendering preset available; physics still works fine
+SimulationContext._apply_render_settings_from_cfg = _safe_render_cfg
+
 # ── Constants ────────────────────────────────────────────────────────────────
 
 ENV_SPACING = 2.0          # metres between env origins (must exceed object size)
