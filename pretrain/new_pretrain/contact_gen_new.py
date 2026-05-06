@@ -28,10 +28,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Tuple
 
-import numpy as np
 import torch
 import torch.nn.functional as F
-import trimesh
 
 # Kaolin: used only for final per-config SDF outputs (GPU-accelerated mesh queries)
 import kaolin
@@ -79,7 +77,6 @@ class Config:
 
     # ── Head-area bias (tool contact point sampling) ───────────────────────
     contact_mode_prob: float = CONTACT_GEN.contact_mode_prob   # 0.7 → 70% head
-    obj_contact_z_min: float = CONTACT_GEN.obj_contact_z_min   # 0.0 → z > 0
 
     # ── Kept from CONTACT_GEN for compat (not used by sampler) ────────────
     pen_max_eps: float = CONTACT_GEN.pen_max_eps
@@ -227,61 +224,70 @@ def randomise_object_pose(
 
 
 # ==============================================================================
-#              SDF GRID CONSTRUCTION  (once per object, CPU trimesh)
+#              SDF GRID CONSTRUCTION  (GPU — Kaolin batched distance)
 # ==============================================================================
 
+@torch.no_grad()
 def build_sdf_grid(
-    obj_verts: torch.Tensor,   # (V, 3) scaled + grounded, world frame
-    obj_faces: torch.Tensor,   # (F, 3)
-    grid_res:  int = 128,
+    obj_verts: torch.Tensor,   # (V, 3) scaled + grounded, world frame, on device
+    obj_faces: torch.Tensor,   # (F, 3) int64, on device
+    grid_res:  int   = 128,
     padding:   float = 0.05,
-    device:    str  = "cuda:0",
+    device:    str   = "cuda:0",
+    chunk:     int   = 65536,  # grid pts per Kaolin call (64k → ~1.5 GB VRAM)
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Build a grid_res³ voxel SDF of the grounded object mesh.
+    """Build a grid_res³ voxel SDF entirely on GPU using Kaolin.
 
-    Uses trimesh BVH (ProximityQuery) on CPU, batched over 128k pts at a time
-    to keep RAM manageable.  Returns tensors on *device*.
-
-    SDF sign convention: positive = outside, negative = inside (same as Kaolin).
+    Replaces the CPU trimesh BVH approach (~30-60 s) with batched GPU queries
+    (~1-3 s on L40).  Same sign convention: positive = outside, negative = inside.
 
     Returns:
         sdf_grid : (1, 1, R, R, R) float32 on device  — axes: [D=z, H=y, W=x]
-        bbox_min : (3,) float32 on device
-        bbox_max : (3,) float32 on device
+        bbox_min : (3,) float32
+        bbox_max : (3,) float32
     """
-    verts_np = obj_verts.cpu().float().numpy()
-    faces_np = obj_faces.cpu().numpy()
-
-    bbox_min_np = verts_np.min(axis=0) - padding
-    bbox_max_np = verts_np.max(axis=0) + padding
-
     R = grid_res
-    # Grid over x, y, z independently — indexing='ij' → sdf_np[ix, iy, iz]
-    xs = np.linspace(bbox_min_np[0], bbox_max_np[0], R)
-    ys = np.linspace(bbox_min_np[1], bbox_max_np[1], R)
-    zs = np.linspace(bbox_min_np[2], bbox_max_np[2], R)
-    xg, yg, zg = np.meshgrid(xs, ys, zs, indexing="ij")      # (R,R,R) each
-    pts = np.stack([xg, yg, zg], axis=-1).reshape(-1, 3)      # (R³, 3)
+    bbox_min = obj_verts.min(dim=0).values - padding   # (3,) on device
+    bbox_max = obj_verts.max(dim=0).values + padding   # (3,) on device
 
-    # Build BVH once, then query in batches of 128k to bound RAM
-    mesh_tri = trimesh.Trimesh(vertices=verts_np, faces=faces_np, process=False)
-    query    = trimesh.proximity.ProximityQuery(mesh_tri)
+    # Build R³ query grid on GPU
+    xs = torch.linspace(bbox_min[0].item(), bbox_max[0].item(), R, device=device)
+    ys = torch.linspace(bbox_min[1].item(), bbox_max[1].item(), R, device=device)
+    zs = torch.linspace(bbox_min[2].item(), bbox_max[2].item(), R, device=device)
+    xg, yg, zg = torch.meshgrid(xs, ys, zs, indexing="ij")   # (R,R,R) each
+    pts = torch.stack([xg, yg, zg], dim=-1).reshape(-1, 3)    # (R³, 3)
+    N_pts = pts.shape[0]
 
-    BATCH = 131072   # 128k points per CPU batch
-    sdf_vals = np.empty(pts.shape[0], dtype=np.float32)
-    for start in range(0, pts.shape[0], BATCH):
-        end = min(start + BATCH, pts.shape[0])
-        # trimesh: positive = INSIDE  →  negate for our convention (+outside)
-        sdf_vals[start:end] = -query.signed_distance(pts[start:end]).astype(np.float32)
+    # Pre-expand face_verts once — reused with batch=1 across chunks
+    face_verts_1 = kaolin.ops.mesh.index_vertices_by_faces(
+        obj_verts.unsqueeze(0), obj_faces   # (1, V, 3) → (1, F, 3, 3)
+    )
 
-    # sdf_np[ix, iy, iz]  →  stored as tensor[0,0, iz, iy, ix]  i.e. [D,H,W]
-    sdf_np   = sdf_vals.reshape(R, R, R)          # [x, y, z]
-    sdf_dhw  = sdf_np.transpose(2, 1, 0)          # [z, y, x] = [D, H, W]
-    sdf_grid = torch.tensor(sdf_dhw, dtype=torch.float32, device=device)
-    sdf_grid = sdf_grid.unsqueeze(0).unsqueeze(0)  # (1, 1, D, H, W)
+    dist_vals   = torch.empty(N_pts, dtype=torch.float32, device=device)
+    inside_vals = torch.empty(N_pts, dtype=torch.bool,    device=device)
 
-    bbox_min = torch.tensor(bbox_min_np, dtype=torch.float32, device=device)
-    bbox_max = torch.tensor(bbox_max_np, dtype=torch.float32, device=device)
+    for s in range(0, N_pts, chunk):
+        e      = min(s + chunk, N_pts)
+        q_pts  = pts[s:e].unsqueeze(0)                          # (1, n, 3)
+
+        # Unsigned distance
+        sq_dist, _, _ = kaolin.metrics.trianglemesh.point_to_mesh_distance(
+            q_pts.contiguous(), face_verts_1
+        )                                                        # (1, n)
+        dist_vals[s:e] = sq_dist.squeeze(0).clamp(min=0).sqrt()
+
+        # Sign: True = inside mesh
+        inside_vals[s:e] = kaolin.ops.mesh.check_sign(
+            obj_verts.unsqueeze(0), obj_faces, q_pts
+        ).squeeze(0)                                             # (n,) bool
+
+    # Signed SDF: negative inside, positive outside
+    sdf_vals = torch.where(inside_vals, -dist_vals, dist_vals)  # (R³,)
+
+    # Reshape: xyz order → permute to [z,y,x] = [D,H,W] for grid_sample
+    sdf_dhw  = sdf_vals.reshape(R, R, R).permute(2, 1, 0)       # (D, H, W)
+    sdf_grid = sdf_dhw.unsqueeze(0).unsqueeze(0)                 # (1, 1, D, H, W)
+
     return sdf_grid, bbox_min, bbox_max
 
 
@@ -370,14 +376,8 @@ def rejection_sample(
 
     R_cands = _sample_upright_rotations(M)   # (M, 3, 3)
 
-    # ── Pre-compute head/body split indices and z>0 obj anchors ──────────────
+    # ── Pre-compute head/body flag ────────────────────────────────────────────
     use_head = (P_head is not None) and (P_body is not None)
-    # Filter obj surface pts to z > obj_contact_z_min (z>0 on grounded object)
-    z_min_thr = cfg.obj_contact_z_min
-    obj_surf_z_ok = obj_surf[obj_surf[:, 2] > z_min_thr]
-    if obj_surf_z_ok.shape[0] < 10:
-        print("  ⚠ Too few obj pts with z>0; using all obj surf pts.")
-        obj_surf_z_ok = obj_surf
 
     R_list, t_list = [], []
     n_total_pairs  = 0
@@ -396,9 +396,9 @@ def rejection_sample(
         else:
             idx_tool_pts = P_tool[torch.randint(K, (cb,), device=device)]    # (cb, 3)
 
-        idx_obj  = torch.randint(obj_surf_z_ok.shape[0], (cb,), device=device)
-        p_B = idx_tool_pts           # (cb, 3)  tool contact pt (canonical frame)
-        p_A = obj_surf_z_ok[idx_obj] # (cb, 3)  obj contact pt  (world frame, z>0)
+        idx_obj  = torch.randint(obj_surf.shape[0], (cb,), device=device)
+        p_B = idx_tool_pts      # (cb, 3)  tool contact pt (canonical frame)
+        p_A = obj_surf[idx_obj] # (cb, 3)  obj contact pt  (world frame)
 
         # Step 2: shift tool cloud so p_B → origin  →  (cb, K, 3)
         tool_shifted = P_tool.unsqueeze(0) - p_B.unsqueeze(1)   # (cb, K, 3)

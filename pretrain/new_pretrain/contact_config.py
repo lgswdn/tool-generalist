@@ -36,12 +36,6 @@ class ContactGenHyperparams:
     epsilon:           float = 2e-3     # penetration tolerance (metres).
     floor_eps:         float = 1e-3     # min world-z allowed for any tool point
 
-    # ── Head-area bias (tool contact point sampling) ───────────────────────────
-    contact_mode_prob: float = 0.7      # fraction of tool contact pts from head region
-                                        # (same as original contact_gen.py)
-    # obj contact point z threshold
-    obj_contact_z_min: float = 0.0      # only sample obj contact pts with z > this
-
     # ── Convergence thresholds (kept for output compat with old pipeline) ──────
     pen_max_eps: float = 3e-4
     contact_eps: float = 8e-3

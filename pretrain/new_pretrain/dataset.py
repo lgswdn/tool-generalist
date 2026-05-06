@@ -128,7 +128,7 @@ class NewPretrainDataset(Dataset):
             "stored_obj_sdf":  obj_sdf.float(),         # (Q,)
             # ── Mesh pose/scale — needed to correctly reconstruct meshes for
             # on-the-fly SDF at noised poses.  All are per-file constants.
-            "tool_scale":        torch.tensor(float(data.get("tool_scale",   1.0))),
+            "tool_scale":        torch.tensor(float(data.get("tool_scale",   0.1))),  # 0.1 = contact_config default
             "tool_centroid_raw": tool_centroid.float(),  # (3,) exact surface centroid
             "object_scale":      torch.tensor(float(data.get("object_scale", 1.0))),
             "obj_R":        data.get("_object_rotation",
