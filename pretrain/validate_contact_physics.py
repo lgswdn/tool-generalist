@@ -32,9 +32,14 @@ pairs require different USD assets in the scene).
 # ── Isaac Sim MUST be launched before any omni/isaacsim imports ─────────────
 import sys
 from isaacsim import SimulationApp
-# Pre-parse --record-video so we can pass enable_cameras before full argparse
-_record_video = next((sys.argv[i+1] for i, a in enumerate(sys.argv)
-                      if a == "--record-video" and i+1 < len(sys.argv)), None)
+# Pre-parse --record-video so we can pass enable_cameras before full argparse.
+# Handle both  --record-video path.mp4  and  --record-video=path.mp4  forms.
+_record_video = None
+for _i, _a in enumerate(sys.argv):
+    if _a.startswith("--record-video="):
+        _record_video = _a.split("=", 1)[1]; break
+    if _a == "--record-video" and _i + 1 < len(sys.argv):
+        _record_video = sys.argv[_i + 1]; break
 _app_cfg = {"headless": True, "anti_aliasing": 0}
 if _record_video:
     _app_cfg["enable_cameras"] = True
@@ -140,42 +145,44 @@ def build_scene(
     UsdPhysics.CollisionAPI.Apply(plane.GetPrim())   # enable physics collision
 
 
-    # ── Scene (rigid bodies only, no terrain) ─────────────────────────────────
-    @configclass
-    class SceneCfg(InteractiveSceneCfg):
-        # Kinematic tool — gravity disabled, does not move
-        tool = RigidObjectCfg(
-            prim_path="{ENV_REGEX_NS}/Tool",
-            spawn=sim_utils.UsdFileCfg(
-                usd_path=tool_usd,
-                scale=(tool_scale, tool_scale, tool_scale),
-                rigid_props=RigidBodyPropertiesCfg(
-                    disable_gravity=True,
-                    kinematic_enabled=True,
-                ),
+    # ── Scene ─────────────────────────────────────────────────────────────────
+    # Two explicit configclasses avoid the fragile `if` inside @configclass
+    # (the conditional camera field was leaking into the dataclass registry).
+    _tool_cfg = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/Tool",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=tool_usd,
+            scale=(tool_scale, tool_scale, tool_scale),
+            rigid_props=RigidBodyPropertiesCfg(
+                disable_gravity=True,
+                kinematic_enabled=True,
             ),
-            init_state=RigidObjectCfg.InitialStateCfg(pos=(0, 0, 1)),
-        )
-        # Dynamic object — gravity on
-        object = RigidObjectCfg(
-            prim_path="{ENV_REGEX_NS}/Object",
-            spawn=sim_utils.UsdFileCfg(
-                usd_path=obj_usd,
-                scale=(obj_scale, obj_scale, obj_scale),
-                rigid_props=RigidBodyPropertiesCfg(
-                    disable_gravity=False,
-                    solver_position_iteration_count=16,
-                    solver_velocity_iteration_count=1,
-                    max_depenetration_velocity=5.0,
-                ),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0, 0, 1)),
+    )
+    _obj_cfg = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/Object",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=obj_usd,
+            scale=(obj_scale, obj_scale, obj_scale),
+            rigid_props=RigidBodyPropertiesCfg(
+                disable_gravity=False,
+                solver_position_iteration_count=16,
+                solver_velocity_iteration_count=1,
+                max_depenetration_velocity=5.0,
             ),
-            init_state=RigidObjectCfg.InitialStateCfg(pos=(0, 0, 0.1)),
-        )
-        # Optional camera watching env 0 (prim_path NOT in ENV_REGEX_NS)
-        if record_video:
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0, 0, 0.1)),
+    )
+
+    if record_video:
+        @configclass
+        class SceneCfg(InteractiveSceneCfg):
+            tool   = _tool_cfg
+            object = _obj_cfg
             camera = CameraCfg(
                 prim_path="/World/RecordCam",
-                update_period=0,       # update every physics step
+                update_period=0,
                 height=720,
                 width=1280,
                 data_types=["rgb"],
@@ -187,13 +194,25 @@ def build_scene(
                 ),
                 offset=CameraCfg.OffsetCfg(
                     pos=(0.6, -0.6, 0.6),
-                    rot=(0.693, 0.430, -0.430, -0.360),  # look roughly toward (0,0,0)
+                    rot=(0.693, 0.430, -0.430, -0.360),
                     convention="world",
                 ),
             )
+    else:
+        @configclass
+        class SceneCfg(InteractiveSceneCfg):  # type: ignore[no-redef]
+            tool   = _tool_cfg
+            object = _obj_cfg
 
     scene_cfg = SceneCfg(num_envs=num_envs, env_spacing=ENV_SPACING)
     scene    = InteractiveScene(scene_cfg)
+
+    # Camera._initialize_impl() checks the carb setting "/isaaclab/cameras_enabled",
+    # NOT SimulationApp's enable_cameras key.  Set it explicitly here so the camera
+    # doesn't raise "spawned without --enable_cameras flag" on sim_ctx.reset().
+    if record_video:
+        import carb as _carb
+        _carb.settings.get_settings().set_bool("/isaaclab/cameras_enabled", True)
 
     sim_ctx.reset()
     scene.reset()
