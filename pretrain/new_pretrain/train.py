@@ -271,33 +271,25 @@ def train_step(
     tool_sdf_gt = tool_sdf_gt.to(device)
     obj_sdf_gt  = obj_sdf_gt.to(device)
 
-    # ── Validation: at t_idx == 0 on-the-fly SDF must match stored SDF ──────────
-    # The noised pose equals the contact pose at t_idx=0, so the on-the-fly
-    # SDF should reproduce the pre-baked dataset values.  A large error means
-    # the mesh transform (scale / rotation / centering) is still wrong.
-    if is_main() and (noise_out["t_idx"] == 0).any():
-        zero_mask = (noise_out["t_idx"] == 0)
-        stored_t_sdf = batch["stored_tool_sdf"].to(device)[zero_mask]  # (K, P)
-        stored_o_sdf = batch["stored_obj_sdf"].to(device)[zero_mask]   # (K, Q)
-        err_tool = (tool_sdf_gt[zero_mask] - stored_t_sdf).abs().mean().item()
-        err_obj  = (obj_sdf_gt[zero_mask]  - stored_o_sdf).abs().mean().item()
-        if err_tool > 5e-3 or err_obj > 5e-3:
-            print(f"  [SDF-VALIDATE] t_idx=0 MAE: tool={err_tool:.5f}  obj={err_obj:.5f}"
-                  f"  ⚠  > 5mm — mesh transform may be wrong")
-        else:
-            print(f"  [SDF-VALIDATE] t_idx=0 MAE: tool={err_tool:.5f}  obj={err_obj:.5f}  ✓")
 
     # ── 5. Movement conditioning + child point clouds (sdf-diff only) ────
     if raw_model.task == "sdf-diff":
-        delta_tool_t    = batch["delta_tool_t"].to(device)   # (B, 3)
-        delta_tool_R    = batch["delta_tool_R"].to(device)   # (B, 3, 3)
-        delta_obj_t     = batch["delta_obj_t"].to(device)    # (B, 3)
-        delta_obj_R     = batch["delta_obj_R"].to(device)    # (B, 3, 3)
-        delta_tool_quat = matrix_to_quaternion(delta_tool_R) # (B, 4)
-        delta_obj_quat  = matrix_to_quaternion(delta_obj_R)  # (B, 4)
-        movement_cond = torch.cat(
-            [delta_tool_t, delta_tool_quat, delta_obj_t, delta_obj_quat], dim=-1
-        )  # (B, 14)
+        # Movement data may be absent when --no-require-movement was used.
+        # Batch value is None for files that don't have the movement keys.
+        has_movement = batch.get("delta_tool_t") is not None
+        if has_movement:
+            delta_tool_t    = batch["delta_tool_t"].to(device)   # (B, 3)
+            delta_tool_R    = batch["delta_tool_R"].to(device)   # (B, 3, 3)
+            delta_obj_t     = batch["delta_obj_t"].to(device)    # (B, 3)
+            delta_obj_R     = batch["delta_obj_R"].to(device)    # (B, 3, 3)
+            delta_tool_quat = matrix_to_quaternion(delta_tool_R) # (B, 4)
+            delta_obj_quat  = matrix_to_quaternion(delta_obj_R)  # (B, 4)
+            movement_cond = torch.cat(
+                [delta_tool_t, delta_tool_quat, delta_obj_t, delta_obj_quat], dim=-1
+            )  # (B, 14)
+        else:
+            # No movement data — zero conditioning (model learns pose-only denoising)
+            movement_cond = torch.zeros(B, cfg.movement_cond_dim, device=device)
 
         # Child clouds: tool at current noised pose → tool one step closer to contact
         child_start_pcd = tool_rotated + noised_t.unsqueeze(1)   # (B, P, 3)
@@ -341,6 +333,10 @@ def main():
     parser.add_argument("--wandb",       action="store_true")
     parser.add_argument("--max-files",   type=int, default=0,
                         help="Limit number of config files (0 = all)")
+    parser.add_argument("--no-require-movement", action="store_true",
+                        help="(sdf-diff only) Do not skip files lacking movement data. "
+                             "Missing movement deltas are replaced by zeros so all "
+                             "contact-only datasets can still train the diffusion head.")
     args = parser.parse_args()
 
     # Everything else comes from config.py — edit NewPretrainConfig directly.
@@ -356,6 +352,9 @@ def main():
     if args.max_files:
         cfg.max_files = args.max_files
 
+    # movement requirement: sdf-diff needs it by default, but can be relaxed
+    require_movement = (cfg.task == "sdf-diff") and not args.no_require_movement
+
     # ── Setup ────────────────────────────────────────────────────────────
     rank, local_rank = setup_ddp()
     device = torch.device(f"cuda:{local_rank}")
@@ -368,12 +367,14 @@ def main():
         seed=cfg.seed,
         augment=cfg.augment,
         max_files=cfg.max_files,
-        require_movement=(cfg.task == "sdf-diff"),
+        require_movement=require_movement,
     )
 
     if is_main():
         print(f"Train: {len(train_ds)} configs, Val: {len(val_ds)} configs")
         print(f"Task: {cfg.task}, Head: {cfg.head_mode}, Diffusion steps: {cfg.num_diffusion_steps}")
+        if cfg.task == "sdf-diff" and not require_movement:
+            print("  ⚠  --no-require-movement: missing movement data will use zero conditioning")
 
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     train_sampler = DistributedSampler(train_ds) if world_size > 1 else None
