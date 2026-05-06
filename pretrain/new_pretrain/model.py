@@ -273,14 +273,16 @@ class ContactDiffusionModel(nn.Module):
 
     Architecture:
       1. encoder: SDFPointCloudEncoder
-           - Tool input:   tool_canonical @ noised_R.T  (centered, rotation applied)
-           - Object input: obj_pc                       (centered at origin)
-      2. pose_cross_attn: PoseCrossAttention
-           - pose_6d:      [noised_t(3), obj_centroid(3)]  (world-frame translations)
-           - movement_cond:[delta_tool_t(3), delta_tool_quat(4),
-                            delta_obj_t(3), delta_obj_quat(4)]
-      3. SDF heads: predict per-point/per-patch SDF from conditioned tokens
-      4. denoising_head: separate mean-pool of tool/object tokens → (2D) → MLP
+           - Tool input:  tool_rotated  (canonical pts rotated to current/noised pose)
+           - Object input: obj_pc       (centered at origin)
+      2. pose_cross_attn: PoseCrossAttention — run once per head:
+           - SDF pass:      (pose_3d, timestep, zeros_movement)
+           - Denoise pass:  (pose_3d, timestep, movement_cond)  [sdf-diff only]
+      3. SDF heads: per-point/per-patch SDF from SDF-conditioned tokens
+      4. denoising_head: separately pooled tool+object tokens → MLP  [sdf-diff only]
+
+    Both heads receive the SAME pose_3d = noised_tool_centroid - obj_centroid.
+    The ONLY difference is movement_cond: zeros for SDF, real deltas for denoising.
     """
 
     def __init__(
@@ -350,17 +352,19 @@ class ContactDiffusionModel(nn.Module):
             self.tool_sdf_head = _make_mlp((D,) + head_hidden + (1,))
             self.obj_sdf_head = _make_mlp((D,) + head_hidden + (1,))
 
-        # ── Pose conditioning (cross-attention) ──────────────────────────
-        if task == "sdf-diff":
-            self.pose_cross_attn = PoseCrossAttention(
-                token_dim=D,
-                pose_dim=pose_dim,
-                movement_cond_dim=movement_cond_dim,
-                n_heads=cross_attn_heads,
-                n_layers=cross_attn_layers,
-                max_timestep=num_diffusion_steps + 1,
-            )
+        # ── Pose conditioning (cross-attention) ─────────────────────────
+        # Built for BOTH tasks: sdf-only needs it to inject translation so
+        # the SDF head knows where the tool is relative to the object.
+        self.pose_cross_attn = PoseCrossAttention(
+            token_dim=D,
+            pose_dim=pose_dim,
+            movement_cond_dim=movement_cond_dim,
+            n_heads=cross_attn_heads,
+            n_layers=cross_attn_layers,
+            max_timestep=num_diffusion_steps + 1,
+        )
 
+        if task == "sdf-diff":
             # ── Denoising head (RPDiff-style) ────────────────────────────
             # Input: separately pooled tool tokens + object tokens concatenated (2*D)
             self.denoising_head = DenoisingHead(
@@ -425,48 +429,54 @@ class ContactDiffusionModel(nn.Module):
 
     def loss(
         self,
-        tool_canonical: torch.Tensor,     # (B, P, 3) rotated tool, centered at origin
+        tool_rotated: torch.Tensor,       # (B, P, 3) tool at current pose, centered
         obj_pc: torch.Tensor,             # (B, Q, 3) object centered at origin
-        tool_sdf_gt: torch.Tensor,        # (B, P) signed SDF at current pose
-        obj_sdf_gt: torch.Tensor,         # (B, Q) signed SDF at current pose
-        # Diffusion inputs (only used when task="sdf-diff")
-        noised_pose_7d: torch.Tensor = None,    # (B, 6) [noised_t(3), obj_centroid(3)]
+        tool_sdf_gt: torch.Tensor,        # (B, P) signed SDF at actual current pose
+        obj_sdf_gt: torch.Tensor,         # (B, Q) signed SDF at actual current pose
+        # Pose conditioning — same for BOTH heads
+        pose_3d: torch.Tensor = None,           # (B, 3) noised_t - obj_centroid
         timestep: torch.Tensor = None,          # (B,) int
-        movement_cond: torch.Tensor = None,     # (B, 14) [delta_tool_t/quat, delta_obj_t/quat]
-        target_trans: torch.Tensor = None,      # (B, 3) denoising target: translation
-        target_rot_mat: torch.Tensor = None,    # (B, 3, 3) denoising target: rotation
-        child_start_pcd: torch.Tensor = None,   # (B, Q_child, 3) tool at noised pose
-        child_final_pcd: torch.Tensor = None,   # (B, Q_child, 3) tool at previous pose
+        movement_cond: torch.Tensor = None,     # (B, 14) zeros for SDF, real for denoising
+        # Denoising targets (only used when task="sdf-diff")
+        target_trans: torch.Tensor = None,      # (B, 3)
+        target_rot_mat: torch.Tensor = None,    # (B, 3, 3)
+        child_start_pcd: torch.Tensor = None,   # (B, P, 3) tool at current pose
+        child_final_pcd: torch.Tensor = None,   # (B, P, 3) tool one step closer to contact
         encoder_result=None,
-    ) -> Tuple[torch.Tensor, dict]:
+    ) -> tuple[torch.Tensor, dict]:
         """Compute joint SDF + denoising loss.
 
-        For sdf-diff: cross-attention conditions tokens with pose + movement, then
-        SDF and denoising heads operate on the conditioned tokens.
-        For sdf-only: SDF directly from unconditioned tokens (no cross-attention).
+        pose_3d:       noised_tool_centroid - obj_centroid.  Used by BOTH the SDF cross-
+                       attn (with zeros movement) and the denoising cross-attn (with real
+                       movement_cond).  A single consistent pose signal for all heads.
+        movement_cond: zeros → SDF head (pose-only).  Real deltas → denoising head.
+                       For the 'sdf' task, pass zeros; the second cross-attn call is skipped.
         """
         metrics = {}
 
-        # ── 1. Encode (canonical tool + object) ─────────────────────────
+        # ── 1. Encode (tool at current pose, object centered) ─────────────────
         if encoder_result is None:
-            encoder_result = self.encoder.encode(tool_canonical, obj_pc)
-        P = self.num_patches
-        tool_tok, obj_tok = _split_tokens(encoder_result, P)
+            encoder_result = self.encoder.encode(tool_rotated, obj_pc)
+        fused = encoder_result.fused_tokens   # (B, 2P, D)
 
-        # ── 2. Optionally apply pose cross-attention ─────────────────────
-        if self.task == "sdf-diff" and noised_pose_7d is not None:
-            fused = encoder_result.fused_tokens  # (B, 2P, D)
-            fused_conditioned = self.pose_cross_attn(fused, noised_pose_7d, timestep, movement_cond)
-            tool_tok_cond = fused_conditioned[:, :P, :]
-            obj_tok_cond = fused_conditioned[:, P:, :]
+        # ── 2. Cross-attention ──────────────────────────────────────────────
+        # SDF pass: pose_3d + zeros movement (pose-only conditioning)
+        zeros_movement = torch.zeros_like(movement_cond)
+        fused_sdf = self.pose_cross_attn(fused, pose_3d, timestep, zeros_movement)
+        P = self.num_patches
+        tool_tok_cond = fused_sdf[:, :P, :]
+        obj_tok_cond  = fused_sdf[:, P:, :]
+
+        # Denoising pass (sdf-diff only): same pose_3d + real movement_cond
+        if self.task == "sdf-diff" and target_trans is not None:
+            fused_diff = self.pose_cross_attn(fused, pose_3d, timestep, movement_cond)
         else:
-            tool_tok_cond = tool_tok
-            obj_tok_cond = obj_tok
+            fused_diff = None
 
         # ── 3. SDF loss ──────────────────────────────────────────────────
         if self.head_mode == "point":
             tool_sdf_pred = self._predict_point_sdf(
-                tool_canonical, tool_tok_cond,
+                tool_rotated, tool_tok_cond,
                 encoder_result.tool_patch_idx,
                 encoder_result.tool_patch_centers,
                 self.tool_sdf_head,
@@ -497,14 +507,11 @@ class ContactDiffusionModel(nn.Module):
         total_loss = sdf_loss
 
         # ── 4. Denoising loss (only for sdf-diff) ────────────────────────
-        if (self.task == "sdf-diff"
-                and noised_pose_7d is not None
-                and target_trans is not None):
+        if self.task == "sdf-diff" and target_trans is not None:
 
-            # Separately pool tool and object conditioned tokens → (B, 2*D)
-            # Preserves tool vs. object geometry distinction (critical for pose prediction).
-            tool_cond = fused_conditioned[:, :P, :]   # (B, P, D)
-            obj_cond  = fused_conditioned[:, P:, :]   # (B, P, D)
+            # Separately pool tool and object tokens from the denoising pass
+            tool_cond = fused_diff[:, :P, :]   # (B, P, D)
+            obj_cond  = fused_diff[:, P:, :]   # (B, P, D)
             pooled = torch.cat([
                 tool_cond.mean(dim=1),   # (B, D)
                 obj_cond.mean(dim=1),    # (B, D)

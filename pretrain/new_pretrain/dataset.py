@@ -119,8 +119,9 @@ class NewPretrainDataset(Dataset):
             "obj_centroid":   obj_centroid.float(),    # (3,)   world-frame centroid
             "contact_R":      contact_R.float(),       # (3, 3)
             "contact_t":      contact_t.float(),       # (3,)   world frame centroid pos
-            "tool_sdf":       tool_sdf.float(),        # (P,)   signed
-            "obj_sdf":        obj_sdf.float(),         # (Q,)   signed
+            # Mesh paths — needed for on-the-fly SDF at noised poses
+            "tool_mesh_path": data.get("tool_mesh_path", ""),    # str
+            "obj_mesh_path":  data.get("object_mesh_path", ""),  # str
             "pt_path":        pt_path,                 # str
         }
 

@@ -301,36 +301,55 @@ def _point_mesh_signed_sdf(points: torch.Tensor, verts: torch.Tensor, faces: tor
 
 
 def compute_on_the_fly_sdf(
-    tool_canonical: torch.Tensor,  # (B, P, 3)
-    obj_pc: torch.Tensor,          # (B, Q, 3)
-    noised_R: torch.Tensor,        # (B, 3, 3)
-    noised_t: torch.Tensor,        # (B, 3)
+    tool_canonical: torch.Tensor,  # (B, P, 3) centered (centroid at origin)
+    obj_pc: torch.Tensor,          # (B, Q, 3) centered (obj_centroid subtracted)
+    noised_R: torch.Tensor,        # (B, 3, 3) tool rotation at current pose
+    noised_t: torch.Tensor,        # (B, 3)   tool centroid world position
     tool_verts: list[torch.Tensor],
     tool_faces: list[torch.Tensor],
     obj_verts: list[torch.Tensor],
     obj_faces: list[torch.Tensor],
+    obj_centroid: torch.Tensor = None,  # (B, 3) obj centroid in world frame; None = zeros
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute signed mutual SDF using point-to-mesh distance.
+    """Compute signed mutual SDF at the actual (noised) tool pose.
+
+    Args:
+        tool_canonical: tool surface points in canonical frame (centroid at origin).
+        obj_pc:         object surface points, centered (world = obj_pc + obj_centroid).
+        noised_R:       tool rotation at current pose.
+        noised_t:       tool centroid world position at current pose.
+        obj_centroid:   object centroid in world frame. Required to correctly reconstruct
+                        world-frame object positions before transforming to tool frame.
+                        If None, obj_pc is treated as world-frame (legacy / wrong if != 0).
 
     Returns:
-        tool_sdf: (B, P) signed distance from each tool point to object mesh.
-        obj_sdf:  (B, Q) signed distance from each object point to tool mesh.
+        tool_sdf: (B, P) signed distance from each (world-frame) tool point to obj mesh.
+        obj_sdf:  (B, Q) signed distance from each obj point (in tool canonical frame) to tool mesh.
     """
+    B = tool_canonical.shape[0]
+    dev = tool_canonical.device
+    # Tool points in world frame: p_world = tool_canonical @ R.T + noised_t
     tool_world = torch.bmm(tool_canonical, noised_R.transpose(1, 2)) + noised_t.unsqueeze(1)
-    tool_sdfs = []
-    obj_sdfs = []
-    for i in range(tool_canonical.shape[0]):
-        obj_v = obj_verts[i].to(device=tool_canonical.device, dtype=tool_canonical.dtype)
-        obj_f = obj_faces[i].to(device=tool_canonical.device)
-        tool_v = tool_verts[i].to(device=tool_canonical.device, dtype=tool_canonical.dtype)
-        tool_f = tool_faces[i].to(device=tool_canonical.device)
 
+    tool_sdfs = []
+    obj_sdfs  = []
+    for i in range(B):
+        obj_v  = obj_verts[i].to(device=dev, dtype=tool_canonical.dtype)
+        obj_f  = obj_faces[i].to(device=dev)
+        tool_v = tool_verts[i].to(device=dev, dtype=tool_canonical.dtype)
+        tool_f = tool_faces[i].to(device=dev)
+
+        # tool → object SDF (tool points in world frame vs object mesh in world frame)
         tool_sdfs.append(_point_mesh_signed_sdf(tool_world[i], obj_v, obj_f))
 
-        obj_pts_tool = torch.matmul(
-            obj_pc[i] - noised_t[i].unsqueeze(0),
-            noised_R[i],
-        )
+        # object → tool SDF: transform obj world points to tool canonical frame
+        # obj_world = obj_pc + obj_centroid  (reconstruct world positions)
+        # tool_frame: p_tool = (obj_world - noised_t) @ R   (row-vector convention)
+        if obj_centroid is not None:
+            obj_world_i = obj_pc[i] + obj_centroid[i].unsqueeze(0)  # (Q, 3)
+        else:
+            obj_world_i = obj_pc[i]  # fallback: assume obj_pc already in world frame
+        obj_pts_tool = torch.matmul(obj_world_i - noised_t[i].unsqueeze(0), noised_R[i])
         obj_sdfs.append(_point_mesh_signed_sdf(obj_pts_tool, tool_v, tool_f))
 
     return torch.stack(tool_sdfs), torch.stack(obj_sdfs)

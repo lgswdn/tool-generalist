@@ -107,7 +107,8 @@ def load_ckpt(path: str, model: torch.nn.Module, optimizer=None):
 # ============================================================================ #
 
 # Keys that should be passed through as lists (not stacked into tensors)
-_LIST_KEYS = {"tool_verts", "tool_faces", "obj_verts", "obj_faces", "pt_path"}
+# Strings / variable-length fields: pass through as lists, do not torch.stack
+_LIST_KEYS = {"tool_mesh_path", "obj_mesh_path", "pt_path"}
 
 
 def collate_fn(batch):
@@ -126,6 +127,39 @@ def collate_fn(batch):
 
 
 # ============================================================================ #
+# Mesh loading cache (shared across all workers in this process)
+# ============================================================================ #
+
+_MESH_CACHE: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+
+
+def _load_mesh_cached(path: str) -> tuple[torch.Tensor, torch.Tensor]:
+    """Load mesh via trimesh and cache CPU tensors. Returns (verts, faces)."""
+    if path not in _MESH_CACHE:
+        import trimesh as _trimesh
+        mesh = _trimesh.load(path, force="mesh", process=False)
+        _MESH_CACHE[path] = (
+            torch.tensor(mesh.vertices, dtype=torch.float32),
+            torch.tensor(mesh.faces,    dtype=torch.int64),
+        )
+    return _MESH_CACHE[path]
+
+
+def _load_mesh_batch(
+    tool_paths: list[str],
+    obj_paths:  list[str],
+) -> tuple[list, list, list, list]:
+    """Return (tool_verts, tool_faces, obj_verts, obj_faces) lists for a batch."""
+    tv, tf, ov, of = [], [], [], []
+    for tp, op in zip(tool_paths, obj_paths):
+        t_v, t_f = _load_mesh_cached(tp)
+        o_v, o_f = _load_mesh_cached(op)
+        tv.append(t_v); tf.append(t_f)
+        ov.append(o_v); of.append(o_f)
+    return tv, tf, ov, of
+
+
+# ============================================================================ #
 # Training step
 # ============================================================================ #
 
@@ -134,67 +168,33 @@ def train_step(
     batch: dict,
     cfg: NewPretrainConfig,
     device: torch.device,
-    dataset=None,
 ) -> tuple[torch.Tensor, dict]:
-    """One training step: encode → noise → cross-attend → SDF + denoise loss.
+    """Unified training step for both 'sdf' and 'sdf-diff' tasks.
 
-    Encoder receives:
-      - tool_rotated = tool_canonical @ noised_R.T  (centered, current rotation applied)
-      - obj_pc                                       (centered at origin)
-    Cross-attention receives:
-      - pose_6d      = [noised_t(3), obj_centroid(3)]
-      - movement_cond = [delta_tool_t(3), delta_tool_quat(4), delta_obj_t(3), delta_obj_quat(4)]
+    Encoder input is identical for every task:
+      - tool_rotated : canonical tool pts rotated to the sampled (noised) pose
+      - obj_pc       : object pts centered at origin
+      - pose_3d      : noised_tool_centroid - obj_centroid  (3D)
+
+    SDF labels are computed on-the-fly at the ACTUAL sampled pose via kaolin,
+    so they are geometrically correct for any amount of noise.
+
+    The only difference between tasks is movement_cond:
+      - SDF head always sees movement_cond = zeros  (pose-only conditioning)
+      - Denoising head (sdf-diff only) sees real movement deltas
     """
-
-    tool_canonical = batch["tool_canonical"].to(device)   # (B, P, 3) centered
-    obj_pc         = batch["obj_pc"].to(device)           # (B, Q, 3) centered
-    obj_centroid   = batch["obj_centroid"].to(device)     # (B, 3)
-    contact_R      = batch["contact_R"].to(device)        # (B, 3, 3)
-    contact_t      = batch["contact_t"].to(device)        # (B, 3)
-    tool_sdf_gt    = batch["tool_sdf"].to(device)         # (B, P)  signed
-    obj_sdf_gt     = batch["obj_sdf"].to(device)          # (B, Q)  signed
+    tool_canonical  = batch["tool_canonical"].to(device)   # (B, P, 3) centered
+    obj_pc          = batch["obj_pc"].to(device)           # (B, Q, 3) centered
+    obj_centroid    = batch["obj_centroid"].to(device)     # (B, 3)
+    contact_R       = batch["contact_R"].to(device)        # (B, 3, 3)
+    contact_t       = batch["contact_t"].to(device)        # (B, 3)
+    tool_mesh_paths = batch["tool_mesh_path"]              # list[str]
+    obj_mesh_paths  = batch["obj_mesh_path"]               # list[str]
     B = tool_canonical.shape[0]
 
     raw_model = model.module if isinstance(model, DDP) else model
 
-    if raw_model.task == "sdf":
-        # SDF-only: noise the pose so the encoder sees many orientations, but
-        # use the pre-baked SDF as supervision (it is the ground-truth at contact;
-        # for noised poses it is an approximation, which is fine for SDF pretraining).
-        noise_out_sdf = sample_noised_poses_batch(
-            contact_R=contact_R,
-            contact_t=contact_t,
-            num_steps=cfg.num_diffusion_steps,
-            max_trans=cfg.noise_max_trans,
-            max_rot_deg=cfg.noise_max_rot_deg,
-            interp=cfg.interp_trajectory,
-            precise_prob=cfg.precise_diff_prob,
-            tool_canonical=tool_canonical,
-            obj_pc=obj_pc,
-        )
-        noised_R_sdf = noise_out_sdf["noised_R"]   # (B, 3, 3)
-        noised_t_sdf = noise_out_sdf["noised_t"]   # (B, 3)
-
-        # Apply noised rotation so encoder sees tool in its current orientation
-        tool_rotated_sdf = torch.bmm(tool_canonical, noised_R_sdf.transpose(1, 2))  # (B, P, 3)
-
-        # Use pre-baked SDF as supervision target (always valid at contact pose).
-        # For noised poses (t_idx > 0) this is an approximation; exact values
-        # would require an additional mesh query which is expensive and not needed
-        # for the SDF pretraining objective.
-        tool_sdf_noised_sdf = tool_sdf_gt
-        obj_sdf_noised_sdf  = obj_sdf_gt
-
-        movement_cond = torch.zeros(B, 14, device=device)
-        return model(
-            tool_canonical=tool_rotated_sdf,          # rotated to noised pose, centered
-            obj_pc=obj_pc,
-            tool_sdf_gt=tool_sdf_noised_sdf,
-            obj_sdf_gt=obj_sdf_noised_sdf,
-            movement_cond=movement_cond,
-        )
-
-    # ── 1. Sample noised pose ─────────────────────────────────────────────
+    # ── 1. Sample a noised (or contact) pose ─────────────────────────────
     noise_out = sample_noised_poses_batch(
         contact_R=contact_R,
         contact_t=contact_t,
@@ -206,54 +206,70 @@ def train_step(
         tool_canonical=tool_canonical,
         obj_pc=obj_pc,
     )
-
     noised_R = noise_out["noised_R"]   # (B, 3, 3)
     noised_t = noise_out["noised_t"]   # (B, 3)
 
-    # ── 2. Build encoder inputs (both centered at origin) ─────────────────
+    # ── 2. Encoder input: tool rotated to the sampled pose ───────────────
+    # obj_pc stays centered at origin (no change needed)
     tool_rotated = torch.bmm(tool_canonical, noised_R.transpose(1, 2))  # (B, P, 3)
 
-    # ── 3. SDF supervision: use pre-baked (contact pose) values ───────────
-    # For the joint sdf-diff task the SDF head still sees pre-baked values.
-    # Items at t_idx==0 (contact pose) are exactly correct; others are approximate.
-    tool_sdf_noised = tool_sdf_gt
-    obj_sdf_noised  = obj_sdf_gt
+    # ── 3. Pose conditioning: tool centroid relative to obj centroid ─────
+    pose_3d = noised_t - obj_centroid   # (B, 3)
 
-    # ── 4. Build 6D pose conditioning ─────────────────────────────────────
-    pose_6d = torch.cat([noised_t, obj_centroid], dim=-1)   # (B, 6)
+    # ── 4. On-the-fly SDF at the actual sampled pose ─────────────────────
+    # Correct for ANY pose — no pre-baked approximation.
+    tv_list, tf_list, ov_list, of_list = _load_mesh_batch(tool_mesh_paths, obj_mesh_paths)
+    with torch.no_grad():
+        tool_sdf_gt, obj_sdf_gt = compute_on_the_fly_sdf(
+            tool_canonical=tool_canonical,
+            obj_pc=obj_pc,
+            noised_R=noised_R,
+            noised_t=noised_t,
+            tool_verts=tv_list,
+            tool_faces=tf_list,
+            obj_verts=ov_list,
+            obj_faces=of_list,
+            obj_centroid=obj_centroid,
+        )
+    tool_sdf_gt = tool_sdf_gt.to(device)
+    obj_sdf_gt  = obj_sdf_gt.to(device)
 
-    # ── 5. Build movement conditioning (14D) ──────────────────────────────
-    # [delta_tool_t(3), delta_tool_quat(4), delta_obj_t(3), delta_obj_quat(4)]
-    delta_tool_t   = batch["delta_tool_t"].to(device)   # (B, 3)
-    delta_tool_R   = batch["delta_tool_R"].to(device)   # (B, 3, 3)
-    delta_obj_t    = batch["delta_obj_t"].to(device)    # (B, 3)
-    delta_obj_R    = batch["delta_obj_R"].to(device)    # (B, 3, 3)
-    delta_tool_quat = matrix_to_quaternion(delta_tool_R)  # (B, 4)
-    delta_obj_quat  = matrix_to_quaternion(delta_obj_R)   # (B, 4)
-    movement_cond = torch.cat(
-        [delta_tool_t, delta_tool_quat, delta_obj_t, delta_obj_quat], dim=-1
-    )  # (B, 14)
+    # ── 5. Movement conditioning + child point clouds (sdf-diff only) ────
+    if raw_model.task == "sdf-diff":
+        delta_tool_t    = batch["delta_tool_t"].to(device)   # (B, 3)
+        delta_tool_R    = batch["delta_tool_R"].to(device)   # (B, 3, 3)
+        delta_obj_t     = batch["delta_obj_t"].to(device)    # (B, 3)
+        delta_obj_R     = batch["delta_obj_R"].to(device)    # (B, 3, 3)
+        delta_tool_quat = matrix_to_quaternion(delta_tool_R) # (B, 4)
+        delta_obj_quat  = matrix_to_quaternion(delta_obj_R)  # (B, 4)
+        movement_cond = torch.cat(
+            [delta_tool_t, delta_tool_quat, delta_obj_t, delta_obj_quat], dim=-1
+        )  # (B, 14)
 
-    # ── 6. Child point clouds for chamfer loss ────────────────────────────
-    child_start_pcd = tool_rotated + noised_t.unsqueeze(1)   # (B, P, 3)
+        # Child clouds: tool at current noised pose → tool one step closer to contact
+        child_start_pcd = tool_rotated + noised_t.unsqueeze(1)   # (B, P, 3)
+        prev_R = torch.bmm(noise_out["target_rot_mat"], noised_R)
+        prev_t = noised_t + noise_out["target_trans"]
+        child_final_pcd = (
+            torch.bmm(tool_canonical, prev_R.transpose(1, 2)) + prev_t.unsqueeze(1)
+        )  # (B, P, 3)
+    else:
+        # sdf-only: movement unused (model will zero it for the SDF pass)
+        movement_cond   = torch.zeros(B, cfg.movement_cond_dim, device=device)
+        child_start_pcd = None
+        child_final_pcd = None
 
-    prev_R = torch.bmm(noise_out["target_rot_mat"], noised_R)
-    prev_t = noised_t + noise_out["target_trans"]
-    child_final_pcd = (
-        torch.bmm(tool_canonical, prev_R.transpose(1, 2)) + prev_t.unsqueeze(1)
-    )  # (B, P, 3)
-
-    # ── 7. Forward ────────────────────────────────────────────────────────
+    # ── 6. Forward ────────────────────────────────────────────────────────
     return model(
-        tool_canonical=tool_rotated,          # encoder sees rotated tool (centered)
-        obj_pc=obj_pc,                        # encoder sees centered object
-        tool_sdf_gt=tool_sdf_noised,
-        obj_sdf_gt=obj_sdf_noised,
-        noised_pose_7d=pose_6d,               # 6D: [noised_t, obj_centroid]
+        tool_rotated=tool_rotated,
+        obj_pc=obj_pc,
+        tool_sdf_gt=tool_sdf_gt,
+        obj_sdf_gt=obj_sdf_gt,
+        pose_3d=pose_3d,
         timestep=noise_out["t_idx"],
-        movement_cond=movement_cond,          # 14D or zeros
-        target_trans=noise_out["target_trans"],
-        target_rot_mat=noise_out["target_rot_mat"],
+        movement_cond=movement_cond,
+        target_trans=noise_out["target_trans"] if raw_model.task == "sdf-diff" else None,
+        target_rot_mat=noise_out["target_rot_mat"] if raw_model.task == "sdf-diff" else None,
         child_start_pcd=child_start_pcd,
         child_final_pcd=child_final_pcd,
     )
