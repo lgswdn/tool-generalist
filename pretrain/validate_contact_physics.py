@@ -177,16 +177,20 @@ def build_scene(
         env_path = f"/World/envs/env_{i}"
         UsdGeom.Xform.Define(stage, env_path)
 
-        # Tool (kinematic rigid body — PhysX controls transform)
+        # Tool (kinematic rigid body)
         tool_prim = UsdGeom.Xform.Define(stage, f"{env_path}/Tool").GetPrim()
         tool_prim.GetReferences().AddReference(tool_usd)
         txf = UsdGeom.Xformable(tool_prim)
         txf.ClearXformOpOrder()
         txf.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(
-            Gf.Vec3d(float(env_origins[i, 0]), float(env_origins[i, 1]), 0.1))
+            Gf.Vec3d(float(env_origins[i, 0]), float(env_origins[i, 1]), 1.0))
         txf.AddScaleOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(ts, ts, ts))
         UsdPhysics.RigidBodyAPI.Apply(tool_prim)
         tool_prim.GetAttribute("physics:kinematicEnabled").Set(True)
+        for ch in tool_prim.GetAllChildren():
+            if ch.IsA(UsdGeom.Mesh):
+                UsdPhysics.CollisionAPI.Apply(ch)
+                UsdPhysics.MeshCollisionAPI.Apply(ch)
 
         # Object (dynamic rigid body)
         obj_prim = UsdGeom.Xform.Define(stage, f"{env_path}/Object").GetPrim()
@@ -302,6 +306,34 @@ def run_batch(
     t_rb, _ = _get_prim_world_pose(stage, "/World/envs/env_0/Tool")
     o_rb, _ = _get_prim_world_pose(stage, "/World/envs/env_0/Object")
     print(f"    [READBACK] tool_pos = {t_rb}  obj_pos = {o_rb}")
+
+    # Runtime bbox check (after _set_prim_pose)
+    from pxr import Usd as _Usd, UsdGeom as _UsdGeom
+    _rt_cache = _UsdGeom.BBoxCache(
+        _Usd.TimeCode.Default(),
+        [_UsdGeom.Tokens.default_, _UsdGeom.Tokens.render, _UsdGeom.Tokens.proxy],
+        useExtentsHint=False)  # force recompute
+    _t0 = stage.GetPrimAtPath("/World/envs/env_0/Tool")
+    _o0 = stage.GetPrimAtPath("/World/envs/env_0/Object")
+    _tb = _rt_cache.ComputeWorldBound(_t0).ComputeAlignedBox()
+    _ob = _rt_cache.ComputeWorldBound(_o0).ComputeAlignedBox()
+    _ts = _tb.GetMax() - _tb.GetMin()
+    _os = _ob.GetMax() - _ob.GetMin()
+    print(f"    [RUNTIME BBOX] Tool:  size=({_ts[0]:.4f}, {_ts[1]:.4f}, {_ts[2]:.4f})")
+    print(f"    [RUNTIME BBOX] Obj:   size=({_os[0]:.4f}, {_os[1]:.4f}, {_os[2]:.4f})")
+    # Print xform ops for tool
+    _txf = _UsdGeom.Xformable(_t0)
+    print(f"    [TOOL XFORM OPS] {[str(op.GetOpName()) for op in _txf.GetOrderedXformOps()]}")
+    for op in _txf.GetOrderedXformOps():
+        print(f"      {op.GetOpName()} = {op.Get()}")
+    # Print prim tree depth=2
+    print(f"    [TOOL PRIM TREE]")
+    def _walk_prim(p, d=0):
+        if d > 2: return
+        print(f"      {'  '*d}{p.GetPath()} type={p.GetTypeName()}")
+        for c in p.GetChildren():
+            _walk_prim(c, d+1)
+    _walk_prim(_t0)
 
     frames = []
     # Capture t=0 frame
