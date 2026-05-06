@@ -185,12 +185,17 @@ def build_scene(
         txf.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(
             Gf.Vec3d(float(env_origins[i, 0]), float(env_origins[i, 1]), 0.1))
         txf.AddScaleOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(ts, ts, ts))
-        # Strip any RigidBodyAPI baked into the USD (from URDF/COACD export)
-        # and set up collision on mesh children only → pure static collider
+        # Strip physics + internal transforms from referenced USD children.
+        # Tool USDs from COACD export have baked-in xformOps and RigidBodyAPI
+        # on child prims that compound with our parent scale → reset to identity.
         from pxr import Usd as _Usd
         for desc in _Usd.PrimRange(tool_prim):
+            if desc == tool_prim:
+                continue   # skip root — we set its transform above
             if desc.HasAPI(UsdPhysics.RigidBodyAPI):
                 UsdPhysics.RigidBodyAPI(desc).GetRigidBodyEnabledAttr().Set(False)
+            if desc.IsA(UsdGeom.Xformable):
+                UsdGeom.Xformable(desc).ClearXformOpOrder()
             if desc.IsA(UsdGeom.Mesh):
                 UsdPhysics.CollisionAPI.Apply(desc)
                 UsdPhysics.MeshCollisionAPI.Apply(desc)
