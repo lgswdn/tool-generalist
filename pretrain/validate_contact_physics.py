@@ -185,11 +185,15 @@ def build_scene(
         txf.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(
             Gf.Vec3d(float(env_origins[i, 0]), float(env_origins[i, 1]), 0.1))
         txf.AddScaleOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(ts, ts, ts))
-        # Collision on mesh children only (no rigid body → static collider)
-        for ch in tool_prim.GetAllChildren():
-            if ch.IsA(UsdGeom.Mesh):
-                UsdPhysics.CollisionAPI.Apply(ch)
-                UsdPhysics.MeshCollisionAPI.Apply(ch)
+        # Strip any RigidBodyAPI baked into the USD (from URDF/COACD export)
+        # and set up collision on mesh children only → pure static collider
+        from pxr import Usd as _Usd
+        for desc in _Usd.PrimRange(tool_prim):
+            if desc.HasAPI(UsdPhysics.RigidBodyAPI):
+                UsdPhysics.RigidBodyAPI(desc).GetRigidBodyEnabledAttr().Set(False)
+            if desc.IsA(UsdGeom.Mesh):
+                UsdPhysics.CollisionAPI.Apply(desc)
+                UsdPhysics.MeshCollisionAPI.Apply(desc)
 
         # Object (dynamic rigid body)
         obj_prim = UsdGeom.Xform.Define(stage, f"{env_path}/Object").GetPrim()
