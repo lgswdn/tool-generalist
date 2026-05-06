@@ -24,7 +24,7 @@ class NewPretrainConfig:
     # ── SDF head ─────────────────────────────────────────────────────────
     head_mode: str = "point"       # "point" or "patch"
     patch_agg: str = "mean"        # "mean", "min", "max" (patch mode only)
-    head_hidden: Tuple[int, ...] = (256, 128)
+    head_hidden: Tuple[int, ...] = (128, 64)
 
     # ── Shared ViT encoder ───────────────────────────────────────────────
     num_pts: int = 512
@@ -36,7 +36,7 @@ class NewPretrainConfig:
 
     # ── Cross-attention (pose conditioning) ──────────────────────────────
     cross_attn_heads: int = 4
-    cross_attn_layers: int = 4
+    cross_attn_layers: int = 1
     # [noised_t(3), obj_centroid(3)] — world-frame translations; rotation baked into encoder input
     pose_dim: int = 6
     # [delta_tool_t(3), delta_tool_quat(4), delta_obj_t(3), delta_obj_quat(4)]
@@ -70,7 +70,7 @@ class NewPretrainConfig:
 
     # ── Checkpoint ───────────────────────────────────────────────────────
     resume: str = ""
-    ckpt_dir: str = "checkpoints_new"
+    ckpt_dir: str = "/mnt/project/world_model/tool_generalist/model/encoder/fork_sdf_patch"
 
     # ── Logging ──────────────────────────────────────────────────────────
     wandb: bool = False

@@ -1,21 +1,4 @@
-export http_proxy=http://'galbot:sK0aZ5bZ9v'@10.119.176.202:3128
-export https_proxy=http://'galbot:sK0aZ5bZ9v'@10.119.176.202:3128
-
-
-python gen_dataset.py --method optimize --num-pairs 300 --num-poses 10 --batch-size 512 --gpus 0 1 --opt-steps 100 /mnt/project/world_model/tool_generalist/teardrop_contact
-
-python gen_initial.py --input-dir /mnt/project/world_model/tool_generalist/teardrop_contact/000_asym_teardrop_contour_scraper_var_000/
-
-torchrun --nproc_per_node=2 train.py \
-  --data-dir /mnt/project/world_model/tool_generalist/teardrop_contact/000_asym_teardrop_contour_scraper_var_000/ \
-  --diffusion --diffusion-steps 100 --sdf-weight 1.0 --diffusion-weight 1.0
-
-torchrun --nproc_per_node=4 train.py --data-dir /mnt/project/world_model/tool_generalist/teardrop_contact
-
-  export PYTHONPATH=/mnt/home/zhengyixin/tool-generalist:/mnt/home/zhengyixin/tool-generalist/source/IsaacLab_nonPrehensile
-
-
-CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 train.py --task sdf --head-mode point --epochs 100 --data-dir /mnt/project/world_model/tool_generalist/teardrop_contact/000_asym_teardrop_contour_scraper_var_000 --out-dir /mnt/project/world_model/tool_generalist/model/encoder/teardrop_sdf_point2
+UDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 train.py --task sdf --head-mode point --epochs 100 --data-dir /mnt/project/world_model/tool_generalist/teardrop_contact/000_asym_teardrop_contour_scraper_var_000 --out-dir /mnt/project/world_model/tool_generalist/model/encoder/teardrop_sdf_point2
 
 CUDA_VISIBLE_DEVICES=5,6 torchrun --nproc_per_node=2 --master_port=29502 train.py --task movement --head-mode point --epochs 100 --data-dir /mnt/project/world_model/tool_generalist/teardrop_contact/000_asym_teardrop_contour_scraper_var_000 --out-dir /mnt/project/world_model/tool_generalist/model/encoder/teardrop_sdf_movement
 CUDA_VISIBLE_DEVICES=4,7 torchrun --nproc_per_node=2 --master_port=29503 train.py --task joint --head-mode point --epochs 700 --data-dir /mnt/project/world_model/tool_generalist/teardrop_contact/000_asym_teardrop_contour_scraper_var_000 --out-dir /mnt/project/world_model/tool_generalist/model/encoder/teardrop_sdf_diff
@@ -93,3 +76,26 @@ python scripts/eval_tools.py \
 torchrun --nproc_per_node=2 pretrain/new_pretrain/train.py --task sdf-diff --head-mode patch \
   --data-dir /mnt/project/world_model/tool_generalist/teardrop_contact/000_asym_teardrop_contour_scraper_var_000 \
   --wandb
+
+
+===
+
+NETWORK_PROXY:
+  export http_proxy=http://'galbot:sK0aZ5bZ9v'@10.119.176.202:3128
+  export https_proxy=http://'galbot:sK0aZ5bZ9v'@10.119.176.202:3128
+
+PYTHON_PATH:
+  export PYTHONPATH=/mnt/home/zhengyixin/tool-generalist:/mnt/home/zhengyixin/tool-generalist/source/IsaacLab_nonPrehensile
+
+DATASET/CHECKPOINT_PATH:
+  fork contact: /mnt/project/world_model/tool_generalist/fork_contact
+
+GEN_DATASET (take single-tool with current config for instance):
+  python gen_dataset.py --gpus 0 1 2 3 4 5 6 7 --num-poses 10 --num-pairs 323 --out-dir /mnt/project/world_model/tool_generalist/fork_contact
+
+RUN_PRETRAIN:
+  torchrun --nproc_per_node=8 train.py --task sdf --head-mode patch --data-dir /mnt/project/world_model/tool_generalist/fork_contact
+
+RUN_RL:
+  python -m torch.distributed.run --nnodes=1 --nproc_per_node=8 --master_port=29514 scripts/train.py --distributed \
+  --task=tool-sdf-fork-joint-v0 --headless --logger wandb --num_envs 1024 --log_project_name fork_rl

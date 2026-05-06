@@ -398,6 +398,14 @@ SDF_VARIANTS: dict[str, dict] = {
             "experiment_name": "teardrop_sdf_patch",
         },
     },
+    "fork-patch-v0": {
+        "policy": {
+            "encoder_weights_path": "/mnt/project/world_model/tool_generalist/model/encoder/fork_sdf_patch/best.pt",
+        },
+        "runner": {
+            "experiment_name": "fork_sdf_patch",
+        },
+    },
     "teardrop-movement-v0": {
         "policy": {
             "encoder_weights_path": "/mnt/project/world_model/tool_generalist/model/encoder/teardrop_sdf_movement/best.pt",
