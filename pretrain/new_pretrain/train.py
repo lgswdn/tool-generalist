@@ -175,7 +175,7 @@ def _load_mesh_batch(
 
         # ---- Object: scale + rotate (canonical → world) + z-ground ----
         o_scale   = obj_scales[i].item()
-        R_obj_i   = obj_Rs[i]                           # (3, 3)
+        R_obj_i   = obj_Rs[i].cpu()                     # (3, 3) — keep on CPU like mesh verts
         z_shift_i = obj_z_shifts[i].item()
         o_v_sc  = o_v_raw * o_scale                    # (V, 3) scaled
         o_v     = o_v_sc @ R_obj_i.T                   # (V, 3) rotated to world
