@@ -177,16 +177,15 @@ def build_scene(
         env_path = f"/World/envs/env_{i}"
         UsdGeom.Xform.Define(stage, env_path)
 
-        # Tool (kinematic rigid body)
+        # Tool (static collider — NO RigidBodyAPI so xform ops work directly)
         tool_prim = UsdGeom.Xform.Define(stage, f"{env_path}/Tool").GetPrim()
         tool_prim.GetReferences().AddReference(tool_usd)
         txf = UsdGeom.Xformable(tool_prim)
         txf.ClearXformOpOrder()
         txf.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(
-            Gf.Vec3d(float(env_origins[i, 0]), float(env_origins[i, 1]), 1.0))
+            Gf.Vec3d(float(env_origins[i, 0]), float(env_origins[i, 1]), 0.1))
         txf.AddScaleOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(ts, ts, ts))
-        UsdPhysics.RigidBodyAPI.Apply(tool_prim)
-        tool_prim.GetAttribute("physics:kinematicEnabled").Set(True)
+        # Collision on mesh children only (no rigid body → static collider)
         for ch in tool_prim.GetAllChildren():
             if ch.IsA(UsdGeom.Mesh):
                 UsdPhysics.CollisionAPI.Apply(ch)
