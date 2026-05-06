@@ -208,12 +208,36 @@ def build_scene(
 
     sim_ctx.reset()
 
+    # ── Bbox diagnostic: check actual tool dimensions ─────────────────────
+    from pxr import Usd as _Usd
+    _bbox_cache = UsdGeom.BBoxCache(
+        _Usd.TimeCode.Default(),
+        [UsdGeom.Tokens.default_, UsdGeom.Tokens.render, UsdGeom.Tokens.proxy],
+        useExtentsHint=True)
+    tool0 = stage.GetPrimAtPath("/World/envs/env_0/Tool")
+    obj0  = stage.GetPrimAtPath("/World/envs/env_0/Object")
+    t_bbox = _bbox_cache.ComputeWorldBound(tool0).ComputeAlignedBox()
+    o_bbox = _bbox_cache.ComputeWorldBound(obj0).ComputeAlignedBox()
+    t_size = t_bbox.GetMax() - t_bbox.GetMin()
+    o_size = o_bbox.GetMax() - o_bbox.GetMin()
+    print(f"  [BBOX] Tool  env_0: min={t_bbox.GetMin()} max={t_bbox.GetMax()} "
+          f"size=({t_size[0]:.4f}, {t_size[1]:.4f}, {t_size[2]:.4f})")
+    print(f"  [BBOX] Obj   env_0: min={o_bbox.GetMin()} max={o_bbox.GetMax()} "
+          f"size=({o_size[0]:.4f}, {o_size[1]:.4f}, {o_size[2]:.4f})")
+
+    # Camera distance: auto-adjust to fit the larger asset
+    max_dim = max(t_size[0], t_size[1], t_size[2],
+                  o_size[0], o_size[1], o_size[2])
+    cam_dist = max(0.5, max_dim * 3.0)   # 3x the largest dimension
+
     # ── Replicator camera (only when recording) ──────────────────────────
     rep_annotator = None
     if record_video:
         import omni.replicator.core as rep
         e0 = env_origins[0]
-        cam_pos  = (float(e0[0]) + 0.4, float(e0[1]) - 0.4, 0.35)
+        cam_pos  = (float(e0[0]) + cam_dist * 0.6,
+                    float(e0[1]) - cam_dist * 0.6,
+                    cam_dist * 0.5)
         cam_look = (float(e0[0]), float(e0[1]), 0.05)
         rep_cam = rep.create.camera(
             position=cam_pos, look_at=cam_look,
@@ -221,7 +245,7 @@ def build_scene(
         render_prod = rep.create.render_product(rep_cam, (1280, 720))
         rep_annotator = rep.AnnotatorRegistry.get_annotator("rgb")
         rep_annotator.attach(render_prod)
-        print(f"  [Video] Perspective camera at env 0")
+        print(f"  [Video] Camera dist={cam_dist:.2f}m  pos={cam_pos}")
 
     return sim_ctx, stage, env_origins, tool_scale, obj_scale, rep_annotator
 
