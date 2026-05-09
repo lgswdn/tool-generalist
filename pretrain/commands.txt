@@ -95,7 +95,8 @@ GEN_DATASET (take single-tool with current config for instance):
 
 RUN_PRETRAIN:
   torchrun --nproc_per_node=8 train.py --task sdf --head-mode patch --data-dir /mnt/project/world_model/tool_generalist/fork_contact
+  torchrun --nproc_per_node=8 train.py --task sdf-diff --head-mode patch --data-dir /mnt/project/world_model/tool_generalist/fork_contact --no-require-movement
 
 RUN_RL:
   python -m torch.distributed.run --nnodes=1 --nproc_per_node=8 --master_port=29514 scripts/train.py --distributed \
-  --task=tool-sdf-fork-joint-v0 --headless --logger wandb --num_envs 1024 --log_project_name fork_rl
+  --task=tool-sdf-fork-patch-v0 --headless --logger wandb --num_envs 1024 --log_project_name fork_rl

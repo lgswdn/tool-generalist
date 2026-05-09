@@ -28,7 +28,7 @@ class NewPretrainConfig:
     head_hidden: Tuple[int, ...] = (256, 128)
 
     # ── CORN contact head ────────────────────────────────────────────────
-    corn_tool_root: str = "/home/galbot/tool/eef/meshdata_adjusted"
+    corn_tool_root: str = "/mnt/project/world_model/tool_generalist/eef/meshdata_adjusted"
     corn_head_hidden: Tuple[int, ...] = (256, 128)
     corn_pos_weight: float = 0.0  # 0 = no explicit BCE pos_weight
 
@@ -76,7 +76,7 @@ class NewPretrainConfig:
 
     # ── Checkpoint ───────────────────────────────────────────────────────
     resume: str = ""
-    ckpt_dir: str = "/mnt/project/world_model/tool_generalist/model/encoder/fork_sdf_patch"
+    ckpt_dir: str = "/mnt/project/world_model/tool_generalist/model/encoder/fork_sdf_diff_patch"
 
     # ── Logging ──────────────────────────────────────────────────────────
     wandb: bool = False

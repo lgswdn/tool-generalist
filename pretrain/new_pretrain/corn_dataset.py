@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import pickle
 import random
+import sys
+import importlib
 from pathlib import Path
 from typing import List, Tuple
 
@@ -18,6 +20,33 @@ from torch.utils.data import Dataset
 
 
 DEFAULT_TOOL_ROOT = "/home/galbot/tool/eef/meshdata_adjusted"
+
+
+def _install_numpy_pickle_compat() -> None:
+    """Let NumPy 1.x unpickle arrays saved by NumPy 2.x.
+
+    NumPy 2.x pickles may reference modules under ``numpy._core``.  Older
+    environments expose the same modules under ``numpy.core`` instead.
+    """
+    try:
+        import numpy  # noqa: F401
+    except ModuleNotFoundError:
+        return
+
+    try:
+        importlib.import_module("numpy._core")
+        return
+    except ModuleNotFoundError:
+        pass
+
+    core = importlib.import_module("numpy.core")
+    sys.modules.setdefault("numpy._core", core)
+    for name in ("multiarray", "umath", "numeric", "fromnumeric", "_methods"):
+        try:
+            module = importlib.import_module(f"numpy.core.{name}")
+        except ModuleNotFoundError:
+            continue
+        sys.modules.setdefault(f"numpy._core.{name}", module)
 
 
 def _quat_xyzw_to_matrix(q: torch.Tensor) -> torch.Tensor:
@@ -161,6 +190,7 @@ class CornContactDataset(Dataset):
         return torch.cat([base, extra], dim=0)
 
     def __getitem__(self, idx: int) -> dict:
+        _install_numpy_pickle_compat()
         with open(self.paths[idx], "rb") as fp:
             data = pickle.load(fp)
 

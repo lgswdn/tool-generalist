@@ -15,7 +15,6 @@ one-step denoising transform from t=T down to t=0.
 from __future__ import annotations
 
 import argparse
-import csv
 import glob
 import random
 import sys
@@ -137,11 +136,16 @@ def infer_movement_cond_dim(state_dict: dict) -> int:
     return int(state_dict["pose_cross_attn.movement_proj.0.weight"].shape[1])
 
 
+def infer_pose_dim(state_dict: dict) -> int:
+    return int(state_dict["pose_cross_attn.pose_proj.0.weight"].shape[1])
+
+
 def build_model(cfg: NewPretrainConfig, state_dict: dict, device: torch.device) -> ContactDiffusionModel:
     cfg.task = "sdf-diff"
     cfg.head_mode = detect_head_mode(state_dict)
     denoise_hidden = infer_denoise_hidden(state_dict)
     movement_cond_dim = infer_movement_cond_dim(state_dict)
+    pose_dim = infer_pose_dim(state_dict)
     model = ContactDiffusionModel(
         head_mode=cfg.head_mode,
         patch_agg=cfg.patch_agg,
@@ -154,7 +158,7 @@ def build_model(cfg: NewPretrainConfig, state_dict: dict, device: torch.device) 
         freeze_encoder=False,
         cross_attn_heads=cfg.cross_attn_heads,
         cross_attn_layers=cfg.cross_attn_layers,
-        pose_dim=cfg.pose_dim,
+        pose_dim=pose_dim,
         movement_cond_dim=movement_cond_dim,
         denoise_hidden=denoise_hidden,
         sdf_weight=cfg.sdf_weight,
@@ -244,6 +248,7 @@ def rollout_diffusion(
     model: ContactDiffusionModel,
     tool_canonical: torch.Tensor,
     obj_pc: torch.Tensor,
+    obj_centroid: torch.Tensor,
     contact_R: torch.Tensor,
     contact_t: torch.Tensor,
     movement_cond: torch.Tensor,
@@ -271,11 +276,18 @@ def rollout_diffusion(
     }]
 
     encoder_result = model.encoder.encode(tool_canonical, obj_pc)
+    pose_dim = model.pose_cross_attn.pose_proj[0].in_features
     for frame_idx, step in enumerate(range(n_steps, 0, -1), start=1):
-        quat = matrix_to_quaternion(cur_R)
-        pose_7d = torch.cat([cur_t, quat], dim=-1)
+        pose_t = cur_t - obj_centroid
+        if pose_dim == 3:
+            pose_cond = pose_t
+        elif pose_dim == 7:
+            quat = matrix_to_quaternion(cur_R)
+            pose_cond = torch.cat([pose_t, quat], dim=-1)
+        else:
+            raise RuntimeError(f"Unsupported pose conditioning dimension: {pose_dim}")
         timestep = torch.tensor([step], device=tool_canonical.device, dtype=torch.long)
-        fused = model.pose_cross_attn(encoder_result.fused_tokens, pose_7d, timestep, movement_cond)
+        fused = model.pose_cross_attn(encoder_result.fused_tokens, pose_cond, timestep, movement_cond)
         P = model.num_patches
         tool_cond = fused[:, :P, :]
         obj_cond = fused[:, P:, :]
@@ -305,29 +317,6 @@ def rollout_diffusion(
         })
 
     return poses_R, poses_t, stats
-
-
-def write_rollout_stats(output_path: Path, stats: list[dict[str, float]]) -> Path:
-    stats_path = output_path.with_suffix(".csv")
-    with stats_path.open("w", newline="") as f:
-        fieldnames = [
-            "frame",
-            "timestep",
-            "delta_tx",
-            "delta_ty",
-            "delta_tz",
-            "delta_trans_mm",
-            "delta_rot_deg",
-            "pose_tx",
-            "pose_ty",
-            "pose_tz",
-            "trans_error_mm",
-            "rot_error_deg",
-        ]
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(stats)
-    return stats_path
 
 
 def print_rollout_stats(stats: list[dict[str, float]]):
@@ -363,7 +352,7 @@ def render_frame(
     tool_mesh,
     cur_R: np.ndarray,
     cur_t: np.ndarray,
-    contact_pt: np.ndarray,
+    contact_pt: np.ndarray | None,
     trajectory: np.ndarray,
     min_sdf: float,
     all_verts: np.ndarray,
@@ -379,7 +368,8 @@ def render_frame(
         _add_ground(ax, extent)
         _plot_mesh(ax, obj_mesh, OBJ_COLOUR_BEFORE, label="Object" if view_i == 0 else None)
         _plot_mesh(ax, tool_cur, TOOL_COLOUR_AFTER, label="Denoising pose" if view_i == 0 else None)
-        _plot_contact_point(ax, contact_pt, CONTACT_PT_COLOUR, size=80, label="Contact point" if view_i == 0 else None)
+        if contact_pt is not None:
+            _plot_contact_point(ax, contact_pt, CONTACT_PT_COLOUR, size=80, label="Contact point" if view_i == 0 else None)
 
         if len(trajectory) > 1:
             ax.plot(
@@ -431,8 +421,8 @@ def render_movement_frame(
     pred_t: np.ndarray,
     moved_R: np.ndarray,
     moved_t: np.ndarray,
-    contact_pt: np.ndarray,
-    anchor_new: np.ndarray,
+    contact_pt: np.ndarray | None,
+    anchor_new: np.ndarray | None,
     min_sdf: float,
     all_verts: np.ndarray,
     title: str,
@@ -447,8 +437,10 @@ def render_movement_frame(
         _plot_mesh(ax, tool_pred, TOOL_COLOUR_GHOST, edge_alpha=0.04, label="Pred tool before move" if view_i == 0 else None)
         _plot_mesh(ax, obj_after, OBJ_COLOUR_AFTER, label="Object after delta_O" if view_i == 0 else None)
         _plot_mesh(ax, tool_moved, TOOL_COLOUR_AFTER, label="Pred tool after delta_T" if view_i == 0 else None)
-        _plot_contact_point(ax, contact_pt, CONTACT_PT_COLOUR, size=70, label="Contact point" if view_i == 0 else None)
-        _plot_contact_point(ax, anchor_new, CONTACT_PT_AFTER, size=100, marker="*", label="Movement anchor" if view_i == 0 else None)
+        if contact_pt is not None:
+            _plot_contact_point(ax, contact_pt, CONTACT_PT_COLOUR, size=70, label="Contact point" if view_i == 0 else None)
+        if anchor_new is not None:
+            _plot_contact_point(ax, anchor_new, CONTACT_PT_AFTER, size=100, marker="*", label="Movement anchor" if view_i == 0 else None)
 
         ax.set_title(view_name, fontsize=10, fontweight="bold", pad=8)
         _set_equal_aspect(ax, all_verts)
@@ -508,6 +500,7 @@ def export_visualization_obj(
     pred_R: np.ndarray,
     pred_t: np.ndarray,
 ):
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     tool_pred = transform_mesh(tool_mesh, pred_R, pred_t)
     all_verts = np.concatenate([
         obj_mesh.vertices,
@@ -524,6 +517,76 @@ def export_visualization_obj(
         colours=[OBJ_PRED_COLOUR, TOOL_PRED_COLOUR, GROUND_COLOUR],
     )
     return obj_path
+
+
+def build_movement_inputs(
+    data: dict,
+    cfg_i: int,
+    device: torch.device,
+    movement_cond_dim: int,
+) -> tuple[torch.Tensor, np.ndarray, np.ndarray, np.ndarray, np.ndarray, bool]:
+    movement_keys = {
+        "delta_tool_translations",
+        "delta_tool_rotations",
+        "delta_obj_translations",
+        "delta_obj_rotations",
+    }
+    missing = movement_keys - set(data.keys())
+    has_movement = len(missing) == 0
+
+    if has_movement:
+        delta_tool_t = data["delta_tool_translations"][cfg_i].float().unsqueeze(0).to(device)
+        delta_tool_R = data["delta_tool_rotations"][cfg_i].float().unsqueeze(0).to(device)
+        delta_obj_t = data["delta_obj_translations"][cfg_i].float().unsqueeze(0).to(device)
+        delta_obj_R = data["delta_obj_rotations"][cfg_i].float().unsqueeze(0).to(device)
+        movement_cond = torch.cat(
+            [
+                delta_tool_t,
+                matrix_to_quaternion(delta_tool_R),
+                delta_obj_t,
+                matrix_to_quaternion(delta_obj_R),
+            ],
+            dim=-1,
+        )
+    else:
+        print(f"  Missing movement keys {sorted(missing)}; using zero movement conditioning.")
+        delta_tool_t = torch.zeros(1, 3, device=device)
+        delta_tool_R = torch.eye(3, device=device).unsqueeze(0)
+        delta_obj_t = torch.zeros(1, 3, device=device)
+        delta_obj_R = torch.eye(3, device=device).unsqueeze(0)
+        movement_cond = torch.zeros(1, movement_cond_dim, device=device)
+
+    if movement_cond.shape[-1] < movement_cond_dim:
+        pad = torch.zeros(
+            movement_cond.shape[0],
+            movement_cond_dim - movement_cond.shape[-1],
+            device=device,
+            dtype=movement_cond.dtype,
+        )
+        movement_cond = torch.cat([movement_cond, pad], dim=-1)
+    elif movement_cond.shape[-1] > movement_cond_dim:
+        movement_cond = movement_cond[:, :movement_cond_dim]
+
+    return (
+        movement_cond,
+        to_numpy(delta_tool_R[0]),
+        to_numpy(delta_tool_t[0]),
+        to_numpy(delta_obj_R[0]),
+        to_numpy(delta_obj_t[0]),
+        has_movement,
+    )
+
+
+def get_contact_point(
+    data: dict,
+    cfg_i: int,
+):
+    if "contact_pts_world" in data:
+        contact_pts = to_numpy(data["contact_pts_world"])
+        if contact_pts.ndim >= 3:
+            return contact_pts[cfg_i, 0]
+        return contact_pts[cfg_i]
+    return None
 
 
 def render_video_for_sample(
@@ -548,26 +611,29 @@ def render_video_for_sample(
     torch.manual_seed(args.seed + cfg_i)
     tool_canonical = sample["tool_canonical"].unsqueeze(0).to(device)
     obj_pc = sample["obj_pc"].unsqueeze(0).to(device)
+    obj_centroid = sample["obj_centroid"].unsqueeze(0).to(device)
     contact_R = sample["contact_R"].unsqueeze(0).to(device)
     contact_t = sample["contact_t"].unsqueeze(0).to(device)
-    delta_tool_t = sample["delta_tool_t"].unsqueeze(0).to(device)
-    delta_tool_R = sample["delta_tool_R"].unsqueeze(0).to(device)
-    delta_obj_t = sample["delta_obj_t"].unsqueeze(0).to(device)
-    delta_obj_R = sample["delta_obj_R"].unsqueeze(0).to(device)
-    movement_cond = torch.cat(
-        [
-            delta_tool_t,
-            matrix_to_quaternion(delta_tool_R),
-            delta_obj_t,
-            matrix_to_quaternion(delta_obj_R),
-        ],
-        dim=-1,
+    movement_cond_dim = model.pose_cross_attn.movement_proj[0].in_features
+    (
+        movement_cond,
+        delta_tool_R_np,
+        delta_tool_t_np,
+        delta_obj_R_np,
+        delta_obj_t_np,
+        has_movement,
+    ) = build_movement_inputs(
+        data=data,
+        cfg_i=cfg_i,
+        device=device,
+        movement_cond_dim=movement_cond_dim,
     )
 
     poses_R, poses_t, stats = rollout_diffusion(
         model=model,
         tool_canonical=tool_canonical,
         obj_pc=obj_pc,
+        obj_centroid=obj_centroid,
         contact_R=contact_R,
         contact_t=contact_t,
         movement_cond=movement_cond,
@@ -575,7 +641,6 @@ def render_video_for_sample(
         max_rot_deg=args.noise_rot_deg,
         n_steps=args.steps,
     )
-    stats_path = write_rollout_stats(output_path, stats)
     print_rollout_stats(stats)
 
     obj_mesh = build_object_mesh(data)
@@ -584,18 +649,19 @@ def render_video_for_sample(
     gt_t = to_numpy(sample["contact_t"])
     tool_canonical_np = to_numpy(sample["tool_canonical"])
     obj_pc_np = to_numpy(sample["obj_pc"])
-    contact_pt = to_numpy(data["contact_pts_world"][cfg_i, 0])
+    contact_pt = get_contact_point(data, cfg_i)
     pred_R = poses_R[-1]
     pred_t = poses_t[-1]
-    delta_tool_R_np = to_numpy(sample["delta_tool_R"])
-    delta_tool_t_np = to_numpy(sample["delta_tool_t"])
-    delta_obj_R_np = to_numpy(sample["delta_obj_R"])
-    delta_obj_t_np = to_numpy(sample["delta_obj_t"])
-    anchor_new = to_numpy(data["movement_contact_pts"][cfg_i])
+    anchor_new = (
+        to_numpy(data["movement_contact_pts"][cfg_i])
+        if has_movement and "movement_contact_pts" in data
+        else None
+    )
     moved_tool_R = delta_tool_R_np @ pred_R
     moved_tool_t = delta_tool_R_np @ pred_t + delta_tool_t_np
-    obj_after = apply_delta_to_object(obj_mesh, delta_obj_R_np, delta_obj_t_np, anchor_new)
-    obj_pc_after = apply_delta_to_points(obj_pc_np, delta_obj_R_np, delta_obj_t_np, anchor_new)
+    movement_pivot = anchor_new if anchor_new is not None else np.zeros(3, dtype=pred_t.dtype)
+    obj_after = apply_delta_to_object(obj_mesh, delta_obj_R_np, delta_obj_t_np, movement_pivot)
+    obj_pc_after = apply_delta_to_points(obj_pc_np, delta_obj_R_np, delta_obj_t_np, movement_pivot)
     final_min_sdf = min_sdf_np(tool_canonical_np, obj_pc_after, moved_tool_R, moved_tool_t)
     all_verts = np.concatenate([
         collect_bounds_vertices(obj_mesh, tool_mesh, poses_R, poses_t),
@@ -681,7 +747,7 @@ def render_video_for_sample(
     final_err_mm = np.linalg.norm(poses_t[-1] - gt_t) * 1000.0
     final_rot_err_deg = rotation_angle_deg_np(poses_R[-1] @ gt_R.T)
     print(
-        f"Saved {output_path}  stats={stats_path}  obj={obj_export_path}  "
+        f"Saved {output_path}  obj={obj_export_path}  "
         f"final translation error={final_err_mm:.1f}mm  final rotation error={final_rot_err_deg:.2f}deg"
     )
 
@@ -719,7 +785,7 @@ def main():
     model = build_model(cfg, state_dict, device)
 
     files = collect_input_files(args)
-    dataset = NewPretrainDataset(files, augment=False, require_movement=True)
+    dataset = NewPretrainDataset(files, augment=False, require_movement=False)
     sampled_items = sample_dataset_items(dataset, args)
     index_by_item = {item: i for i, item in enumerate(dataset._index)}
 

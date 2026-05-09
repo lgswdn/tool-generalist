@@ -4,6 +4,21 @@ python scripts/record_video.py --task tool-v0 --num_envs 30 --video_length 30 --
 
 生成 3s 的会存到 ./videos 的视频，
 
+## Frozen Contracts
+
+Stage-1 contract definitions live in pure Python modules so later migration work
+can share the same schema without importing Isaac Lab, Kaolin, or training code.
+
+- Frames and pose9d: `utils.geometry.frames`
+- Path/config dataclasses: `configs.*`
+- Contact `.pt` schema validator: `contact.schema`
+- Adjusted tool asset contract: `utils.artifacts.tool_assets`
+- RL observation layout: `configs.observation_layout`
+
+See `docs/contracts.md` for the frozen details. Current runtime code may still
+use legacy centroid, `base_center`, and normalized-model behavior until later
+phases explicitly migrate geometry/contact/pretrain/RL paths.
+
 ## 从工具生成具有不同末端的机械臂
 
 ```bash

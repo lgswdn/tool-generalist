@@ -338,13 +338,19 @@ class CornContactModel(nn.Module):
         )
 
         with torch.no_grad():
-            pred = (torch.sigmoid(logits) >= 0.5).float()
+            prob = torch.sigmoid(logits)
+            pred = (prob >= 0.5).float()
             tp = (pred * labels).sum()
             fp = (pred * (1.0 - labels)).sum()
             fn = ((1.0 - pred) * labels).sum()
+            pos_mask = labels > 0.5
+            neg_mask = ~pos_mask
             metrics = {
                 "corn_loss": loss.item(),
                 "corn_pos_rate": labels.mean().item(),
+                "corn_prob_mean": prob.mean().item(),
+                "corn_prob_pos": prob[pos_mask].mean().item() if pos_mask.any() else 0.0,
+                "corn_prob_neg": prob[neg_mask].mean().item() if neg_mask.any() else 0.0,
                 "corn_pred_pos_rate": pred.mean().item(),
                 "corn_acc": (pred == labels).float().mean().item(),
                 "corn_precision": (tp / (tp + fp).clamp_min(1.0)).item(),

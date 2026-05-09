@@ -350,6 +350,10 @@ def main():
     parser.add_argument("--batch-size",  type=int, default=0)
     parser.add_argument("--num-workers", type=int, default=-1)
     parser.add_argument("--ckpt-dir",    type=str, default="")
+    parser.add_argument("--corn-tool-root", type=str, default="")
+    parser.add_argument("--corn-pos-weight", type=float, default=-1.0)
+    parser.add_argument("--wandb-project",  type=str, default="")
+    parser.add_argument("--wandb-run-name", type=str, default="")
     parser.add_argument("--no-require-movement", action="store_true",
                         help="(sdf-diff only) Do not skip files lacking movement data. "
                              "Missing movement deltas are replaced by zeros so all "
@@ -376,6 +380,14 @@ def main():
         cfg.num_workers = args.num_workers
     if args.ckpt_dir:
         cfg.ckpt_dir = args.ckpt_dir
+    if args.corn_tool_root:
+        cfg.corn_tool_root = args.corn_tool_root
+    if args.corn_pos_weight >= 0:
+        cfg.corn_pos_weight = args.corn_pos_weight
+    if args.wandb_project:
+        cfg.wandb_project = args.wandb_project
+    if args.wandb_run_name:
+        cfg.wandb_run_name = args.wandb_run_name
 
     # movement requirement: sdf-diff needs it by default, but can be relaxed
     require_movement = (cfg.task == "sdf-diff") and not args.no_require_movement

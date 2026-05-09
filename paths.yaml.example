@@ -1,33 +1,33 @@
-# File paths for env_tool.py
-# Edit this file to change asset locations without modifying code.
+# Stage-1 frozen path schema.
+# Copy to paths.yaml and replace example values with machine-local paths.
+# Current runtime scripts may still read legacy keys until later phases.
 
-# DGN object dataset
-dgn:
-  candidates_json: /mnt/afs/zhuwenxuan/DGN/dev_minimal.json
-  usd_dir: /mnt/afs/zhuwenxuan/DGN/coacd_usd
-  obj_dir: /mnt/afs/zhuwenxuan/DGN/coacd_normalized
+objects:
+  candidates_json: /path/to/objects/candidates.json
+  usd_dir: /path/to/objects_usd
+  obj_dir: /path/to/object_meshes
 
-# End-effector tool dataset (legacy multi-tool paths, kept for reference)
-tool:
-  tools_json: /mnt/afs/zhuwenxuan/project/tool-generalist/RobotSmith/eef/tools_adjusted.json
-  usd_dir: /mnt/afs/zhuwenxuan/project/tool-generalist/RobotSmith/eef/objects_usd
-  obj_dir: /mnt/afs/zhuwenxuan/project/tool-generalist/RobotSmith/eef/normalized_models
-
-# Fixed baked tool (fork baked into robot USD at panda_link7) — legacy single-tool
-tool_mesh:
-  obj_path: /mnt/afs/zhuwenxuan/project/inp/tool-generalist/RobotSmith/eef/normalized_models/000_robotic_fork_effector_var_000.obj
-  tools_json: /mnt/afs/zhuwenxuan/project/inp/tool-generalist/RobotSmith/eef/tools_adjusted.json
-  tool_name: 000_robotic_fork_effector_var_000
-  scale: 0.1
-
-# Multi-tool robot assets (multiple tool variants baked into separate robot USDs)
 tools:
-  robots_usd_dir: /mnt/afs/zhuwenxuan/project/inp/tool-generalist/RobotSmith/eef/robots_usd
-  tools_json: /mnt/afs/zhuwenxuan/project/inp/tool-generalist/RobotSmith/eef/tools.json
-  tools_selected_json: /mnt/afs/zhuwenxuan/project/inp/tool-generalist/RobotSmith/eef/tools_selected.json
-  obj_dir: /mnt/afs/zhuwenxuan/project/inp/tool-generalist/RobotSmith/eef/normalized_models
-  scale: 0.1
+  # Tool point-cloud source of truth:
+  #   <meshdata_adjusted_root>/<tool_id>/coacd/decomposed.obj
+  meshdata_adjusted_root: /path/to/eef/meshdata_adjusted
 
-# Robot USD
-robot:
-  franka_usd: /mnt/afs/zhuwenxuan/project/inp/tool-generalist/bare_panda_instanceable.usd
+  # Simulation assets, not point-cloud source of truth.
+  objects_usd_root: /path/to/eef/objects_usd
+  robots_usd_root: /path/to/Robots
+
+  # Manifests.
+  tools_adjusted_json: /path/to/eef/tools_adjusted.json
+  tools_selected_json: /path/to/eef/tools_selected.json
+  tool_asset_metadata_json: /path/to/eef/tool_asset_metadata.json
+
+  # Source Franka asset tree used by the external tool asset pipeline.
+  franka_src_root: /path/to/FrankaEmika
+
+# Compatibility aliases documented for migration:
+# - legacy dgn.* maps to objects.*
+# - legacy tools.obj_dir points at normalized_models and is superseded by
+#   tools.meshdata_adjusted_root plus {tool_id}/coacd/decomposed.obj
+# - legacy tools.tools_json maps to tools.tools_adjusted_json
+# - legacy tools.robots_usd_dir maps to tools.robots_usd_root
+# - legacy tool_mesh.scale maps to GeneralCfg.franka_mount.scale_xyz

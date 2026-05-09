@@ -1,5 +1,5 @@
 # Local path config (machine-specific, do not commit)
-paths.yaml
+# paths.yaml
 
 **/eef/
 **/tmp/
@@ -77,7 +77,7 @@ logs/
 datasets
 
 # Tests
-tests/
+# tests/
 
 # Docker history
 .isaac-lab-docker-history
