@@ -1,503 +1,198 @@
-from isaaclab.utils import configclass
+"""RSL-RL runner config bridge backed by the experiment runtime spec.
 
-from isaaclab_rl.rsl_rl import (
-    RslRlOnPolicyRunnerCfg,
-    RslRlPpoAlgorithmCfg,
+The real Isaac/RSL-RL entrypoint must consume the ``rl_runtime_spec.json``
+written by ``scripts/train.py``.  Missing or incompatible specs fail at import
+time so policy/PPO dimensions cannot silently fall back to local defaults.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from isaaclab.utils import configclass
+from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
+
+from utils.experiment.rl_runtime_spec import (
+    RUNTIME_SPEC_ENV_VAR,
+    RUNTIME_SPEC_FILENAME,
+    load_runtime_spec_from_env,
 )
 
-from dataclasses import field
+
+def _policy(name: str, default: Any = None) -> Any:
+    return _POLICY.get(name, default)
 
 
-POINT2VEC_CKPT_PATH = "/mnt/project/world_model/tool_generalist/model/pre_point2vec-epoch.799-step.64800.ckpt"
+def _ppo(name: str, default: Any = None) -> Any:
+    return _PPO.get(name, default)
 
 
-@configclass
-class MultiICPActorCriticCfg:
-    """Config for Multi-ICP Actor-Critic with object cloud + tool cloud (as obstacle).
+def _policy_for_class(name: str, class_name: str, default: Any) -> Any:
+    """Read a policy field that is required only for one actor class.
 
-    Observation layout (env_tool):
-        object_cloud (512*3=1536) | tool_cloud (512*3=1536) | hand_state (9) | rest (robot_state+prev_action+rel_goal+phys_params)
-    Uses ActorCriticMultiICP_HandState: hand_state is passed to ICP encoder, rest goes to SD-Cross.
+    IsaacLab configclass evaluates every class body at import time, including
+    inactive policy classes.  Do not let Point2Vec-only fields break TG runs,
+    but still fail-fast if Point2Vec is the selected actor and a required field
+    is missing.
     """
 
-    class_name: str = "ActorCriticMultiICP_HandState"
+    value = _POLICY.get(name)
+    if value is not None:
+        return value
+    if _POLICY_CLASS_NAME == class_name:
+        raise RuntimeError(
+            f"{class_name} requires policy_params.{name} in rl_runtime_spec.json"
+        )
+    return default
 
-    # Point cloud layout: 1 object + 1 tool-as-obstacle
-    num_obstacles: int = 1
-    num_large_obstacles: int = 1
 
-    # ICP pretrained weights
-    icp_weights_path: str | None = '/mnt/afs/zhuwenxuan/project/inp/512-32-balanced-SAM-wd-5e-05-920'
-    freeze_icp: bool = True
-
-    icp_point_dim: int = 3
-    icp_num_points: int = 512
-
-    # Network architecture
-    fusion_hidden_dims: list[int] = field(default_factory=lambda: [512, 256, 128])
-    fusion_use_norm: bool = True
-    fusion_norm_type: str = "layer"
-
-    actor_hidden_dims: list[int] = field(default_factory=lambda: [64])
-    actor_use_norm: bool = True
-    actor_norm_type: str = "layer"
-    actor_output_activation: bool = False
-
-    critic_hidden_dims: list[int] = field(default_factory=lambda: [128])
-    critic_use_norm: bool = True
-    critic_norm_type: str = "layer"
-
-    # SD-Cross settings
-    use_sd_cross: bool = True
-    sd_num_query: int = 16
-    sd_emb_dim: int = 128
-    sd_cat_query: bool = False
-    sd_cat_ctx: bool = True
-
-    # Activation / noise
-    activation: str = "elu"
-    init_noise_std: float = 1.0
-    noise_std_type: str = "scalar"
+_RUNTIME_SPEC = load_runtime_spec_from_env()
+_POLICY = _RUNTIME_SPEC["policy_params"]
+_PPO = _RUNTIME_SPEC["ppo_params"]
+_POLICY_CLASS_NAME = str(_RUNTIME_SPEC["actor_critic_class"])
 
 
 @configclass
-class NonPrehensilePPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    """RSL-RL PPO configuration for the tool-generalist non-prehensile task."""
+class TGActorCriticCfg:
+    """Policy config sourced from rl_runtime_spec.json."""
 
-    # Training parameters
-    num_steps_per_env = 8
-    max_iterations = 1000000
-    save_interval = 500
+    class_name: str = "ActorCriticTG"
 
-    # Logging / experiment identifiers
-    experiment_name = "franka_nonprehensile"
+    num_points: int = int(_policy("num_points"))
+    point_dim: int = int(_policy("point_dim"))
+    patch_size: int = int(_policy("patch_size", 32))
+    encoder_channel: int = int(_policy("encoder_channel", 128))
+    vit_depth: int = int(_policy("vit_depth", 12))
+    vit_heads: int = int(_policy("vit_heads", 4))
 
-    # Observation normalization
-    empirical_normalization = False
+    encoder_weights_path: str = str(_policy("encoder_weights_path"))
+    freeze_encoder: bool = bool(_policy("freeze_encoder"))
 
-    # Policy network
-    policy = MultiICPActorCriticCfg()
+    use_learnable_query_tokens: bool = bool(_policy("use_learnable_query_tokens", False))
+    sd_num_query: int = int(_policy("sd_num_query"))
+    sd_num_query_object: int | None = None
+    sd_emb_dim: int = int(_policy("sd_emb_dim"))
+    relative_translation_query_tokens: int = int(_policy("relative_translation_query_tokens", 2))
+    reuse_pretrain_pose_cross_attn: bool = bool(_policy("reuse_pretrain_pose_cross_attn", False))
+    sd_cat_query: bool = bool(_policy("sd_cat_query", False))
+    sd_cat_ctx: bool = bool(_policy("sd_cat_ctx", True))
+    sd_query_keys: tuple[str, ...] = tuple(_policy("sd_query_keys", ("context",)))
 
-    # PPO algorithm hyper-parameters
-    algorithm = RslRlPpoAlgorithmCfg(
-        value_loss_coef=0.5,         
-        use_clipped_value_loss=True,
-        clip_param=0.3,                
-        entropy_coef=0.006,               
-        num_learning_epochs=8,      
-        num_mini_batches=8,            
-        learning_rate=5.0e-5,        
-        schedule="adaptive",  
-        gamma=0.99,               
-        lam=0.95,                 
-        desired_kl=0.016, 
-        max_grad_norm=1.0,
-    )
-
-
-# =============================================================================
-# Momentum (7D) configuration — for tool-momentum-v0
-# =============================================================================
-
-@configclass
-class MomentumActorCriticCfg:
-    """Config for ActorCriticMomentum with 7D point clouds (xyz + mass + velocity).
-
-    Observation layout (env_tool_momentum):
-        object_cloud (512*7=3584) + tool_obstacle (512*7=3584) + tool_ee (512*7=3584) + extra_state (46)
-    The tool cloud appears in both the obstacle and EE slots.
-    """
-
-    class_name: str = "ActorCriticMomentum"
-
-    # Point cloud / state layout
-    point_dim: int = 7
-    num_points: int = 512
-    num_obstacles: int = 1        # tool cloud in obstacle slot
-    num_ee_points: int = 512      # tool cloud also as EE
-    robot_state_dim: int = 14
-
-    # Momentum encoder settings — propagate layout to encoder internals
-    momentum_cfg: dict = field(default_factory=lambda: {
-        "num_points_per_object": 512,
-        "num_obstacles": 1,
-        "num_ee_points": 512,
-    })
-    momentum_ckpt: str | None = '/mnt/afs/zhuwenxuan/project/inp/checkpoints/point_encoder_action_global_step_044950.pt'
-    freeze_momentum: bool = True
-    encoder_strict_load: bool = False
-
-    # StateDependentCrossFeatNet settings (matches reference)
-    use_learnable_query_tokens: bool = False  # Reference uses SD-cross, not learnable queries
-    sd_num_query: int = 16
-    sd_num_query_object: int | None = 8
-    sd_emb_dim: int = 128
-    sd_cat_query: bool = False
-    sd_cat_ctx: bool = True
-    sd_query_keys: tuple | None = None  # Default: ("extra_state",)
-
-    # Learnable query tokens settings (when use_learnable_query_tokens=True)
     num_query_object_tokens: int | None = None
-    num_query_tokens: int = 16
-    cross_attn_heads: int = 4
-    cross_attn_layers: int = 1
-    cross_attn_ff_dim: int | None = None
-    cross_attn_dropout: float = 0.0
+    num_query_tokens: int = int(_policy("sd_num_query"))
+    cross_attn_heads: int = int(_policy("cross_attn_heads"))
+    cross_attn_layers: int = int(_policy("cross_attn_layers"))
+    cross_attn_ff_dim: int | None = _policy("cross_attn_ff_dim")
+    cross_attn_dropout: float = float(_policy("cross_attn_dropout", 0.0))
 
-    # Actor / Critic heads
-    fusion_hidden_dims: list[int] = field(default_factory=lambda: [512, 256, 128])
-    actor_hidden_dims: list[int] = field(default_factory=lambda: [64])
-    critic_hidden_dims: list[int] = field(default_factory=lambda: [128])
+    hand_state_dim: int = int(_policy("hand_state_dim"))
+    robot_state_dim: int = int(_policy("robot_state_dim"))
+    previous_action_dim: int = int(_policy("previous_action_dim"))
+    relative_goal_dim: int = int(_policy("relative_goal_dim"))
+    physics_dim: int = int(_policy("physics_dim"))
+    model_input_centering: str = str(_policy("model_input_centering", "bbox_center"))
 
-    # Activation / noise
-    activation: str = "gelu"
-    init_noise_std: float = 1.0
-    noise_std_type: str = "scalar"
+    fusion_hidden_dims: list[int] = list(_policy("fusion_hidden_dims"))
+    actor_hidden_dims: list[int] = list(_policy("actor_hidden_dims"))
+    critic_hidden_dims: list[int] = list(_policy("critic_hidden_dims"))
 
+    activation: str = str(_policy("activation", "elu"))
+    init_noise_std: float = float(_policy("init_noise_std", 1.0))
+    noise_std_type: str = str(_policy("noise_std_type", "scalar"))
 
-@configclass
-class MomentumPPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    """RSL-RL PPO configuration for the 7D momentum-based tool-generalist task."""
-
-    num_steps_per_env = 8
-    max_iterations = 1000000
-    save_interval = 500
-
-    experiment_name = "franka_nonprehensile_momentum"
-
-    empirical_normalization = False
-
-    policy = MomentumActorCriticCfg()
-
-    algorithm = RslRlPpoAlgorithmCfg(
-        value_loss_coef=0.5,
-        use_clipped_value_loss=True,
-        clip_param=0.3,
-        entropy_coef=0.006,
-        num_learning_epochs=8,
-        num_mini_batches=8,
-        learning_rate=5.0e-5,
-        schedule="adaptive",
-        gamma=0.99,
-        lam=0.95,
-        desired_kl=0.016,
-        max_grad_norm=1.0,
-    )
 
 @configclass
 class Point2VecActorCriticCfg:
-    """Config for Point2Vec Actor-Critic on object + tool xyz point clouds.
-
-    Observation layout (env_tool):
-        object_cloud (512*3=1536) | tool_cloud (512*3=1536) | extra_state
-    """
+    """Point2Vec policy config sourced from rl_runtime_spec.json."""
 
     class_name: str = "ActorCriticPoint2Vec"
 
-    # Point cloud / state layout
-    point_dim: int = 3  # Only coordinates supported (3D)
-    num_points: int = 512
-    num_obstacles: int = 1
+    num_points: int = int(_policy("num_points"))
+    point_dim: int = int(_policy("point_dim"))
+    encoder_weights_path: str = str(_policy("encoder_weights_path"))
+    point2vec_ckpt_path: str = str(_policy_for_class("point2vec_ckpt_path", "ActorCriticPoint2Vec", ""))
+    freeze_encoder: bool = bool(_policy("freeze_encoder"))
+    freeze_point2vec: bool = bool(_policy("freeze_point2vec", _policy("freeze_encoder")))
 
-    # Point2Vec encoder settings
-    point2vec_ckpt_path: str | None = POINT2VEC_CKPT_PATH
-    freeze_point2vec: bool = True
+    tokenizer_num_groups: int = int(_policy_for_class("tokenizer_num_groups", "ActorCriticPoint2Vec", 1))
+    tokenizer_group_size: int = int(_policy_for_class("tokenizer_group_size", "ActorCriticPoint2Vec", 1))
+    tokenizer_group_radius: float | None = _policy("tokenizer_group_radius")
+    encoder_dim: int = int(_policy_for_class("encoder_dim", "ActorCriticPoint2Vec", 1))
+    encoder_depth: int = int(_policy_for_class("encoder_depth", "ActorCriticPoint2Vec", 1))
+    encoder_heads: int = int(_policy_for_class("encoder_heads", "ActorCriticPoint2Vec", 1))
+    encoder_dropout: float = float(_policy("encoder_dropout", 0.0))
+    encoder_attention_dropout: float = float(_policy("encoder_attention_dropout", 0.0))
+    encoder_drop_path_rate: float = float(_policy("encoder_drop_path_rate", 0.2))
+    encoder_add_pos_at_every_layer: bool = bool(_policy("encoder_add_pos_at_every_layer", True))
+    train_transformations: list[str] = list(_policy("train_transformations", ("unit_sphere",)))
+    val_transformations: list[str] = list(_policy("val_transformations", ("unit_sphere",)))
 
-    # Tokenizer settings
-    tokenizer_num_groups: int = 64
-    tokenizer_group_size: int = 32
-    tokenizer_group_radius: float | None = None
+    sd_num_query: int = int(_policy("sd_num_query"))
+    sd_emb_dim: int = int(_policy("sd_emb_dim"))
+    sd_cat_query: bool = bool(_policy("sd_cat_query", False))
+    sd_cat_ctx: bool = bool(_policy("sd_cat_ctx", True))
+    sd_query_keys: tuple[str, ...] = tuple(_policy("sd_query_keys", ("context",)))
+    cross_attn_heads: int = int(_policy("cross_attn_heads"))
+    cross_attn_layers: int = int(_policy("cross_attn_layers"))
+    cross_attn_ff_dim: int | None = _policy("cross_attn_ff_dim")
+    cross_attn_dropout: float = float(_policy("cross_attn_dropout", 0.0))
 
-    # Encoder settings
-    encoder_dim: int = 384
-    encoder_depth: int = 12
-    encoder_heads: int = 6
-    encoder_dropout: float = 0.0
-    encoder_attention_dropout: float = 0.05
-    encoder_drop_path_rate: float = 0.25
-    encoder_add_pos_at_every_layer: bool = True
+    hand_state_dim: int = int(_policy("hand_state_dim"))
+    robot_state_dim: int = int(_policy("robot_state_dim"))
+    previous_action_dim: int = int(_policy("previous_action_dim"))
+    relative_goal_dim: int = int(_policy("relative_goal_dim"))
+    physics_dim: int = int(_policy("physics_dim"))
 
-    # Feature aggregation
-    use_max_pooling: bool = True
-    use_mean_pooling: bool = True
+    fusion_hidden_dims: list[int] = list(_policy("fusion_hidden_dims"))
+    actor_hidden_dims: list[int] = list(_policy("actor_hidden_dims"))
+    critic_hidden_dims: list[int] = list(_policy("critic_hidden_dims"))
 
-    # Data transformations
-    train_transformations: list[str] = field(default_factory=lambda: ["center", "unit_sphere"])
-    val_transformations: list[str] = field(default_factory=lambda: ["center", "unit_sphere"])
+    activation: str = str(_policy("activation", "elu"))
+    init_noise_std: float = float(_policy("init_noise_std", 1.0))
+    noise_std_type: str = str(_policy("noise_std_type", "scalar"))
 
-    # StateDependentCrossFeatNet settings
-    use_sd_cross: bool = True
-    sd_num_query: int = 16
-    sd_emb_dim: int = 128
-    sd_cat_query: bool = False
-    sd_cat_ctx: bool = True
 
-    # Actor / Critic heads
-    fusion_hidden_dims: list[int] = field(default_factory=lambda: [256, 128, 64])
-    actor_hidden_dims: list[int] = field(default_factory=lambda: [64])
-    critic_hidden_dims: list[int] = field(default_factory=lambda: [64])
-
-    # Activation / noise
-    activation: str = "gelu"
-    init_noise_std: float = 1.0
-    noise_std_type: str = "scalar"
+def _policy_cfg():
+    if _POLICY_CLASS_NAME == "ActorCriticTG":
+        return TGActorCriticCfg()
+    if _POLICY_CLASS_NAME == "ActorCriticPoint2Vec":
+        return Point2VecActorCriticCfg()
+    raise RuntimeError(f"Unsupported actor_critic_class in runtime spec: {_POLICY_CLASS_NAME!r}")
 
 
 @configclass
-class Point2VecPPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    """RSL-RL PPO configuration for Point2Vec-encoder-based training."""
+class TGPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    """RSL-RL PPO config sourced from rl_runtime_spec.json."""
 
-    num_steps_per_env = 8
-    max_iterations = 1000000
-    save_interval = 500
+    num_steps_per_env = int(_RUNTIME_SPEC["num_steps_per_env"])
+    max_iterations = int(_RUNTIME_SPEC["max_iterations"])
+    save_interval = int(_ppo("save_interval"))
 
-    experiment_name = "franka_nonprehensile_point2vec"
-
+    _launch_params = _RUNTIME_SPEC.get("launch_params") or {}
+    experiment_name = str(
+        _launch_params.get("wandb_project")
+        or _RUNTIME_SPEC.get("task_id")
+        or "tool_generalist_rl"
+    )
+    run_name = str(
+        _launch_params.get("run_name")
+        or _RUNTIME_SPEC.get("artifact_dir")
+        or experiment_name
+    )
     empirical_normalization = False
-
-    policy = Point2VecActorCriticCfg()
+    policy = _policy_cfg()
 
     algorithm = RslRlPpoAlgorithmCfg(
-        value_loss_coef=0.5,
-        use_clipped_value_loss=True,
-        clip_param=0.3,
-        entropy_coef=0.006,
-        num_learning_epochs=8,
-        num_mini_batches=8,
-        learning_rate=5.0e-5,
-        schedule="adaptive",
-        gamma=0.99,
-        lam=0.95,
-        desired_kl=0.016,
-        max_grad_norm=1.0,
+        value_loss_coef=float(_ppo("value_loss_coef")),
+        use_clipped_value_loss=bool(_ppo("use_clipped_value_loss")),
+        clip_param=float(_ppo("clip_param")),
+        entropy_coef=float(_ppo("entropy_coef")),
+        num_learning_epochs=int(_ppo("num_learning_epochs")),
+        num_mini_batches=int(_ppo("num_mini_batches")),
+        learning_rate=float(_ppo("learning_rate")),
+        schedule=str(_ppo("schedule")),
+        gamma=float(_ppo("gamma")),
+        lam=float(_ppo("lam")),
+        desired_kl=float(_ppo("desired_kl")),
+        max_grad_norm=float(_ppo("max_grad_norm")),
     )
-
-
-# =============================================================================
-# SDF Encoder configuration — for tool-sdf-v0
-# =============================================================================
-
-@configclass
-class SDFActorCriticCfg:
-    """Config for Actor-Critic using SDFPointCloudEncoder (joint ViT encoder).
-
-    Observation layout:
-        object_cloud (512*3=1536) | tool_cloud (512*3=1536)
-        | obj_centroid (3) | tool_centroid (3) | extra_state (46)
-    Uses ActorCriticSDF: joint ViT encoder processes tool + object together.
-
-    NOTE: vit_depth / encoder_channel MUST match the pretrained checkpoint.
-    The new_pretrain/config.py uses vit_depth=12, encoder_channel=128.
-    """
-
-    class_name: str = "ActorCriticSDF"
-
-    # Point cloud settings
-    num_points: int = 512
-    point_dim: int = 3
-    patch_size: int = 32
-
-    # Encoder architecture — must match new_pretrain/config.py
-    encoder_channel: int = 128
-    vit_depth: int = 12
-    vit_heads: int = 4
-
-    # Encoder weights (pretrained from SDF pretraining)
-    encoder_weights_path: str | None = "/path/to/best.pt"
-    freeze_encoder: bool = True
-
-    # StateDependentCrossFeatNet settings
-    use_learnable_query_tokens: bool = False
-    sd_num_query: int = 16
-    sd_num_query_object: int | None = 8
-    sd_emb_dim: int = 128
-    sd_cat_query: bool = False
-    sd_cat_ctx: bool = True
-    sd_query_keys: tuple | None = None
-
-    # Learnable query tokens settings (when use_learnable_query_tokens=True)
-    num_query_object_tokens: int | None = None
-    num_query_tokens: int = 16
-    cross_attn_heads: int = 4
-    cross_attn_layers: int = 1
-    cross_attn_ff_dim: int | None = None
-    cross_attn_dropout: float = 0.0
-
-    # Actor / Critic heads
-    fusion_hidden_dims: list[int] = field(default_factory=lambda: [512, 256, 128])
-    actor_hidden_dims: list[int] = field(default_factory=lambda: [64,64])
-    critic_hidden_dims: list[int] = field(default_factory=lambda: [128,64])
-
-    # Activation / noise
-    activation: str = "elu"
-    init_noise_std: float = 1.0
-    noise_std_type: str = "scalar"
-
-
-@configclass
-class SDFPPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    """RSL-RL PPO configuration for SDF-encoder-based task.
-
-    Uses the same NonPrehensileEnv from env_tool.py but with ActorCriticSDF policy.
-    """
-
-    num_steps_per_env = 8
-    max_iterations = 1000000
-    save_interval = 200
-
-    experiment_name = "franka_nonprehensile_sdf"
-
-    empirical_normalization = False
-
-    policy = SDFActorCriticCfg()
-
-    algorithm = RslRlPpoAlgorithmCfg(
-        value_loss_coef=0.5,
-        use_clipped_value_loss=True,
-        clip_param=0.3,
-        entropy_coef=0.005,
-        num_learning_epochs=8,
-        num_mini_batches=8,
-        learning_rate=5.0e-5,
-        schedule="adaptive",
-        gamma=0.99,
-        lam=0.95,
-        desired_kl=0.016,
-        max_grad_norm=1.0,
-    )
-
-
-# =============================================================================
-# SDF Variant Registry — experiment variants with shared encoder
-# =============================================================================
-# Each entry: "suffix" -> {policy overrides} or {"policy": {...}, "runner": {...}}
-# Registered as gym task "tool-sdf-<suffix>"
-#
-# Usage:
-#   python train.py --task tool-sdf-frozen-v0
-#   python train.py --task tool-sdf-learnable-query-v0
-#   python train.py --task tool-sdf-finetune-v0
-#
-# To add a new experiment, just add an entry here — no new classes needed.
-# =============================================================================
-
-SDF_VARIANTS: dict[str, dict] = {
-    "teardrop-point-v0": {
-        "policy": {
-            "encoder_weights_path": "/mnt/project/world_model/tool_generalist/model/encoder/teardrop_sdf_point/best.pt",
-        },
-        "runner": {
-            "experiment_name": "teardrop_sdf_point",
-        },
-    },
-    "teardrop-patch-v0": {
-        "policy": {
-            "encoder_weights_path": "/mnt/project/world_model/tool_generalist/model/encoder/teardrop_sdf_patch/best.pt",
-        },
-        "runner": {
-            "experiment_name": "teardrop_sdf_patch",
-        },
-    },
-    "fork-patch-v0": {
-        "policy": {
-            "encoder_weights_path": "/mnt/project/world_model/tool_generalist/model/encoder/fork_sdf_patch/best.pt",
-        },
-        "runner": {
-            "experiment_name": "fork_sdf_patch",
-        },
-    },
-    "teardrop-movement-v0": {
-        "policy": {
-            "encoder_weights_path": "/mnt/project/world_model/tool_generalist/model/encoder/teardrop_sdf_movement/best.pt",
-        },
-        "runner": {
-            "experiment_name": "teardrop_sdf_movement",
-        },
-    },
-    "teardrop-movement-patch-v0": {
-        "policy": {
-            "encoder_weights_path": "/mnt/project/world_model/tool_generalist/model/encoder/teardrop_sdf_movement_patch/best.pt",
-        },
-        "runner": {
-            "experiment_name": "teardrop_sdf_movement_patch",
-        },
-    },
-    "teardrop-diffusion-patch-v0": {
-        "policy": {
-            "encoder_weights_path": "/mnt/project/world_model/tool_generalist/model/encoder/teardrop_sdf_diff/best.pt",
-        },
-        "runner": {
-            "experiment_name": "teardrop_sdf_diffusion",
-        },
-    },
-    "fork-diffusion-patch-v0": {
-        "policy": {
-            "encoder_weights_path": "/mnt/project/world_model/tool_generalist/model/encoder/fork_sdf_diff_patch/best.pt",
-        },
-        "runner": {
-            "experiment_name": "teardrop_sdf_diffusion",
-        },
-    },
-    "teardrop-joint-v0": {
-        "policy": {
-            "encoder_weights_path": "/mnt/project/world_model/tool_generalist/model/encoder/teardrop_joint/best.pt",
-        },
-        "runner": {
-            "experiment_name": "teardrop_sdf_joint",
-        },
-    },
-    "multitool-patch-v0": {
-        "policy": {
-            "encoder_weights_path": "/mnt/project/world_model/tool_generalist/model/encoder/tool_sdf_patch/best.pt",
-        },
-        "runner": {
-            "experiment_name": "multitool_sdf_patch",
-        }
-    },
-    "multitool-point-v0": {
-        "policy": {
-            "encoder_weights_path": "/mnt/project/world_model/tool_generalist/model/encoder/tool_sdf_point/best.pt",
-        },
-        "runner": {
-            "experiment_name": "multitool_sdf_point",
-        }
-    }
-}
-
-
-def make_sdf_variant(suffix: str, overrides: dict):
-    """Create a (RunnerCfg class, gym_id) pair from overrides on the base SDF config.
-
-    ``overrides`` can be:
-      - A flat dict of SDFActorCriticCfg field overrides (shorthand)
-      - {"policy": {...}, "runner": {...}} for full control
-
-    Returns (RunnerCfgClass, gym_id_string).
-    """
-    policy_ov = overrides.get("policy", overrides if "runner" not in overrides else {})
-    runner_ov = overrides.get("runner", {})
-
-    # --- Build policy config ---
-    policy_cfg = SDFActorCriticCfg()
-    for k, v in policy_ov.items():
-        setattr(policy_cfg, k, v)
-
-    # --- Build runner config class (dynamic @configclass) ---
-    runner_attrs = {
-        "policy": policy_cfg,
-        "experiment_name": runner_ov.get(
-            "experiment_name", f"franka_sdf_{suffix.replace('-', '_')}"
-        ),
-    }
-    # Apply any other runner-level overrides
-    for k, v in runner_ov.items():
-        if k != "experiment_name":
-            runner_attrs[k] = v
-
-    cls_name = f"SDFPPORunnerCfg_{'_'.join(suffix.split('-'))}"
-    VariantRunnerCfg = configclass(
-        type(cls_name, (SDFPPORunnerCfg,), runner_attrs)
-    )
-
-    gym_id = f"tool-sdf-{suffix}"
-    return VariantRunnerCfg, gym_id

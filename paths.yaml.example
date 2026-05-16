@@ -19,7 +19,6 @@ tools:
   # Manifests.
   tools_adjusted_json: /path/to/eef/tools_adjusted.json
   tools_selected_json: /path/to/eef/tools_selected.json
-  tool_asset_metadata_json: /path/to/eef/tool_asset_metadata.json
 
   # Source Franka asset tree used by the external tool asset pipeline.
   franka_src_root: /path/to/FrankaEmika

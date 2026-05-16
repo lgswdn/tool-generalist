@@ -12,26 +12,16 @@ import torch
 from collections import deque
 
 import rsl_rl
-from rsl_rl.algorithms import PPO, Distillation
+from rsl_rl.algorithms import PPO, Distillation, resolve_algorithm_class
 from rsl_rl.env import VecEnv
 from rsl_rl.modules import (
     ActorCritic,
     ActorCriticRecurrent,
-    ActorCriticPointNet,
-    ActorCriticICP,
-    ActorCriticMultiICP,
-    ActorCriticMultiICP_HandState,
-    ActorCriticUnicorn,
-    ActorCriticMultiUnicorn,
-    ActorCriticToolUnicorn,
-    ActorCriticMomentum,
-    ActorCriticPTV3Momentum,
-    ActorCriticConcerto,
-    ActorCriticPoint2Vec,
-    ActorCriticSDF,
+    ActorCriticTG,
     EmpiricalNormalization,
     StudentTeacher,
     StudentTeacherRecurrent,
+    resolve_policy_class,
 )
 from rsl_rl.utils import store_code_state
 
@@ -79,23 +69,12 @@ class OnPolicyRunner:
         else:
             num_privileged_obs = num_obs
 
-        # evaluate the policy class
-        policy_class = eval(self.policy_cfg.pop("class_name"))
+        # resolve the policy class through the config-driven registry
+        policy_class = resolve_policy_class(self.policy_cfg.pop("class_name"))
         policy: (
             ActorCritic
             | ActorCriticRecurrent
-            | ActorCriticICP
-            | ActorCriticPointNet
-            | ActorCriticMultiICP
-            | ActorCriticMultiICP_HandState
-            | ActorCriticUnicorn
-            | ActorCriticMultiUnicorn
-            | ActorCriticToolUnicorn
-            | ActorCriticMomentum
-            | ActorCriticPTV3Momentum
-            | ActorCriticConcerto
-            | ActorCriticPoint2Vec
-            | ActorCriticSDF
+            | ActorCriticTG
             | StudentTeacher
             | StudentTeacherRecurrent
         ) = policy_class(
@@ -121,7 +100,7 @@ class OnPolicyRunner:
             self.alg_cfg["symmetry_cfg"]["_env"] = env
 
         # initialize algorithm
-        alg_class = eval(self.alg_cfg.pop("class_name"))
+        alg_class = resolve_algorithm_class(self.alg_cfg.pop("class_name"))
         self.alg: PPO | Distillation = alg_class(
             policy, device=self.device, **self.alg_cfg, multi_gpu_cfg=self.multi_gpu_cfg
         )
@@ -225,6 +204,12 @@ class OnPolicyRunner:
         start_iter = self.current_learning_iteration
         tot_iter = start_iter + num_learning_iterations
         for it in range(start_iter, tot_iter):
+            if hasattr(self.alg, "reset_encoder_call_stats"):
+                self.alg.reset_encoder_call_stats()
+            if hasattr(self.alg, "reset_collect_timing"):
+                self.alg.reset_collect_timing()
+            if hasattr(self.alg, "sync_collect_timing_cuda"):
+                self.alg.sync_collect_timing_cuda()
             start = time.time()
             # Rollout
             with torch.inference_mode():
@@ -279,9 +264,15 @@ class OnPolicyRunner:
                             cur_ereward_sum[new_ids] = 0
                             cur_ireward_sum[new_ids] = 0
 
+                if hasattr(self.alg, "sync_collect_timing_cuda"):
+                    self.alg.sync_collect_timing_cuda()
                 stop = time.time()
                 collection_time = stop - start
-                start = stop
+                if hasattr(self.alg, "collect_timing_summary"):
+                    collect_timing_summary = self.alg.collect_timing_summary(it, collection_time)
+                    if collect_timing_summary is not None:
+                        print(collect_timing_summary)
+                start = time.time()
 
                 # compute returns
                 if self.training_type == "rl":
@@ -289,9 +280,12 @@ class OnPolicyRunner:
 
             # update policy
             loss_dict = self.alg.update()
-
             stop = time.time()
             learn_time = stop - start
+            if hasattr(self.alg, "encoder_call_stats_summary"):
+                encoder_call_summary = self.alg.encoder_call_stats_summary(it)
+                if encoder_call_summary is not None:
+                    print(encoder_call_summary)
             self.current_learning_iteration = it
             # log info
             if self.log_dir is not None and not self.disable_logs:

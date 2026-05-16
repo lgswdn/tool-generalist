@@ -1,291 +1,305 @@
-"""dataset.py — ContactDataset for geometry encoder pretraining.
+"""contact_pt_env_v1 dataset for geometry pretraining.
 
-Each .pt file stores:
-  Shared (once per file):
-    tool_pts_canonical  (P, 3)  surface points in canonical tool frame
-    obj_pts_canonical   (Q, 3)  surface points in canonical object frame (before R_obj)
-    object_rotation     (3, 3)  R_obj
-    obj_z_shift         scalar  grounding offset
-
-  Per contact config:
-    tool_translations  (N, 3)
-    tool_rotations     (N, 3, 3)
-    tool_pts_sdf       (N, P)  signed SDF: tool canonical pts → object  (+out/-in)
-    obj_pts_sdf        (N, Q)  signed SDF: object canonical pts → tool  (+out/-in)
-    contact_pts_obj_frame   (N, 5, 3)
-    contact_pts_tool_frame  (N, 5, 3)
-    contact_normals         (N, 5, 3)
-
-Each dataset item corresponds to one config index i from one .pt file.
-The canonical clouds serve as the geometry input; the SDF arrays provide
-the dense supervision signal for mutual tool↔object encoder training.
+The loader treats the v1 schema as the only source of truth.  Mesh paths,
+scales, explicit mesh bbox centers, per-contact poses, and point-sampling seeds
+drive reconstruction; legacy point-cloud and pose fields are ignored.
 """
 
 from __future__ import annotations
 
 import random
-import warnings
 from pathlib import Path
-from typing import List, Tuple
+from typing import Any, Iterable, Mapping
 
 import torch
 from torch.utils.data import Dataset
 
-# --------------------------------------------------------------------------- #
-# Constants
-# --------------------------------------------------------------------------- #
-NUM_TOOL_PTS = 512  # matches ICPNet expected input size
-NUM_OBJ_PTS  = 512
-
-# Normalization scale for per-point displacement targets (in metres).
-# Raw displacements are ~4mm avg, ~3cm max → dividing by 0.01 gives ~0.4 avg, ~3.0 max,
-# matching the dynamic range of SDF targets and preventing trivial zero-prediction.
-DISPLACEMENT_NORM_SCALE = 0.01  # 1 cm
-DELTA_TRANSLATION_NORM_SCALE = 0.0252
-DELTA_ROTATION_6D_NORM_SCALE = 0.9946
+from utils.contact.schema import (
+    CONTACT_SCHEMA_VERSION,
+    ContactSchemaError,
+    load_and_validate_contact_pt,
+)
+from utils.geometry.mesh_io import load_mesh_vertices_faces, load_scaled_sampled_surface_points, scale_vertices
+from utils.pretrain.noise_utils import build_precontact_trajectory
 
 
-# --------------------------------------------------------------------------- #
-# Dataset
-# --------------------------------------------------------------------------- #
+NUM_TOOL_PTS = 512
+NUM_OBJ_PTS = 512
 
-class ContactDataset(Dataset):
-    """Each item is one (tool_pc, object_pc, contact_pts, sdf, …) bundle.
+def _as_float_tensor(value: Any, shape: tuple[int, ...] | None = None, key: str = "value") -> torch.Tensor:
+    tensor = torch.as_tensor(value, dtype=torch.float32)
+    if shape is not None and tuple(tensor.shape) != shape:
+        raise ContactSchemaError(f"{key} must have shape {shape}, got {tuple(tensor.shape)}")
+    return tensor
 
-    Geometry:
-        tool_pc  — canonical tool cloud applied with tool rotation + translation
-        obj_pc   — canonical object cloud applied with R_obj + z_shift
 
-    SDF supervision (per-config, same point ordering as the clouds above):
-        tool_pts_sdf  — signed SDF of tool canonical pts to object
-        obj_pts_sdf   — signed SDF of object canonical pts to tool
+def _sample_surface_points(
+    mesh_path: str | Path,
+    *,
+    scale: Any,
+    bbox_center: torch.Tensor,
+    num_points: int,
+    seed: int,
+) -> torch.Tensor:
+    """Sample mesh surface points, then subtract the explicit schema bbox center."""
 
-    Note: Data is generated at RL scale (tool_scale=0.1, object_scale in 0.1-0.2).
-          No additional scale augmentation needed.
-    """
+    points = load_scaled_sampled_surface_points(
+        mesh_path,
+        scale=scale,
+        num_points=num_points,
+        seed=int(seed),
+        process=False,
+    )
+    centered = torch.as_tensor(points, dtype=torch.float32) - bbox_center.to(dtype=torch.float32)
+    return centered.contiguous()
 
-    # Keys required for movement prediction task
-    _MOVEMENT_KEYS = {
-        "delta_obj_translations", "delta_obj_rotations",
-        "movement_contact_pts",
-        "delta_tool_translations", "delta_tool_rotations",
-    }
+
+def _load_centered_mesh_tensors(
+    mesh_path: str | Path,
+    *,
+    scale: Any,
+    bbox_center: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    vertices, faces = load_mesh_vertices_faces(mesh_path, process=False)
+    scaled = scale_vertices(vertices, scale)
+    centered = torch.as_tensor(scaled, dtype=torch.float32) - bbox_center.to(dtype=torch.float32)
+    return centered.contiguous(), torch.as_tensor(faces, dtype=torch.long).contiguous()
+
+
+class NewPretrainDataset(Dataset):
+    """Dataset indexed by individual contact cases in contact_pt_env_v1 files."""
 
     def __init__(
         self,
-        pt_files: List[str],
+        pt_files: Iterable[str | Path],
         augment: bool = True,
         require_movement: bool = False,
+        *,
+        num_points: int = NUM_TOOL_PTS,
+        num_precontact_steps: int = 4,
+        allow_mock_physics: bool = False,
+        noise_max_trans: float = 0.1,
+        noise_max_rot_deg: float = 30.0,
+        noise_max_retries: int = 10,
+        floor_eps: float = 0.0,
+        penetration_eps: float | None = None,
+        validation_seed: int = 12345,
+        denoise_target_mode: str = "one_step",
     ):
-        self.augment = augment
+        if int(num_precontact_steps) < 0:
+            raise ValueError("num_precontact_steps must be non-negative")
 
-        # Expand: (pt_file, config_index) pairs
-        self._index: List[Tuple[str, int]] = []
-        self._pt_cache: dict = {}
-        self._skipped_files: List[str] = []  # Track corrupted files
-        self._skipped_movement_configs: int = 0
+        self.augment = bool(augment)
+        self.require_movement = bool(require_movement)
+        self.num_points = int(num_points)
+        self.num_precontact_steps = int(num_precontact_steps)
+        self.allow_mock_physics = bool(allow_mock_physics)
+        self.noise_max_trans = float(noise_max_trans)
+        self.noise_max_rot_deg = float(noise_max_rot_deg)
+        self.noise_max_retries = int(noise_max_retries)
+        self.floor_eps = float(floor_eps)
+        self.penetration_eps = penetration_eps
+        self.validation_seed = int(validation_seed)
+        self.denoise_target_mode = str(denoise_target_mode)
 
-        for path in pt_files:
-            try:
-                data = torch.load(path, map_location="cpu", weights_only=False)
-                n = data["tool_translations"].shape[0]
+        self._index: list[tuple[str, int]] = []
+        self._pt_cache: dict[str, Mapping[str, Any]] = {}
+        self._cloud_cache: dict[str, dict[str, torch.Tensor]] = {}
+        self._mesh_cache: dict[str, dict[str, torch.Tensor]] = {}
+        self._source_paths: list[str] = []
 
-                # If movement is required, skip files missing movement keys entirely
-                if require_movement and not self._MOVEMENT_KEYS.issubset(data.keys()):
-                    self._skipped_files.append(path)
+        for raw_path in pt_files:
+            path = str(Path(raw_path))
+            data = load_and_validate_contact_pt(
+                path,
+                allow_mock=self.allow_mock_physics,
+                require_real_physics=False,
+                require_complete=True,
+            )
+            self._pt_cache[path] = data
+            self._cloud_cache[path] = self._reconstruct_clouds(data)
+            self._mesh_cache[path] = self._reconstruct_meshes(data)
+            self._source_paths.append(path)
+
+            movement_valid = data.get("movement_delta_valid")
+            n = int(data["num_contacts"])
+            for contact_i in range(n):
+                if (
+                    self.require_movement
+                    and movement_valid is not None
+                    and not bool(torch.as_tensor(movement_valid)[contact_i])
+                ):
                     continue
+                self._index.append((path, contact_i))
 
-                for i in range(n):
-                    if require_movement:
-                        # Validate per-config movement data is accessible
-                        try:
-                            _ = data["delta_obj_rotations"][i]
-                            _ = data["delta_obj_translations"][i]
-                            _ = data["movement_contact_pts"][i]
-                            _ = data["delta_tool_translations"][i]
-                            _ = data["delta_tool_rotations"][i]
-                        except Exception:
-                            self._skipped_movement_configs += 1
-                            continue
-                    self._index.append((path, i))
-                self._pt_cache[path] = data
-            except (RuntimeError, IOError, OSError) as e:
-                # Corrupted or unreadable .pt file — skip with warning
-                warnings.warn(f"Skipping corrupted file {path}: {e}")
-                self._skipped_files.append(path)
+    @property
+    def source_paths(self) -> tuple[str, ...]:
+        return tuple(self._source_paths)
+
+    @property
+    def schema_version(self) -> str:
+        return CONTACT_SCHEMA_VERSION
+
+    def _reconstruct_clouds(self, data: Mapping[str, Any]) -> dict[str, torch.Tensor]:
+        object_center = _as_float_tensor(data["object_bbox_center_M"], (3,), "object_bbox_center_M")
+        tool_center = _as_float_tensor(data["tool_bbox_center_M"], (3,), "tool_bbox_center_M")
+        object_points = _sample_surface_points(
+            data["object_mesh_path"],
+            scale=float(data["object_scale"]),
+            bbox_center=object_center,
+            num_points=self.num_points,
+            seed=int(data["object_point_sample_seed"]),
+        )
+        tool_points = _sample_surface_points(
+            data["tool_mesh_path"],
+            scale=_as_float_tensor(data["tool_scale_xyz"], (3,), "tool_scale_xyz"),
+            bbox_center=tool_center,
+            num_points=self.num_points,
+            seed=int(data["tool_point_sample_seed"]),
+        )
+        return {
+            "object_points_O": object_points,
+            "tool_points_T": tool_points,
+        }
+
+    def _reconstruct_meshes(self, data: Mapping[str, Any]) -> dict[str, torch.Tensor]:
+        object_center = _as_float_tensor(data["object_bbox_center_M"], (3,), "object_bbox_center_M")
+        tool_center = _as_float_tensor(data["tool_bbox_center_M"], (3,), "tool_bbox_center_M")
+        object_vertices, object_faces = _load_centered_mesh_tensors(
+            data["object_mesh_path"],
+            scale=float(data["object_scale"]),
+            bbox_center=object_center,
+        )
+        tool_vertices, tool_faces = _load_centered_mesh_tensors(
+            data["tool_mesh_path"],
+            scale=_as_float_tensor(data["tool_scale_xyz"], (3,), "tool_scale_xyz"),
+            bbox_center=tool_center,
+        )
+        return {
+            "object_mesh_vertices": object_vertices,
+            "object_mesh_faces": object_faces,
+            "tool_mesh_vertices": tool_vertices,
+            "tool_mesh_faces": tool_faces,
+        }
 
     def __len__(self) -> int:
         return len(self._index)
 
-    def get_skipped_files(self) -> List[str]:
-        """Return list of corrupted files that were skipped during initialization."""
-        return self._skipped_files
-
-    def __getitem__(self, idx: int):
-        pt_path, cfg_i = self._index[idx]
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        pt_path, contact_i = self._index[idx]
         data = self._pt_cache[pt_path]
+        clouds = self._cloud_cache[pt_path]
+        meshes = self._mesh_cache[pt_path]
 
-        # ---- Canonical clouds (stored once per file, already at RL scale) ----
-        P_tool = data["tool_pts_canonical"]  # (P, 3) - already scaled by tool_scale
-        P_obj  = data["obj_pts_canonical"]   # (Q, 3) - already scaled by object_scale
-
-        # ---- Reconstruct world-frame clouds ----------------------------------
-        # Tool at CONTACT pose (for SDF task)
-        R_tool_contact = data["tool_rotations"][cfg_i]      # (3, 3)
-        t_tool_contact = data["tool_translations"][cfg_i]   # (3,)
-        tool_pc = P_tool @ R_tool_contact.T + t_tool_contact  # (P, 3) - for SDF
-
-        # Object: apply R_obj + z_shift (same for all configs in this file)
-        R_obj   = data["object_rotation"]            # (3, 3)
-        z_shift = data["obj_z_shift"]               # scalar
-        obj_pc  = P_obj @ R_obj.T                    # (Q, 3)
-        obj_pc  = obj_pc.clone()
-        obj_pc[:, 2] -= z_shift
-
-        # Tool at INITIAL pose (for diffusion task)
-        tool_pc_init = None
-        if "init_translations" in data and "init_rotations" in data:
-            R_tool_init = data["init_rotations"][cfg_i]      # (3, 3)
-            t_tool_init = data["init_translations"][cfg_i]   # (3,)
-            tool_pc_init = P_tool @ R_tool_init.T + t_tool_init  # (P, 3)
-
-        # ---- SDF arrays (per-config) -----------------------------------------
-        # SDF at contact pose
-        tool_pts_sdf = data["tool_pts_sdf"][cfg_i]  # (P,)  signed
-        obj_pts_sdf  = data["obj_pts_sdf"][cfg_i]   # (Q,)  signed
-
-        # SDF at initial pose (if available)
-        init_tool_pts_sdf = None
-        init_obj_pts_sdf = None
-        if "init_tool_pts_sdf" in data and "init_obj_pts_sdf" in data:
-            init_tool_pts_sdf = data["init_tool_pts_sdf"][cfg_i]  # (P,)
-            init_obj_pts_sdf = data["init_obj_pts_sdf"][cfg_i]   # (Q,)
-
-        # ---- Contact geometry (sparse) ---------------------------------------
-        # Use world-frame contacts (new key name)
-        contact_pts     = data["contact_pts_world"][cfg_i]      # (5, 3)
-        contact_normals = data["contact_normals"][cfg_i]        # (5, 3)
-
-        # ---- Diffusion inputs: delta pose ----------
-        delta_pose = None
-        if "init_translations" in data and "init_rotations" in data:
-            # Initial pose
-            init_t = data["init_translations"][cfg_i]    # (3,)
-            init_R = data["init_rotations"][cfg_i]       # (3, 3)
-
-            # Contact pose
-            contact_t = data["tool_translations"][cfg_i]  # (3,)
-            contact_R = data["tool_rotations"][cfg_i]     # (3, 3)
-
-            # Delta translation
-            delta_t = contact_t - init_t  # (3,)
-
-            # Delta rotation
-            delta_R = contact_R @ init_R.T  # (3, 3)
-            delta_R_6d = delta_R[:, :2].reshape(6)  # (6,)
-
-            delta_t_norm = delta_t / DELTA_TRANSLATION_NORM_SCALE
-            delta_R_6d_norm = delta_R_6d / DELTA_ROTATION_6D_NORM_SCALE
-
-            # Full delta pose (9D) 
-            delta_pose = torch.cat([delta_t_norm, delta_R_6d_norm], dim=0)  # (9,)
-
-        # ---- Init pose (9D: translation + 6D rotation) ----
-        init_pose = None
-        init_translation = None
-        if "init_translations" in data and "init_rotations" in data:
-            init_t = data["init_translations"][cfg_i]    # (3,)
-            init_R = data["init_rotations"][cfg_i]       # (3, 3)
-            init_R_6d = init_R[:, :2].reshape(6)         # (6,)
-            init_pose = torch.cat([init_t, init_R_6d], dim=0)  # (9,)
-            init_translation = init_t
-
-        # ---- Movement prediction: per-point displacement (on-the-fly) ---------
-        obj_point_displacement = None
-        tool_delta_pose_9d = None
-        if ("delta_obj_translations" in data and "delta_obj_rotations" in data
-                and "movement_contact_pts" in data):
-            try:
-                delta_R_obj = data["delta_obj_rotations"][cfg_i]      # (3, 3)
-                delta_t_obj = data["delta_obj_translations"][cfg_i]   # (3,)
-                pivot = data["movement_contact_pts"][cfg_i]           # (3,)
-
-                # Per-point displacement for object cloud (world-frame)
-                # obj_new = delta_R_obj @ (obj_pc - pivot) + pivot + delta_t_obj
-                obj_pc_new = (obj_pc - pivot) @ delta_R_obj.T + pivot + delta_t_obj
-                obj_point_displacement = obj_pc_new - obj_pc         # (Q, 3)
-
-                # Normalize: raw displacements are ~4mm avg; scale to ~0.4 avg
-                obj_point_displacement = obj_point_displacement / DISPLACEMENT_NORM_SCALE
-
-                # Tool delta pose as 9D conditioning: trans(3) + rot6d(6)
-                delta_t_tool = data["delta_tool_translations"][cfg_i]  # (3,)
-                delta_R_tool = data["delta_tool_rotations"][cfg_i]     # (3, 3)
-                delta_R_tool_6d = delta_R_tool[:, :2].reshape(6)       # (6,)
-                tool_delta_pose_9d = torch.cat([delta_t_tool, delta_R_tool_6d])  # (9,)
-            except Exception:
-                # Skip invalid data gracefully
-                obj_point_displacement = None
-                tool_delta_pose_9d = None
-
-        # ---- Augmentation: small Gaussian jitter only ------------------------
+        object_points_O = clouds["object_points_O"]
+        tool_points_T = clouds["tool_points_T"]
         if self.augment:
-            tool_pc = tool_pc + torch.randn_like(tool_pc) * 1e-3
-            obj_pc  = obj_pc  + torch.randn_like(obj_pc)  * 1e-3
+            object_points_O = object_points_O + torch.randn_like(object_points_O) * 1e-3
+            tool_points_T = tool_points_T + torch.randn_like(tool_points_T) * 1e-3
+
+        object_R_E = _as_float_tensor(data["object_rotation_E"][contact_i], (3, 3), "object_rotation_E")
+        object_t_E = _as_float_tensor(data["object_bbox_center_E"][contact_i], (3,), "object_bbox_center_E")
+        contact_tool_t_E = _as_float_tensor(data["tool_translation_E"][contact_i], (3,), "tool_translation_E")
+        contact_tool_R_E = _as_float_tensor(data["tool_rotation_E"][contact_i], (3, 3), "tool_rotation_E")
+
+        min_separation = self.penetration_eps
+        if min_separation is None:
+            min_separation = 0.0
+
+        traj = build_precontact_trajectory(
+            tool_points_T=tool_points_T,
+            object_points_O=object_points_O,
+            object_rotation_E=object_R_E,
+            object_bbox_center_E=object_t_E,
+            contact_tool_rotation_E=contact_tool_R_E,
+            contact_tool_translation_E=contact_tool_t_E,
+            num_precontact_steps=self.num_precontact_steps,
+            noise_max_trans=self.noise_max_trans,
+            noise_max_rot_deg=self.noise_max_rot_deg,
+            max_retries=self.noise_max_retries,
+            floor_eps=self.floor_eps,
+            min_separation=float(min_separation),
+            seed=self.validation_seed + int(idx),
+            target_mode=self.denoise_target_mode,
+        )
+
+        physics = torch.stack(
+            [
+                torch.as_tensor(data["object_mass"][contact_i], dtype=torch.float32),
+                torch.as_tensor(data["tool_mass"][contact_i], dtype=torch.float32),
+                torch.as_tensor(data["object_friction"][contact_i], dtype=torch.float32),
+                torch.as_tensor(data["tool_friction"][contact_i], dtype=torch.float32),
+                torch.as_tensor(data["ground_friction"][contact_i], dtype=torch.float32),
+            ]
+        )
 
         return {
-            # World-frame clouds (for encoder input)
-            "tool_pc":             tool_pc.float(),          # (P, 3) - contact pose for SDF task
-            "obj_pc":              obj_pc.float(),           # (Q, 3)
-            "tool_pc_init":        tool_pc_init.float() if tool_pc_init is not None else None,  # (P, 3) - init pose for diffusion
-            # Canonical clouds (pose-invariant geometry)
-            "tool_pts_canonical":  P_tool.float(),           # (P, 3)
-            "obj_pts_canonical":   P_obj.float(),            # (Q, 3)
-            # Dense SDF supervision at contact pose
-            "tool_pts_sdf":        tool_pts_sdf.float(),     # (P,)
-            "obj_pts_sdf":         obj_pts_sdf.float(),      # (Q,)
-            # Dense SDF supervision at initial pose (optional)
-            "init_tool_pts_sdf":   init_tool_pts_sdf.float() if init_tool_pts_sdf is not None else None,  # (P,)
-            "init_obj_pts_sdf":    init_obj_pts_sdf.float() if init_obj_pts_sdf is not None else None,  # (Q,)
-            # Sparse contact geometry
-            "contact_pts":         contact_pts.float(),      # (5, 3)
-            "contact_normals":     contact_normals.float(),  # (5, 3)
-            # Diffusion supervision (optional - None if init poses not generated)
-            "delta_pose":          delta_pose.float() if delta_pose is not None else None,
-            "delta_translation":   delta_pose[:3].float() if delta_pose is not None else None,
-            # Init pose for conditioning tests
-            "init_pose":           init_pose.float() if init_pose is not None else None,  # (9,)
-            "init_translation":    init_translation.float() if init_translation is not None else None,  # (3,)
-            # Movement prediction (optional - None if gen_movement_delta not run)
-            "obj_point_displacement": obj_point_displacement.float() if obj_point_displacement is not None else None,  # (Q, 3)
-            "tool_delta_pose":        tool_delta_pose_9d.float() if tool_delta_pose_9d is not None else None,  # (9,)
+            "schema_version": CONTACT_SCHEMA_VERSION,
+            "pt_path": pt_path,
+            "contact_index": torch.tensor(contact_i, dtype=torch.long),
+            "object_id": str(data["object_id"]),
+            "tool_id": str(data["tool_id"]),
+            "tool_points_T": tool_points_T.float(),
+            "object_points_O": object_points_O.float(),
+            "object_mesh_vertices": meshes["object_mesh_vertices"],
+            "object_mesh_faces": meshes["object_mesh_faces"],
+            "tool_mesh_vertices": meshes["tool_mesh_vertices"],
+            "tool_mesh_faces": meshes["tool_mesh_faces"],
+            "tool_points_E_k": traj["tool_points_E_k"].float(),
+            "object_points_E_k": traj["object_points_E_k"].float(),
+            "rel_tool_object_t_k": traj["rel_tool_object_t_k"].float(),
+            "tool_rotation_E_k": traj["tool_rotation_E_k"].float(),
+            "tool_translation_E_k": traj["tool_translation_E_k"].float(),
+            "object_rotation_E": object_R_E.float(),
+            "object_bbox_center_E": object_t_E.float(),
+            "contact_tool_rotation_E": contact_tool_R_E.float(),
+            "contact_tool_translation_E": contact_tool_t_E.float(),
+            "target_tool_denoise_pose9d_k": traj["target_tool_denoise_pose9d_k"].float(),
+            "target_tool_denoise_mode": self.denoise_target_mode,
+            "target_object_post_delta9d": _as_float_tensor(
+                data["post_object_delta_pose9d_E"][contact_i], (9,), "post_object_delta_pose9d_E"
+            ),
+            "cond_tool_post_delta9d": _as_float_tensor(
+                data["post_tool_delta_pose9d_E"][contact_i], (9,), "post_tool_delta_pose9d_E"
+            ),
+            "cond_object_post_delta9d": _as_float_tensor(
+                data["post_object_delta_pose9d_E"][contact_i], (9,), "post_object_delta_pose9d_E"
+            ),
+            "physics": physics.float(),
         }
 
 
-# --------------------------------------------------------------------------- #
-# Helpers for building the dataset
-# --------------------------------------------------------------------------- #
+def collect_pt_files(data_dir: str | Path) -> list[str]:
+    """Recursively find contact .pt files under ``data_dir``."""
 
-def collect_pt_files(data_dir: str) -> List[str]:
-    """Recursively find all .pt files under data_dir."""
-    return sorted(str(p) for p in Path(data_dir).rglob("*.pt"))
+    blocked_suffixes = (".candidate.pt", ".physics_debug.pt", ".stabilized_success.pt", ".stabilized.pt")
+    return sorted(
+        str(p)
+        for p in Path(data_dir).rglob("*.pt")
+        if not any(str(p).endswith(suffix) for suffix in blocked_suffixes)
+    )
 
 
 def make_split(
-    data_dir: str,
+    data_dir: str | Path,
     val_ratio: float = 0.1,
     seed: int = 42,
     augment: bool = True,
     max_files: int = 0,
     require_movement: bool = False,
-) -> Tuple[ContactDataset, ContactDataset]:
-    """Return (train_dataset, val_dataset) split by file.
+    *,
+    num_points: int = NUM_TOOL_PTS,
+    num_precontact_steps: int = 4,
+    allow_mock_physics: bool = False,
+    noise_max_trans: float = 0.1,
+    noise_max_rot_deg: float = 30.0,
+    noise_max_retries: int = 10,
+    floor_eps: float = 0.0,
+    validation_seed: int = 12345,
+    denoise_target_mode: str = "one_step",
+) -> tuple[NewPretrainDataset, NewPretrainDataset]:
+    """Return ``(train_dataset, val_dataset)`` split by file."""
 
-    Args:
-        max_files: If > 0, limit total number of .pt files before splitting.
-                   Useful for quick single-file overfitting tests.
-        require_movement: If True, only include configs with valid movement data.
-    """
     files = collect_pt_files(data_dir)
     if not files:
         raise RuntimeError(f"No .pt files found under {data_dir}")
@@ -294,12 +308,25 @@ def make_split(
     if max_files > 0:
         files = files[:max_files]
     n_val = max(1, int(len(files) * val_ratio))
-    val_files   = files[:n_val]
-    train_files = files[n_val:]
-    if not train_files:
-        # If only 1 file, use it for both train and val
-        train_files = val_files
-    return (
-        ContactDataset(train_files, augment=augment, require_movement=require_movement),
-        ContactDataset(val_files,   augment=False,   require_movement=require_movement),
+    val_files = files[:n_val]
+    train_files = files[n_val:] or val_files
+
+    common = dict(
+        require_movement=require_movement,
+        num_points=num_points,
+        num_precontact_steps=num_precontact_steps,
+        allow_mock_physics=allow_mock_physics,
+        noise_max_trans=noise_max_trans,
+        noise_max_rot_deg=noise_max_rot_deg,
+        noise_max_retries=noise_max_retries,
+        floor_eps=floor_eps,
+        validation_seed=validation_seed,
+        denoise_target_mode=denoise_target_mode,
     )
+    return (
+        NewPretrainDataset(train_files, augment=augment, **common),
+        NewPretrainDataset(val_files, augment=False, **common),
+    )
+
+
+PretrainDataset = NewPretrainDataset

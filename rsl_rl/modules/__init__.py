@@ -29,51 +29,50 @@ def _try_import(module_attr, from_module, names):
     return results
 
 _optional = {}
-_optional.update(_try_import(globals(), "actor_critic_pointnet", ["ActorCriticPointNet"]))
-_optional.update(_try_import(globals(), "actor_critic_multi_icp", ["ActorCriticMultiICP", "ActorCriticMultiICP_HandState"]))
-_optional.update(_try_import(globals(), "actor_critic_unicorn", ["ActorCriticUnicorn", "ActorCriticMultiUnicorn"]))
-_optional.update(_try_import(globals(), "actor_critic_momentum", ["ActorCriticMomentum"]))
-_optional.update(_try_import(globals(), "actor_critic_ptv3_momentum", ["ActorCriticPTV3Momentum"]))
-_optional.update(_try_import(globals(), "actor_critic_concerto", ["ActorCriticConcerto"]))
+_optional.update(_try_import(globals(), "actor_critic_tg", ["ActorCriticTG"]))
 _optional.update(_try_import(globals(), "actor_critic_point2vec", ["ActorCriticPoint2Vec"]))
-_optional.update(_try_import(globals(), "actor_critic_icp", ["ActorCriticICP"]))
-_optional.update(_try_import(globals(), "actor_critic_sdf", ["ActorCriticSDF"]))
 _optional.update(_try_import(globals(), "rnd", ["RandomNetworkDistillation"]))
 
-# Inject into module namespace so eval(class_name) still works
+# Inject into module namespace for existing import consumers.
 globals().update({k: v for k, v in _optional.items() if v is not None})
 
 # Convenience aliases
-ActorCriticPointNet = _optional.get("ActorCriticPointNet")
-ActorCriticMultiICP = _optional.get("ActorCriticMultiICP")
-ActorCriticMultiICP_HandState = _optional.get("ActorCriticMultiICP_HandState")
-ActorCriticUnicorn = _optional.get("ActorCriticUnicorn")
-ActorCriticMultiUnicorn = _optional.get("ActorCriticMultiUnicorn")
-ActorCriticMomentum = _optional.get("ActorCriticMomentum")
-ActorCriticPTV3Momentum = _optional.get("ActorCriticPTV3Momentum")
-ActorCriticConcerto = _optional.get("ActorCriticConcerto")
+ActorCriticTG = _optional.get("ActorCriticTG")
 ActorCriticPoint2Vec = _optional.get("ActorCriticPoint2Vec")
-ActorCriticICP = _optional.get("ActorCriticICP")
-ActorCriticSDF = _optional.get("ActorCriticSDF")
 RandomNetworkDistillation = _optional.get("RandomNetworkDistillation")
+
+POLICY_REGISTRY = {
+    "ActorCriticTG": ActorCriticTG,
+    "ActorCriticPoint2Vec": ActorCriticPoint2Vec,
+}
+
+
+def resolve_policy_class(class_name: str):
+    """Resolve policy class names without eval.
+
+    Tool-generalist configs select a policy by explicit registry entry.
+    """
+
+    if class_name not in POLICY_REGISTRY:
+        raise ValueError(f"Unsupported policy class for config-driven RL: {class_name}")
+    policy_class = POLICY_REGISTRY[class_name]
+    if policy_class is None:
+        raise ImportError(
+            f"Policy class {class_name} is registered but its optional dependencies "
+            "could not be imported."
+        )
+    return policy_class
 
 __all__ = [
     "ActorCritic",
+    "ActorCriticPoint2Vec",
     "ActorCriticRecurrent",
     "ActorCriticToolUnicorn",
-    "ActorCriticPointNet",
-    "ActorCriticUnicorn",
-    "ActorCriticMultiUnicorn",
-    "ActorCriticICP",
-    "ActorCriticSDF",
-    "ActorCriticMomentum",
-    "ActorCriticPTV3Momentum",
-    "ActorCriticConcerto",
-    "ActorCriticPoint2Vec",
-    "ActorCriticMultiICP",
-    "ActorCriticMultiICP_HandState",
+    "ActorCriticTG",
     "EmpiricalNormalization",
     "RandomNetworkDistillation",
+    "POLICY_REGISTRY",
+    "resolve_policy_class",
     "StudentTeacher",
     "StudentTeacherRecurrent",
 ]

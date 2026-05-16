@@ -11,11 +11,16 @@ import torch
 from typing import TYPE_CHECKING
 from isaaclab.assets import RigidObject
 from isaaclab.managers import SceneEntityCfg
-from isaaclab.utils.math import sample_uniform
 import isaacsim.core.utils.prims as prim_utils
 import isaaclab.sim as sim_utils
 import omni.usd
 from pxr import Usd, UsdPhysics, Gf, UsdGeom
+
+from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.mdp.table_placement import (
+    surface_z_for_points,
+    table_contract_from_env,
+    table_top_z_from_contract,
+)
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -43,11 +48,12 @@ def reset_initial_object_position(
     # Get curriculum ranges from command manager (preferred) or environment fallback
     stable_pose_term = env.command_manager.get_term("target_object_pose")
     xy_range = stable_pose_term.initial_position_range
-    
-    # Define base position (center of table in environment coordinates)
-    base_x = 0.5  # center of table x-coordinate
-    base_y = 0.0  # center of table y-coordinate
-    base_z = 0.0  # fixed height on table
+    placement_cfg = table_contract_from_env(env)
+    surface_z = (
+        table_top_z_from_contract(placement_cfg, env.device)
+        if bool(placement_cfg.enabled)
+        else torch.as_tensor(0.0, dtype=torch.float32, device=env.device)
+    )
     
     # Sample random positions within curriculum ranges
     num_resets = len(env_ids)
@@ -55,87 +61,21 @@ def reset_initial_object_position(
     poses = torch.zeros((num_resets, 13), device=env.device)
     
     # Per-env sampling from stable pose with random yaw offset
-    from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import get_cached_cloud
-    assets_cfg = asset.cfg.spawn.assets_cfg
+    from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
+        get_cached_cloud,
+        get_object_asset_cfg_for_env,
+    )
     scales = get_rigid_body_scale(env, SceneEntityCfg("object"), env_ids)
-
-    # Pre-compute tool AABB in world frame for each env (from tool body state + per-env tool mesh)
-    from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import TOOL_DATA, TOOL_SCALE
-    robot = env.scene["robot"]
-    tool_cfg = SceneEntityCfg("robot", body_names=["link_coacd_convex_piece_0"])
-    tool_cfg.resolve(env.scene)
-    tool_idx = tool_cfg.body_ids[0]
-    tool_pos_w = robot.data.body_state_w[:, tool_idx, :3]   # (num_envs, 3)
-    tool_quat_w = robot.data.body_state_w[:, tool_idx, 3:7]  # (num_envs, 4)
-    from isaaclab.utils.math import matrix_from_quat
-    tool_rot = matrix_from_quat(tool_quat_w)  # (num_envs, 3, 3)
-
-    def _get_aabb(center_w, rot, pts_local):
-        """pts_local: (M,3) canonical points. Returns (min_w, max_w) each (3,)."""
-        pts_w = (rot @ pts_local.T).T + center_w  # (M,3)
-        return pts_w.min(dim=0).values, pts_w.max(dim=0).values
-
-    # Cache tool aabbs per env (each env may have a different tool)
-    num_tools = len(TOOL_DATA)
-    tool_aabbs = []
-    for env_id_int in range(env.num_envs):
-        td = TOOL_DATA[env_id_int % num_tools]
-        tool_cloud_obj = get_cached_cloud(td["obj_path"])
-        tool_pts_base = tool_cloud_obj._get_points_torch(env.device).float() * TOOL_SCALE
-        t_min, t_max = _get_aabb(tool_pos_w[env_id_int], tool_rot[env_id_int], tool_pts_base)
-        tool_aabbs.append((t_min, t_max))
 
     for i, env_id in enumerate(env_ids):
         env_id_int = int(env_id.item())
 
-        asset_idx = env_id_int % len(assets_cfg)
-        obj_path = assets_cfg[asset_idx].obj_path
+        obj_path = get_object_asset_cfg_for_env(env_id_int).obj_path
         scale_tensor = scales[i]
         scale = tuple(scale_tensor.cpu().numpy())
 
-        # Object canonical points scaled (pose unknown yet, use for half-extents only)
-        obj_cloud_obj = get_cached_cloud(obj_path)
-        obj_pts_local = torch.tensor(obj_cloud_obj.points, dtype=torch.float32, device=env.device) * scale_tensor.float()
-        obj_half = (obj_pts_local.max(dim=0).values - obj_pts_local.min(dim=0).values) / 2.0
-
-        t_min, t_max = tool_aabbs[env_id_int]
-
-        max_attempts = 20
-        for _attempt in range(max_attempts):
-            dx = sample_uniform(-xy_range, xy_range, (1,), device=env.device).squeeze(0)
-            dy = sample_uniform(-2*xy_range, 2*xy_range, (1,), device=env.device).squeeze(0)
-            x_env = torch.as_tensor(base_x, device=env.device) + dx
-            y_env = torch.as_tensor(base_y, device=env.device) + dy
-
-            # Enforce reachable workspace (project into XY annulus) if configured
-            if hasattr(stable_pose_term, "enforce_workspace") and bool(stable_pose_term.enforce_workspace):
-                cx = torch.as_tensor(getattr(stable_pose_term, "workspace_center_x", 0.0), device=env.device)
-                cy = torch.as_tensor(getattr(stable_pose_term, "workspace_center_y", 0.0), device=env.device)
-                rmin = torch.as_tensor(getattr(stable_pose_term, "workspace_radius_min", 0.0), device=env.device)
-                rmax = torch.as_tensor(getattr(stable_pose_term, "workspace_radius_max", float("inf")), device=env.device)
-                ddx = x_env - cx
-                ddy = y_env - cy
-                rr = torch.sqrt(ddx * ddx + ddy * ddy).clamp_min(1e-9)
-                rr_clamped = torch.clamp(rr, min=rmin, max=rmax)
-                scale_ws = rr_clamped / rr
-                x_env = cx + ddx * scale_ws
-                y_env = cy + ddy * scale_ws
-
-            pos_x = x_env + env.scene.env_origins[env_id_int, 0]
-            pos_y = y_env + env.scene.env_origins[env_id_int, 1]
-            pos_z = torch.as_tensor(base_z, device=env.device)
-
-            # Object AABB at this candidate position (axis-aligned, identity rotation approx)
-            obj_center = torch.stack([pos_x, pos_y, pos_z])
-            obj_min = obj_center - obj_half
-            obj_max = obj_center + obj_half
-
-            # AABB intersection test
-            overlap = (obj_min <= t_max).all() and (obj_max >= t_min).all()
-            if not overlap or _attempt == max_attempts - 1:
-                break
-
         object_cloud = get_cached_cloud(obj_path)
+        obj_pts_local = object_cloud._get_vertices_torch(env.device).float() * scale_tensor.float()
         sample_pose = object_cloud.sample_stable_pose_trimesh(scale=scale)
         _, quat = sample_pose  # (position, quaternion)
         
@@ -166,6 +106,18 @@ def reset_initial_object_position(
             qx = qx / quat_norm
             qy = qy / quat_norm
             qz = qz / quat_norm
+        quat_tensor = torch.stack((qw, qx, qy, qz), dim=0)
+
+        dx = (torch.rand((), device=env.device) * 2.0 - 1.0) * xy_range
+        dy = (torch.rand((), device=env.device) * 4.0 - 2.0) * xy_range
+        x_env = torch.as_tensor(0.5, device=env.device) + dx
+        y_env = torch.as_tensor(0.0, device=env.device) + dy
+        pos_x = x_env + env.scene.env_origins[env_id_int, 0]
+        pos_y = y_env + env.scene.env_origins[env_id_int, 1]
+        pos_z = (
+            surface_z_for_points(obj_pts_local, quat_tensor, surface_z)
+            + env.scene.env_origins[env_id_int, 2]
+        )
         
         # Fill pose row
         poses[i, 0] = pos_x
@@ -301,30 +253,32 @@ def randomize_terrain_material(
 def compute_head_area_offsets_from_usd(env) -> "torch.Tensor":
     """Compute per-env head area offsets in the tool's LOCAL frame using OBJ mesh bounds.
 
-    Each env may have a different tool (via MultiUsdFileCfg).  The function
-    iterates over TOOL_DATA and assigns tools to envs via env_id % num_tools.
+    Each env may have a different tool (via MultiUsdFileCfg).  Tool identity
+    is resolved through env_tool's runtime assignment mapping.
 
     Uses the cached OBJ point cloud to compute bounding box bounds in
     canonical (unscaled) mesh space, applies head_area_norm interpolation,
     then scales by the constant TOOL_SCALE.
     """
     from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
-        get_cached_cloud, TOOL_DATA, TOOL_SCALE,
+        get_cached_cloud,
+        get_tool_data_for_env,
+        get_tool_index_for_env,
+        TOOL_SCALE,
     )
 
     head_area_offsets = torch.zeros(env.num_envs, 3, device=env.device)
-    num_tools = len(TOOL_DATA)
 
     # Pre-compute per-tool local offsets (cache to avoid redundant work)
     _per_tool_offset_cache: dict[int, torch.Tensor] = {}
 
     for env_id in range(env.num_envs):
-        tool_idx = env_id % num_tools
+        tool_idx = get_tool_index_for_env(env_id)
         if tool_idx in _per_tool_offset_cache:
             head_area_offsets[env_id] = _per_tool_offset_cache[tool_idx]
             continue
 
-        td = TOOL_DATA[tool_idx]
+        td = get_tool_data_for_env(env_id)
         head_area_norm = td.get("head_area")
         if head_area_norm is None:
             print(f"[WARNING compute_head_area] No head_area_norm for tool '{td['name']}', offset=[0,0,0]")

@@ -8,4 +8,17 @@
 from .distillation import Distillation
 from .ppo import PPO
 
-__all__ = ["PPO", "Distillation"]
+ALGORITHM_REGISTRY = {
+    "PPO": PPO,
+    "Distillation": Distillation,
+}
+
+
+def resolve_algorithm_class(class_name: str):
+    algorithm_class = ALGORITHM_REGISTRY.get(class_name)
+    if algorithm_class is None:
+        raise ValueError(f"Unsupported algorithm class: {class_name}")
+    return algorithm_class
+
+
+__all__ = ["PPO", "Distillation", "ALGORITHM_REGISTRY", "resolve_algorithm_class"]

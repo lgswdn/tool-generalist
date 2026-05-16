@@ -28,6 +28,8 @@ class RolloutStorage:
             # Cached encoder features for frozen encoder optimization
             self.encoder_features = None
             self.extra_state = None
+            self.critic_encoder_features = None
+            self.critic_extra_state = None
 
         def clear(self):
             self.__init__()
@@ -89,12 +91,20 @@ class RolloutStorage:
         # Cached encoder features (optional, for frozen encoder optimization)
         self.encoder_features = None
         self.extra_state = None
+        self.critic_encoder_features = None
+        self.critic_extra_state = None
         self.encoder_features_shape = None
 
         # counter for the number of transitions stored
         self.step = 0
 
-    def enable_encoder_feature_cache(self, encoder_features_shape, extra_state_shape):
+    def enable_encoder_feature_cache(
+        self,
+        encoder_features_shape,
+        extra_state_shape,
+        critic_encoder_features_shape=None,
+        critic_extra_state_shape=None,
+    ):
         """Enable caching of encoder features for frozen encoder optimization."""
         self.encoder_features_shape = encoder_features_shape
         self.encoder_features = torch.zeros(
@@ -102,6 +112,14 @@ class RolloutStorage:
         )
         self.extra_state = torch.zeros(
             self.num_transitions_per_env, self.num_envs, *extra_state_shape, device=self.device
+        )
+        critic_encoder_features_shape = critic_encoder_features_shape or encoder_features_shape
+        critic_extra_state_shape = critic_extra_state_shape or extra_state_shape
+        self.critic_encoder_features = torch.zeros(
+            self.num_transitions_per_env, self.num_envs, *critic_encoder_features_shape, device=self.device
+        )
+        self.critic_extra_state = torch.zeros(
+            self.num_transitions_per_env, self.num_envs, *critic_extra_state_shape, device=self.device
         )
 
     def add_transitions(self, transition: Transition):
@@ -136,6 +154,13 @@ class RolloutStorage:
         if self.encoder_features is not None and transition.encoder_features is not None:
             self.encoder_features[self.step].copy_(transition.encoder_features)
             self.extra_state[self.step].copy_(transition.extra_state)
+            critic_encoder_features = transition.critic_encoder_features
+            critic_extra_state = transition.critic_extra_state
+            if critic_encoder_features is None:
+                critic_encoder_features = transition.encoder_features
+                critic_extra_state = transition.extra_state
+            self.critic_encoder_features[self.step].copy_(critic_encoder_features)
+            self.critic_extra_state[self.step].copy_(critic_extra_state)
 
         # For RNN networks
         self._save_hidden_states(transition.hidden_states)
@@ -204,7 +229,13 @@ class RolloutStorage:
             ], self.dones[i]
 
     # for reinforcement learning with feedforward networks
-    def mini_batch_generator(self, num_mini_batches, num_epochs=8):
+    def mini_batch_generator(
+        self,
+        num_mini_batches,
+        num_epochs=8,
+        include_env_ids: bool = False,
+        include_critic_encoder_features: bool = False,
+    ):
         if self.training_type != "rl":
             raise ValueError("This function is only available for reinforcement learning training.")
         batch_size = self.num_envs * self.num_transitions_per_env
@@ -236,9 +267,13 @@ class RolloutStorage:
         if self.encoder_features is not None:
             encoder_features_flat = self.encoder_features.flatten(0, 1)
             extra_state_flat = self.extra_state.flatten(0, 1)
+            critic_encoder_features_flat = self.critic_encoder_features.flatten(0, 1)
+            critic_extra_state_flat = self.critic_extra_state.flatten(0, 1)
         else:
             encoder_features_flat = None
             extra_state_flat = None
+            critic_encoder_features_flat = None
+            critic_extra_state_flat = None
 
         for epoch in range(num_epochs):
             for i in range(num_mini_batches):
@@ -271,15 +306,38 @@ class RolloutStorage:
                 if self.encoder_features is not None:
                     encoder_features_batch = encoder_features_flat[batch_idx]
                     extra_state_batch = extra_state_flat[batch_idx]
+                    critic_encoder_features_batch = critic_encoder_features_flat[batch_idx]
+                    critic_extra_state_batch = critic_extra_state_flat[batch_idx]
                 else:
                     encoder_features_batch = None
                     extra_state_batch = None
+                    critic_encoder_features_batch = None
+                    critic_extra_state_batch = None
 
-                # yield the mini-batch
-                yield obs_batch, privileged_observations_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (
+                mini_batch = (
+                    obs_batch,
+                    privileged_observations_batch,
+                    actions_batch,
+                    target_values_batch,
+                    advantages_batch,
+                    returns_batch,
+                    old_actions_log_prob_batch,
+                    old_mu_batch,
+                    old_sigma_batch,
+                    (
+                        None,
+                        None,
+                    ),
                     None,
-                    None,
-                ), None, rnd_state_batch, encoder_features_batch, extra_state_batch
+                    rnd_state_batch,
+                    encoder_features_batch,
+                    extra_state_batch,
+                )
+                if include_critic_encoder_features:
+                    mini_batch = mini_batch + (critic_encoder_features_batch, critic_extra_state_batch)
+                if include_env_ids:
+                    mini_batch = mini_batch + (batch_idx % self.num_envs,)
+                yield mini_batch
 
     # for reinfrocement learning with recurrent networks
     def recurrent_mini_batch_generator(self, num_mini_batches, num_epochs=8):

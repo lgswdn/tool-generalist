@@ -1,59 +1,301 @@
-"""model.py — Joint encoder pretraining: SDF prediction + Pose flow matching.
-
-Uses Conditional Flow Matching (Rectified Flow) for pose prediction.
-  Training:  x_t = (1-t)·x_0 + t·ε,  predict velocity v = ε - x_0
-  Inference: Euler integration from noise (t=1) to data (t=0)
-
-Pretraining tasks and their locality constraints:
-  - Pointwise SDF : patch token + relative xyz (point − patch_center)  → per-point SDF
-  - Patchwise SDF : patch token only                                    → per-patch SDF
-  - Movement pred : patch token + relative xyz, cross-attn with tool Δpose → per-point displacement
-  - Flow matching : ALL patch tokens (global conditioning)               → delta pose
-  - Aux regression: ALL tokens mean-pooled → init target (pose or translation)
+"""Canonical pretrain model: joint SDF heads plus denoising/postcontact heads.
 
 Architecture:
-  JointModel (shared encoder + task heads)
-    ├── encoder: SDFPointCloudEncoder  (ViT backbone, FPS patches)
-    ├── sdf_head: SDFSegmentor          (local-only: no global_feat)
-    ├── movement_head: MovementPredictionHead  (per-point displacement)
-    ├── velocity_net: MLPVelocityNet    (MLP, fast for horizon=1)
-    └── aux_reg_head: AuxRegressionHead (optional, pooled cond → init target)
+  encoder          : TCEPointCloudEncoder
+  pose_cross_attn  : PoseCrossAttention (injects noised pose into encoder tokens)
+  sdf_head         : Pose-conditioned SDF prediction (point or patch mode)
+  diff head        : translation-only MLP head with translation loss
+  post head        : pose9d MLP head with geodesic rotation loss
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import math
-import sys
 from pathlib import Path
-from typing import Tuple
+import sys
+from typing import NamedTuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# No external scheduler needed — flow matching uses simple linear interpolation
+from utils.geometry.sdf import mutual_signed_sdf_labels_env_frame
+from utils.geometry.pose import rotation_from_pose9d
 
-# ── repo path ────────────────────────────────────────────────────────────────
-_PRETRAIN_DIR = Path(__file__).resolve().parent
-_REPO_ROOT    = _PRETRAIN_DIR.parent
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+_RPDIFF_SRC = Path(__file__).resolve().parent / "rpdiff" / "src"
+if _RPDIFF_SRC.exists() and str(_RPDIFF_SRC) not in sys.path:
+    sys.path.insert(0, str(_RPDIFF_SRC))
+from rpdiff.training.losses import TransformChamferWrapper
+from rpdiff.utils.torch3d_util import matrix_to_quaternion
 
-# ── diffusion_policy path ────────────────────────────────────────────────────
-_DIFFUSION_POLICY_DIR = _PRETRAIN_DIR / "diffusion_policy_repo"
-if str(_DIFFUSION_POLICY_DIR) not in sys.path:
-    sys.path.insert(0, str(_DIFFUSION_POLICY_DIR))
+__all__ = [
+    "ContactDiffusionModel",
+    "ConditionQueryGenerator",
+    "PoseCrossAttention",
+    "Pose9DHead",
+    "TranslationHead",
+    "TCEEncodeResult",
+    "TCEPointCloudEncoder",
+    "TCEPointCloudEncoderCfg",
+]
 
-from rsl_rl.modules.models.cloud.sdf_encoder import (
-    SDFPointCloudEncoder,
-    SDFEncoderCfg,
-)  # import directly, not via modules/__init__.py (avoid pytorch3d chain)
 
-from diffusion_policy.model.diffusion.transformer_for_diffusion import TransformerForDiffusion
+@dataclass
+class TCEPointCloudEncoderCfg:
+    num_pts: int
+    patch_size: int
+    encoder_channel: int
+    vit_depth: int
+    vit_heads: int
+    freeze: bool
+
+
+class TCEEncodeResult(NamedTuple):
+    fused_tokens: torch.Tensor
+    tool_patch_idx: torch.Tensor
+    obj_patch_idx: torch.Tensor
+    tool_patch_centers: torch.Tensor
+    obj_patch_centers: torch.Tensor
+
+
+class _FormerPatchEncoder(nn.Module):
+    """Former-style PointNet patch encoder: MLP, max+mean pool, projection."""
+
+    def __init__(self, out_dim: int, hidden: tuple[int, int] = (64, 128)):
+        super().__init__()
+        h0, h1 = hidden
+        self.mlp1 = nn.Sequential(nn.Linear(3, h0), nn.LayerNorm(h0), nn.GELU())
+        self.mlp2 = nn.Sequential(nn.Linear(h0, h1), nn.LayerNorm(h1), nn.GELU())
+        self.proj = nn.Sequential(nn.Linear(h1 * 2, out_dim), nn.LayerNorm(out_dim))
+
+    def forward(self, patch_points: torch.Tensor) -> torch.Tensor:
+        x = self.mlp1(patch_points)
+        x = self.mlp2(x)
+        x = torch.cat((x.max(dim=2).values, x.mean(dim=2)), dim=-1)
+        return self.proj(x)
+
+
+class _FormerPosEmbed(nn.Module):
+    """Former-style MLP positional embedding for patch centers."""
+
+    def __init__(self, out_dim: int):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(3, out_dim // 2),
+            nn.LayerNorm(out_dim // 2),
+            nn.GELU(),
+            nn.Linear(out_dim // 2, out_dim),
+            nn.LayerNorm(out_dim),
+        )
+
+    def forward(self, centers: torch.Tensor) -> torch.Tensor:
+        return self.mlp(centers)
+
+
+class _FormerViTBlock(nn.Module):
+    """Former-style pre-norm ViT block."""
+
+    def __init__(self, dim: int, heads: int, mlp_ratio: float = 4.0, dropout: float = 0.0):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn = nn.MultiheadAttention(dim, heads, dropout=dropout, batch_first=True)
+        self.drop = nn.Dropout(dropout)
+        self.norm2 = nn.LayerNorm(dim)
+        hidden = int(dim * mlp_ratio)
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, dim),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.norm1(x)
+        y, _ = self.attn(y, y, y, need_weights=False)
+        x = x + self.drop(y)
+        return x + self.ffn(self.norm2(x))
+
+
+class TCEPointCloudEncoder(nn.Module):
+    """Tool Contact Encoder with Former-style PointNet patches and joint ViT."""
+
+    def __init__(self, cfg: TCEPointCloudEncoderCfg):
+        super().__init__()
+        self.cfg = cfg
+        self._P = max(1, cfg.num_pts // cfg.patch_size)
+        self._D = cfg.encoder_channel
+        self.patch_enc = _FormerPatchEncoder(cfg.encoder_channel)
+        self.pos_embed = _FormerPosEmbed(cfg.encoder_channel)
+        self.type_embed = nn.Parameter(torch.zeros(2, cfg.encoder_channel))
+        nn.init.normal_(self.type_embed, std=0.02)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, cfg.encoder_channel))
+        nn.init.normal_(self.cls_token, std=0.02)
+        self.vit = nn.ModuleList(
+            [
+                _FormerViTBlock(cfg.encoder_channel, cfg.vit_heads, mlp_ratio=4.0, dropout=0.0)
+                for _ in range(max(1, cfg.vit_depth))
+            ]
+        )
+        self.norm = nn.LayerNorm(cfg.encoder_channel)
+        if cfg.freeze:
+            for param in self.parameters():
+                param.requires_grad_(False)
+
+    @property
+    def feature_dim(self) -> int:
+        return self._D
+
+    @property
+    def num_patches(self) -> int:
+        return self._P
+
+    def _fps_indices(self, pc: torch.Tensor, num_centers: int) -> torch.Tensor:
+        B, N, _ = pc.shape
+        centroids = torch.zeros(B, num_centers, dtype=torch.long, device=pc.device)
+        distance = torch.full((B, N), float("inf"), device=pc.device, dtype=pc.dtype)
+        farthest = torch.zeros(B, dtype=torch.long, device=pc.device)
+        batch_indices = torch.arange(B, dtype=torch.long, device=pc.device)
+        for i in range(num_centers):
+            centroids[:, i] = farthest
+            centroid = pc[batch_indices, farthest].view(B, 1, 3)
+            dist = ((pc - centroid) ** 2).sum(dim=-1)
+            distance = torch.minimum(distance, dist)
+            farthest = distance.max(dim=1).indices
+        return centroids
+
+    def _knn_patch_indices(self, pc: torch.Tensor, centers: torch.Tensor) -> torch.Tensor:
+        B, N, _ = pc.shape
+        K = self.cfg.patch_size
+        k_eff = min(K, N)
+        dist = torch.cdist(centers, pc)
+        idx = dist.topk(k=k_eff, dim=-1, largest=False).indices
+        if k_eff < K:
+            pad = idx[..., -1:].expand(B, centers.shape[1], K - k_eff)
+            idx = torch.cat((idx, pad), dim=-1)
+        return idx
+
+    def _encode_one(self, pc: torch.Tensor, type_id: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        B, N, _ = pc.shape
+        P = min(self._P, N)
+        center_idx = self._fps_indices(pc, P)
+        batch = torch.arange(B, device=pc.device).view(B, 1)
+        centers = pc[batch, center_idx]
+        idx = self._knn_patch_indices(pc, centers)
+        batch = torch.arange(B, device=pc.device).view(B, 1, 1)
+        patches = pc[batch, idx]
+        relative_patch_coords = patches - centers.unsqueeze(2)
+        patch_features = self.patch_enc(relative_patch_coords)
+        type_ids = torch.full((B, P), int(type_id), dtype=torch.long, device=pc.device)
+        tokens = (
+            patch_features
+            + self.pos_embed(centers)
+            + self.type_embed[type_ids]
+        )
+        return tokens, idx, centers
+
+    def _pad_to_num_patches(
+        self,
+        tokens: torch.Tensor,
+        idx: torch.Tensor,
+        centers: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        B, P, D = tokens.shape
+        if P == self._P:
+            return tokens, idx, centers
+        pad_p = self._P - P
+        tokens = torch.cat((tokens, tokens[:, -1:, :].expand(B, pad_p, D)), dim=1)
+        idx = torch.cat((idx, idx[:, -1:, :].expand(B, pad_p, idx.shape[-1])), dim=1)
+        centers = torch.cat((centers, centers[:, -1:, :].expand(B, pad_p, 3)), dim=1)
+        return tokens, idx, centers
+
+    def encode(self, tool_pc: torch.Tensor, obj_pc: torch.Tensor) -> TCEEncodeResult:
+        tool_tok, tool_idx, tool_centers = self._encode_one(tool_pc, type_id=0)
+        obj_tok, obj_idx, obj_centers = self._encode_one(obj_pc, type_id=1)
+        tool_tok, tool_idx, tool_centers = self._pad_to_num_patches(tool_tok, tool_idx, tool_centers)
+        obj_tok, obj_idx, obj_centers = self._pad_to_num_patches(obj_tok, obj_idx, obj_centers)
+        fused = torch.cat((tool_tok, obj_tok), dim=1)
+        cls = self.cls_token.expand(fused.shape[0], -1, -1)
+        fused = torch.cat((cls, fused), dim=1)
+        for block in self.vit:
+            fused = block(fused)
+        fused = self.norm(fused)
+        fused = fused[:, 1:, :]
+        return TCEEncodeResult(
+            fused_tokens=fused,
+            tool_patch_idx=tool_idx,
+            obj_patch_idx=obj_idx,
+            tool_patch_centers=tool_centers,
+            obj_patch_centers=obj_centers,
+        )
+
+    def forward(self, tool_pc: torch.Tensor, obj_pc: torch.Tensor) -> TCEEncodeResult:
+        return self.encode(tool_pc, obj_pc)
+
+
+class SinusoidalPosEmb(nn.Module):
+    def __init__(self, dim: int, max_pos: int | None = None):
+        super().__init__()
+        self.dim = dim
+        self.max_pos = max_pos
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.max_pos is not None:
+            x = torch.clamp(x, 0, self.max_pos)
+        half_dim = self.dim // 2
+        scale = torch.log(torch.tensor(10000.0, device=x.device, dtype=x.dtype))
+        scale = scale / max(half_dim - 1, 1)
+        emb = torch.exp(torch.arange(half_dim, device=x.device, dtype=x.dtype) * -scale)
+        emb = x[:, None] * emb[None, :]
+        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
+        if self.dim % 2:
+            emb = F.pad(emb, (0, 1))
+        return emb
+
+
+def _matrix_to_quaternion(R: torch.Tensor) -> torch.Tensor:
+    B = R.shape[0]
+    trace = R[:, 0, 0] + R[:, 1, 1] + R[:, 2, 2]
+    q = torch.zeros(B, 4, device=R.device, dtype=R.dtype)
+
+    m1 = trace > 0
+    if m1.any():
+        s = torch.sqrt(trace[m1] + 1.0) * 2
+        q[m1, 0] = 0.25 * s
+        q[m1, 1] = (R[m1, 2, 1] - R[m1, 1, 2]) / s
+        q[m1, 2] = (R[m1, 0, 2] - R[m1, 2, 0]) / s
+        q[m1, 3] = (R[m1, 1, 0] - R[m1, 0, 1]) / s
+
+    m2 = (~m1) & (R[:, 0, 0] > R[:, 1, 1]) & (R[:, 0, 0] > R[:, 2, 2])
+    if m2.any():
+        s = torch.sqrt(1.0 + R[m2, 0, 0] - R[m2, 1, 1] - R[m2, 2, 2]) * 2
+        q[m2, 0] = (R[m2, 2, 1] - R[m2, 1, 2]) / s
+        q[m2, 1] = 0.25 * s
+        q[m2, 2] = (R[m2, 0, 1] + R[m2, 1, 0]) / s
+        q[m2, 3] = (R[m2, 0, 2] + R[m2, 2, 0]) / s
+
+    m3 = (~m1) & (~m2) & (R[:, 1, 1] > R[:, 2, 2])
+    if m3.any():
+        s = torch.sqrt(1.0 + R[m3, 1, 1] - R[m3, 0, 0] - R[m3, 2, 2]) * 2
+        q[m3, 0] = (R[m3, 0, 2] - R[m3, 2, 0]) / s
+        q[m3, 1] = (R[m3, 0, 1] + R[m3, 1, 0]) / s
+        q[m3, 2] = 0.25 * s
+        q[m3, 3] = (R[m3, 1, 2] + R[m3, 2, 1]) / s
+
+    m4 = (~m1) & (~m2) & (~m3)
+    if m4.any():
+        s = torch.sqrt(1.0 + R[m4, 2, 2] - R[m4, 0, 0] - R[m4, 1, 1]) * 2
+        q[m4, 0] = (R[m4, 1, 0] - R[m4, 0, 1]) / s
+        q[m4, 1] = (R[m4, 0, 2] + R[m4, 2, 0]) / s
+        q[m4, 2] = (R[m4, 1, 2] + R[m4, 2, 1]) / s
+        q[m4, 3] = 0.25 * s
+
+    return F.normalize(q, dim=-1)
 
 
 # --------------------------------------------------------------------------- #
-# Small MLP helper
+# Small helpers (inlined from pretrain/model.py to avoid module name collision)
 # --------------------------------------------------------------------------- #
 
 def _make_mlp(dims: tuple[int, ...]) -> nn.Sequential:
@@ -80,219 +322,418 @@ def _aggregate_sdf(
 
 
 def _split_tokens(res, P: int):
-    """Split fused_tokens (B, 2P, D) into tool_tokens (B, P, D) and obj_tokens (B, P, D)."""
+    """Split fused_tokens (B, 2P, D) into tool_tokens and obj_tokens."""
     return res.fused_tokens[:, :P, :], res.fused_tokens[:, P:, :]
 
 
-# --------------------------------------------------------------------------- #
-# MLPVelocityNet — direct MLP for horizon=1 flow matching
-# --------------------------------------------------------------------------- #
+# ============================================================================ #
+# PoseCrossAttention — inject noised pose into encoder tokens
+# ============================================================================ #
 
-class SinTimeEmb(nn.Module):
-    """Sinusoidal time embedding for continuous t ∈ [0, 1]."""
+class ConditionQueryGenerator(nn.Module):
+    """Generate A/B/C/D query groups for TCE decoder cross-attention."""
 
-    def __init__(self, dim: int):
+    def __init__(
+        self,
+        token_dim: int,
+        hidden_dims: tuple[int, ...],
+        num_query_A: int,
+        num_query_B: int,
+        num_query_C: int,
+        num_query_D: int,
+        pose_dim: int,
+        movement_cond_dim: int,
+    ):
         super().__init__()
-        self.dim = dim
+        self.token_dim = int(token_dim)
+        self.num_query_A = int(num_query_A)
+        self.num_query_B = int(num_query_B)
+        self.num_query_C = int(num_query_C)
+        self.num_query_D = int(num_query_D)
+        self.pose_dim = int(pose_dim)
+        self.movement_cond_dim = int(movement_cond_dim)
+        self.query_A = _make_mlp((pose_dim,) + hidden_dims + (self.num_query_A * token_dim,))
+        self.query_B = _make_mlp((9,) + hidden_dims + (self.num_query_B * token_dim,))
+        self.query_C = _make_mlp((9,) + hidden_dims + (self.num_query_C * token_dim,))
+        self.query_D = _make_mlp((7,) + hidden_dims + (self.num_query_D * token_dim,))
 
-    def forward(self, t: torch.Tensor) -> torch.Tensor:
-        """t: (B,) continuous in [0,1] → (B, dim)"""
-        half = self.dim // 2
-        freqs = math.log(10000) / (half - 1)
-        freqs = torch.exp(torch.arange(half, device=t.device) * -freqs)
-        # Scale t to [0, 1000] range for richer embeddings
-        args = (t.float() * 1000.0).unsqueeze(-1) * freqs.unsqueeze(0)
-        return torch.cat([args.sin(), args.cos()], dim=-1)
+    def forward(self, pose_signal: torch.Tensor, movement_cond: torch.Tensor) -> torch.Tensor:
+        B = pose_signal.shape[0]
+        tool_delta = movement_cond[..., :9]
+        object_delta = movement_cond[..., 9:18]
+        physics = movement_cond[..., 18:25]
+        if tool_delta.shape[-1] < 9:
+            tool_delta = F.pad(tool_delta, (0, 9 - tool_delta.shape[-1]))
+        if object_delta.shape[-1] < 9:
+            object_delta = F.pad(object_delta, (0, 9 - object_delta.shape[-1]))
+        if physics.shape[-1] < 7:
+            physics = F.pad(physics, (0, 7 - physics.shape[-1]))
+
+        queries = [
+            self.query_A(pose_signal).view(B, self.num_query_A, self.token_dim),
+            self.query_B(tool_delta).view(B, self.num_query_B, self.token_dim),
+            self.query_C(object_delta).view(B, self.num_query_C, self.token_dim),
+            self.query_D(physics).view(B, self.num_query_D, self.token_dim),
+        ]
+        return torch.cat(queries, dim=1)
 
 
-class MLPVelocityNet(nn.Module):
-    """Direct MLP: [x_t, t, pooled_cond] → velocity.
+class PoseCrossAttention(nn.Module):
+    """A/B/C/D query decoder over joint TCE tokens."""
 
-    Designed for horizon=1 (single 9D pose) flow matching.
-    Mean-pools condition tokens, concatenates with interpolated input
-    and continuous timestep, then predicts the velocity field.
-    """
-
-    def __init__(self, pose_dim: int = 9, cond_dim: int = 128,
-                 hidden: int = 256, n_layers: int = 4):
+    def __init__(
+        self,
+        token_dim: int,
+        pose_dim: int = 7,
+        movement_cond_dim: int = 14,
+        n_heads: int = 4,
+        n_layers: int = 2,
+        condition_mlp_hidden_dims: tuple[int, ...] = (128, 128),
+        num_query_A: int = 4,
+        num_query_B: int = 4,
+        num_query_C: int = 4,
+        num_query_D: int = 4,
+    ):
         super().__init__()
-        self.time_emb = SinTimeEmb(hidden)
-        self.time_proj = nn.Sequential(nn.Linear(hidden, hidden), nn.GELU())
-        self.cond_proj = nn.Sequential(nn.Linear(cond_dim, hidden), nn.GELU())
-        self.input_proj = nn.Sequential(nn.Linear(pose_dim, hidden), nn.GELU())
+        self.token_dim = token_dim
 
-        layers = []
-        for i in range(n_layers):
-            layers.extend([
-                nn.Linear(hidden * 3 if i == 0 else hidden, hidden),
-                nn.LayerNorm(hidden), nn.GELU(),
-            ])
-        layers.append(nn.Linear(hidden, pose_dim))
-        self.mlp = nn.Sequential(*layers)
-
-    def forward(self, sample: torch.Tensor, timestep: torch.Tensor,
-                cond: torch.Tensor) -> torch.Tensor:
-        """Args:
-            sample:   (B, 1, 9) interpolated x_t
-            timestep: (B,) continuous t ∈ [0, 1]
-            cond:     (B, N, D) condition tokens
-        Returns: (B, 1, 9) predicted velocity
-        """
-        B = sample.shape[0]
-        x = sample.squeeze(1)                                     # (B, 9)
-        if not torch.is_tensor(timestep):
-            timestep = torch.tensor([timestep], device=sample.device, dtype=torch.float)
-        t = self.time_proj(self.time_emb(timestep.expand(B)))      # (B, H)
-        c = self.cond_proj(cond.mean(dim=1))                       # (B, H)
-        h = torch.cat([self.input_proj(x), t, c], dim=-1)          # (B, 3H)
-        return self.mlp(h).unsqueeze(1)                            # (B, 1, 9)
-
-
-# Backward compat alias
-MLPNoisePredictor = MLPVelocityNet
-
-
-# --------------------------------------------------------------------------- #
-# AuxRegressionHead — pooled condition → init_pose
-# --------------------------------------------------------------------------- #
-
-class AuxRegressionHead(nn.Module):
-    """Auxiliary regression: pooled condition → init_pose.
-
-    Predicts the initial pose from encoder features. This is directly
-    solvable (the encoder sees tool@init_pose), forcing the encoder to
-    produce position-aware features and preventing representation collapse.
-    """
-
-    def __init__(self, cond_dim: int = 128, pose_dim: int = 9):
-        super().__init__()
-        self.head = nn.Sequential(
-            nn.Linear(cond_dim, cond_dim), nn.GELU(),
-            nn.Linear(cond_dim, pose_dim),
+        self.query_generator = ConditionQueryGenerator(
+            token_dim=token_dim,
+            hidden_dims=condition_mlp_hidden_dims,
+            num_query_A=num_query_A,
+            num_query_B=num_query_B,
+            num_query_C=num_query_C,
+            num_query_D=num_query_D,
+            pose_dim=pose_dim,
+            movement_cond_dim=movement_cond_dim,
         )
-
-    def forward(self, cond: torch.Tensor) -> torch.Tensor:
-        """cond: (B, N_tokens, D) → (B, pose_dim)"""
-        pooled = cond.mean(dim=1)
-        return self.head(pooled)
-
-
-# --------------------------------------------------------------------------- #
-# MovementPredictionHead — per-point displacement from object patch features
-# --------------------------------------------------------------------------- #
-
-class MovementPredictionHead(nn.Module):
-    """Per-point movement prediction conditioned on tool delta pose.
-
-    For each object surface point, predicts its displacement when the tool
-    pushes. Uses only the point's OWN patch feature (local) plus the point's
-    relative coordinate within that patch, concatenated with tool delta pose
-    and passed through an MLP.
-
-    Architecture:
-        query  = patch_token + rel_xyz_embed(point − patch_center)  (B, N, D)
-        pose   = tool_delta_pose_projected                          (B, D)
-        feat   = concat([query, pose])                              (B, N, 2D)
-        output = MLP(feat) → displacement                           (B, N, 3)
-    """
-
-    def __init__(self, patch_dim: int = 128, pose_dim: int = 9,
-                 head_hidden: tuple[int, ...] = (128, 64)):
-        super().__init__()
-        self.patch_dim = patch_dim
-
-        # Embed relative xyz to patch feature space
-        self.xyz_embed = _make_mlp((3, patch_dim, patch_dim))
-
-        # Project tool delta pose to feature space
-        self.pose_proj = nn.Sequential(
-            nn.Linear(pose_dim, patch_dim),
-            nn.LayerNorm(patch_dim),
-            nn.GELU(),
-        )
-
-        # Output MLP: concat(query, pose) → 3D displacement
-        # Input is 2*D (query + pose), output is 3
-        self.head = _make_mlp((2 * patch_dim,) + head_hidden + (3,))
+        self.layers = nn.ModuleList()
+        for _ in range(n_layers):
+            self.layers.append(nn.ModuleDict({
+                "query_cross_attn": nn.MultiheadAttention(
+                    embed_dim=token_dim,
+                    num_heads=n_heads,
+                    batch_first=True,
+                ),
+                "token_cross_attn": nn.MultiheadAttention(
+                    embed_dim=token_dim,
+                    num_heads=n_heads,
+                    batch_first=True,
+                ),
+                "norm1": nn.LayerNorm(token_dim),
+                "norm2": nn.LayerNorm(token_dim),
+                "ff": nn.Sequential(
+                    nn.Linear(token_dim, token_dim * 4),
+                    nn.GELU(),
+                    nn.Linear(token_dim * 4, token_dim),
+                ),
+            }))
 
     def forward(
         self,
-        pc: torch.Tensor,              # (B, N, 3) — object point cloud
-        patch_tokens: torch.Tensor,     # (B, P, D) — object patch tokens
-        patch_idx: torch.Tensor,        # (B, P, K) — point indices per patch
-        patch_centers: torch.Tensor,    # (B, P, 3) — FPS patch centers
-        tool_delta_pose: torch.Tensor,  # (B, 9) — tool delta pose conditioning
+        tokens: torch.Tensor,       # (B, 2P, D) encoder patch tokens
+        pose_7d: torch.Tensor,       # (B, 7) noised pose: trans(3) + quat(4)
+        movement_cond: torch.Tensor, # (B, 14) delta_T trans+quat and delta_O trans+quat
     ) -> torch.Tensor:
-        """Predict per-point displacement.
+        """Returns pose-conditioned tokens P' with same shape (B, 2P, D)."""
+        queries = self.query_generator(pose_7d, movement_cond)
 
-        Returns: (B, N, 3) — predicted displacement for each object point.
-        """
-        B, N, _ = pc.shape
-        D = self.patch_dim
-        P, K = patch_tokens.shape[1], patch_idx.shape[2]
+        out = tokens
+        for layer in self.layers:
+            query_residual = queries
+            queries_norm = layer["norm1"](queries)
+            query_out, _ = layer["query_cross_attn"](
+                query=queries_norm,
+                key=out,
+                value=out,
+            )
+            queries = query_residual + query_out
+            queries = queries + layer["ff"](layer["norm2"](queries))
 
-        # ---- 1. Scatter patch tokens to per-point ----
-        pt_patch = torch.zeros(B, N, D, device=pc.device, dtype=pc.dtype)
-        exp_tok = patch_tokens.unsqueeze(2).expand(B, P, K, D)
-        flat_idx = patch_idx.reshape(B, P * K, 1).expand(B, P * K, D)
-        flat_tok = exp_tok.reshape(B, P * K, D)
-        pt_patch.scatter_(1, flat_idx, flat_tok)
+            residual = out
+            out_norm = layer["norm1"](out)
+            attn_out, _ = layer["token_cross_attn"](
+                query=out_norm,
+                key=queries,
+                value=queries,
+            )
+            out = residual + attn_out
+            residual = out
+            out = residual + layer["ff"](layer["norm2"](out))
 
-        # ---- 2. Scatter patch centers to per-point ----
-        pt_centers = torch.zeros(B, N, 3, device=pc.device, dtype=pc.dtype)
-        exp_ctr = patch_centers.unsqueeze(2).expand(B, P, K, 3)
-        flat_ctr_idx = patch_idx.reshape(B, P * K, 1).expand(B, P * K, 3)
-        flat_ctr = exp_ctr.reshape(B, P * K, 3)
-        pt_centers.scatter_(1, flat_ctr_idx, flat_ctr)
-
-        # ---- 3. Relative coordinate embedding ----
-        rel_xyz = pc - pt_centers                    # (B, N, 3)
-        pt_rel_embed = self.xyz_embed(rel_xyz)       # (B, N, D)
-
-        # ---- 4. Per-point query = patch_token + rel_xyz_embed ----
-        query = pt_patch + pt_rel_embed              # (B, N, D)
-
-        # ---- 5. Project tool delta pose and broadcast to all points ----
-        pose_feat = self.pose_proj(tool_delta_pose)  # (B, D)
-        pose_feat = pose_feat.unsqueeze(1).expand(B, N, D)  # (B, N, D)
-
-        # ---- 6. Concatenate and predict ----
-        feat = torch.cat([query, pose_feat], dim=-1)  # (B, N, 2D)
-        return self.head(feat)                        # (B, N, 3)
+        return out  # (B, 2P, D)
 
 
-# --------------------------------------------------------------------------- #
-# SDFSegmentor — local-only SDF prediction (no global_feat)
-# --------------------------------------------------------------------------- #
+def _make_relu_mlp(dims: tuple[int, ...]) -> nn.Sequential:
+    layers: list[nn.Module] = []
+    for i in range(len(dims) - 1):
+        layers.append(nn.Linear(dims[i], dims[i + 1]))
+        if i < len(dims) - 2:
+            layers.append(nn.ReLU())
+    return nn.Sequential(*layers)
 
-class SDFSegmentor(nn.Module):
-    """SDF prediction wrapper around SDFPointCloudEncoder.
 
-    Locality constraints:
-      - Pointwise: each point uses ONLY its own patch token + relative coordinate
-      - Patchwise: each patch uses ONLY its own patch token
-    No global_feat (CLS token) is used in either mode.
+class Pose9DHead(nn.Module):
+    """Small MLP head that predicts translation + 6D rotation columns."""
+
+    def __init__(self, input_dim: int, hidden_dims: tuple[int, ...] = (256, 128)):
+        super().__init__()
+        self.net = _make_relu_mlp((input_dim,) + hidden_dims + (9,))
+        self._init_identity_delta_output()
+
+    def _init_identity_delta_output(self) -> None:
+        final = self.net[-1]
+        if not isinstance(final, nn.Linear):
+            raise TypeError("Pose9DHead expects the final module to be nn.Linear")
+        nn.init.zeros_(final.weight)
+        identity_delta = torch.tensor(
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            dtype=final.bias.dtype,
+            device=final.bias.device,
+        )
+        with torch.no_grad():
+            final.bias.copy_(identity_delta)
+
+    def forward(self, pooled_features: torch.Tensor) -> torch.Tensor:
+        return self.net(pooled_features)
+
+
+class TranslationHead(nn.Module):
+    """Small MLP head that predicts an xyz translation delta."""
+
+    def __init__(self, input_dim: int, hidden_dims: tuple[int, ...] = (256, 128)):
+        super().__init__()
+        self.net = _make_relu_mlp((input_dim,) + hidden_dims + (3,))
+        self._init_zero_delta_output()
+
+    def _init_zero_delta_output(self) -> None:
+        final = self.net[-1]
+        if not isinstance(final, nn.Linear):
+            raise TypeError("TranslationHead expects the final module to be nn.Linear")
+        nn.init.zeros_(final.weight)
+        nn.init.zeros_(final.bias)
+
+    def forward(self, pooled_features: torch.Tensor) -> torch.Tensor:
+        return self.net(pooled_features)
+
+
+def _pose9d_to_rotation_matrix(pose9d: torch.Tensor) -> torch.Tensor:
+    return rotation_from_pose9d(pose9d)
+
+
+def _pose9d_delta_magnitudes(target: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    trans_norm = target[..., :3].norm(dim=-1)
+    target_R = _pose9d_to_rotation_matrix(target)
+    trace = target_R[..., 0, 0] + target_R[..., 1, 1] + target_R[..., 2, 2]
+    cos_angle = ((trace - 1.0) * 0.5).clamp(-1.0, 1.0)
+    rot_angle_deg = torch.acos(cos_angle) * (180.0 / math.pi)
+    return trans_norm, rot_angle_deg
+
+
+def _pose9d_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    *,
+    child_points: torch.Tensor,
+    rot_weight: float,
+    chamfer_weight: float,
+    quat_norm_beta: float,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    pred_t = pred[..., :3]
+    target_t = target[..., :3]
+    pred_R = _pose9d_to_rotation_matrix(pred)
+    target_R = _pose9d_to_rotation_matrix(target)
+
+    if child_points.ndim != 3 or child_points.shape[0] != pred.shape[0] or child_points.shape[-1] != 3:
+        raise ValueError(
+            "RPDiff pose loss requires child_points with shape (B, N, 3), "
+            f"got {tuple(child_points.shape)} for pred {tuple(pred.shape)}"
+        )
+    child_pred = child_points @ pred_R.transpose(-1, -2) + pred_t[:, None, :]
+    child_target = child_points @ target_R.transpose(-1, -2) + target_t[:, None, :]
+    rpdiff_loss = TransformChamferWrapper(l1=False, trans_offset=False)
+    loss_dict = rpdiff_loss.tf_chamfer(
+        model_outputs={
+            "trans": pred_t,
+            "quat": matrix_to_quaternion(pred_R),
+            "unnorm_quat": matrix_to_quaternion(pred_R),
+            "child_pcd_final_pred": child_pred,
+        },
+        ground_truth={
+            "trans": target_t,
+            "rot_mat": target_R,
+            "child_final_pcd": child_target,
+        },
+        quat_norm_beta=quat_norm_beta,
+    )
+    trans_loss = loss_dict["trans"]
+    rot_loss = loss_dict["rot"]
+    chamfer_loss = loss_dict["chamf"]
+    total = trans_loss + float(rot_weight) * rot_loss + float(chamfer_weight) * chamfer_loss
+    return total, {
+        "pose_trans_loss": trans_loss,
+        "pose_rot_geodesic_loss": rot_loss,
+        "pose_chamfer_loss": chamfer_loss,
+    }
+
+
+def _translation_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    loss = F.mse_loss(pred, target)
+    return loss, {"translation_loss": loss}
+
+
+def _sdf_supervision_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    *,
+    relative: bool,
+    eps: float,
+) -> torch.Tensor:
+    if not relative:
+        return F.smooth_l1_loss(pred, target)
+    denom = target.detach().abs().clamp_min(float(eps))
+    return ((pred - target) / denom).abs().mean()
+
+
+# ============================================================================ #
+# ContactDiffusionModel — ties everything together
+# ============================================================================ #
+
+class ContactDiffusionModel(nn.Module):
+    """Joint SDF + pose denoising model.
+
+    Architecture:
+      1. encoder: TCEPointCloudEncoder
+           - Tool input:  tool_rotated  (canonical pts rotated to current/noised pose)
+           - Object input: obj_pc       (centered at origin)
+      2. pose_cross_attn: PoseCrossAttention — run once per head:
+           - SDF pass:      (pose_3d, zeros_movement)
+           - Denoise pass:  (pose_3d, zeros_movement) [sdf-diff only]
+      3. SDF heads: per-point/per-patch SDF from SDF-conditioned tokens
+      4. pose9d heads: separately pooled tool+object tokens → 9D pose deltas
+
+    Both heads receive the SAME pose_3d = noised_tool_centroid - obj_centroid.
+    Diffusion conditioning uses only the noised pose signal and timestep; post/physics
+    movement conditioning is reserved for the postcontact head.
     """
 
     def __init__(
         self,
+        # SDF head
         head_mode: str = "point",
-        patch_agg: str = "mean",
+        patch_agg: str = "min",
+        head_hidden: tuple[int, ...] = (256, 128),
+        # Encoder
         num_pts: int = 512,
         patch_size: int = 32,
         encoder_channel: int = 128,
         vit_depth: int = 4,
         vit_heads: int = 4,
-        head_hidden: tuple[int, ...] = (256, 128),
         freeze_encoder: bool = False,
+        # Cross-attention
+        cross_attn_heads: int = 4,
+        cross_attn_layers: int = 2,
+        pose_dim: int = 3,
+        movement_cond_dim: int = 25,
+        condition_mlp_hidden_dims: tuple[int, ...] = (128, 128),
+        num_query_A: int = 4,
+        num_query_B: int = 4,
+        num_query_C: int = 4,
+        num_query_D: int = 4,
+        condition_mean: tuple[float, ...] | None = None,
+        condition_std: tuple[float, ...] | None = None,
+        condition_norm_eps: float = 1e-4,
+        # Denoising
+        denoise_hidden: tuple[int, ...] = (256,),
+        postcontact_hidden: tuple[int, ...] = (256,),
+        # Loss
+        sdf_weight: float = 1.0,
+        denoise_weight: float = 1.0,
+        postcontact_weight: float = 1.0,
+        denoise_rot_weight: float = 1.0,
+        chamfer_weight: float = 1.0,
+        quat_norm_beta: float = 0.1,
+        loss_weights: dict[str, float] | None = None,
+        # Diffusion
+        num_diffusion_steps: int = 10,
+        sdf_backend: str = "kaolin",
+        sdf_chunk_size: int = 8192,
+        sdf_relative_loss: bool = False,
+        sdf_relative_eps: float = 0.005,
+        # Task
+        task: str = "sdf-diff",
+        enabled_heads: tuple[str, ...] | list[str] | None = None,
     ):
         super().__init__()
         assert head_mode in ("point", "patch")
-        assert patch_agg in ("mean", "min", "max")
+        assert task in ("sdf", "sdf-diff")
+        if enabled_heads is None:
+            enabled_heads = ("sdf", "diff") if task == "sdf-diff" else ("sdf",)
+        enabled_heads = tuple(enabled_heads)
+        invalid_heads = sorted(set(enabled_heads).difference({"sdf", "diff", "postcontact"}))
+        if invalid_heads:
+            raise ValueError(f"Unknown enabled_heads: {invalid_heads}")
+
         self.head_mode = head_mode
         self.patch_agg = patch_agg
+        self.task = task
+        self.enabled_heads = enabled_heads
+        self.sdf_backend = str(sdf_backend)
+        self.sdf_chunk_size = int(sdf_chunk_size)
+        self.sdf_relative_loss = bool(sdf_relative_loss)
+        self.sdf_relative_eps = float(sdf_relative_eps)
+        if self.sdf_relative_eps <= 0.0:
+            raise ValueError("sdf_relative_eps must be > 0")
+        merged_weights = {
+            "sdf": float(sdf_weight),
+            "diff": float(denoise_weight),
+            "postcontact": float(postcontact_weight),
+        }
+        if loss_weights:
+            merged_weights.update({str(k): float(v) for k, v in loss_weights.items()})
+        self.loss_weights = merged_weights
+        self.sdf_weight = merged_weights["sdf"]
+        self.denoise_weight = merged_weights["diff"]
+        self.postcontact_weight = merged_weights["postcontact"]
+        self.denoise_rot_weight = denoise_rot_weight
+        self.chamfer_weight = chamfer_weight
+        self.quat_norm_beta = quat_norm_beta
+        self.num_diffusion_steps = num_diffusion_steps
+        self.movement_cond_dim = int(movement_cond_dim)
+        self.condition_norm_eps = float(condition_norm_eps)
+        if self.condition_norm_eps <= 0.0:
+            raise ValueError("condition_norm_eps must be > 0")
+        if condition_mean is None or condition_std is None:
+            condition_mean_tensor = torch.zeros(self.movement_cond_dim, dtype=torch.float32)
+            condition_std_tensor = torch.ones(self.movement_cond_dim, dtype=torch.float32)
+            condition_normalization_enabled = False
+        else:
+            condition_mean_tensor = torch.as_tensor(condition_mean, dtype=torch.float32)
+            condition_std_tensor = torch.as_tensor(condition_std, dtype=torch.float32)
+            if tuple(condition_mean_tensor.shape) != (self.movement_cond_dim,):
+                raise ValueError(
+                    f"condition_mean must have shape ({self.movement_cond_dim},), "
+                    f"got {tuple(condition_mean_tensor.shape)}"
+                )
+            if tuple(condition_std_tensor.shape) != (self.movement_cond_dim,):
+                raise ValueError(
+                    f"condition_std must have shape ({self.movement_cond_dim},), "
+                    f"got {tuple(condition_std_tensor.shape)}"
+                )
+            condition_normalization_enabled = True
+        self.register_buffer("condition_mean", condition_mean_tensor, persistent=False)
+        self.register_buffer("condition_std", condition_std_tensor.clamp_min(self.condition_norm_eps), persistent=False)
+        self.register_buffer(
+            "condition_normalization_enabled",
+            torch.tensor(condition_normalization_enabled, dtype=torch.bool),
+            persistent=False,
+        )
 
-        enc_cfg = SDFEncoderCfg(
+        # ── Shared encoder ───────────────────────────────────────────────
+        enc_cfg = TCEPointCloudEncoderCfg(
             num_pts=num_pts,
             patch_size=patch_size,
             encoder_channel=encoder_channel,
@@ -300,796 +741,371 @@ class SDFSegmentor(nn.Module):
             vit_heads=vit_heads,
             freeze=freeze_encoder,
         )
-        self.encoder = SDFPointCloudEncoder(enc_cfg)
+        self.encoder = TCEPointCloudEncoder(enc_cfg)
         D = self.encoder.feature_dim
+        self.num_patches = self.encoder.num_patches
 
-        if head_mode == "point":
-            # Embed relative xyz (point − patch_center) to feature space
-            self.xyz_embed = _make_mlp((3, D, D))
-            # Input: rel_xyz_embed (D) + patch_token (D) = 2*D
-            self.tool_head = _make_mlp((2 * D,) + head_hidden + (1,))
-            self.obj_head = _make_mlp((2 * D,) + head_hidden + (1,))
-        else:
-            # Input: patch_token only (D)
-            self.tool_head = _make_mlp((D,) + head_hidden + (1,))
-            self.obj_head = _make_mlp((D,) + head_hidden + (1,))
+        # ── SDF heads (same architecture as existing SDFSegmentor) ───────
+        # Only create these when the SDF objective is active. Diff-only DDP
+        # should not carry permanently unused SDF parameters.
+        if "sdf" in self.enabled_heads:
+            if head_mode == "point":
+                self.xyz_embed = _make_mlp((3, D, D))
+                self.tool_sdf_head = _make_mlp((2 * D,) + head_hidden + (1,))
+                self.obj_sdf_head = _make_mlp((2 * D,) + head_hidden + (1,))
+            else:
+                self.tool_sdf_head = _make_mlp((D,) + head_hidden + (1,))
+                self.obj_sdf_head = _make_mlp((D,) + head_hidden + (1,))
 
-    def _predict_point(
+        # ── Pose conditioning (cross-attention) ─────────────────────────
+        # Built for BOTH tasks: sdf-only needs it to inject translation so
+        # the SDF head knows where the tool is relative to the object.
+        self.pose_cross_attn = PoseCrossAttention(
+            token_dim=D,
+            pose_dim=pose_dim,
+            movement_cond_dim=movement_cond_dim,
+            n_heads=cross_attn_heads,
+            n_layers=cross_attn_layers,
+            condition_mlp_hidden_dims=condition_mlp_hidden_dims,
+            num_query_A=num_query_A,
+            num_query_B=num_query_B,
+            num_query_C=num_query_C,
+            num_query_D=num_query_D,
+        )
+
+        if "diff" in self.enabled_heads:
+            self.diff_time_emb = SinusoidalPosEmb(dim=2 * D, max_pos=num_diffusion_steps + 1)
+            self.diff_translation_head = TranslationHead(
+                input_dim=2 * D,
+                hidden_dims=denoise_hidden,
+            )
+        if "postcontact" in self.enabled_heads:
+            self.postcontact_head = _make_relu_mlp(
+                (2 * D,) + postcontact_hidden + (9,)
+            )
+
+    # ── SDF prediction (point mode) ──────────────────────────────────────
+
+    def _predict_point_sdf(
         self,
-        pc: torch.Tensor,              # (B, N, 3) — point cloud
-        patch_tokens: torch.Tensor,     # (B, P, D) — patch tokens
-        patch_idx: torch.Tensor,        # (B, P, K) — point indices per patch
-        patch_centers: torch.Tensor,    # (B, P, 3) — FPS patch centers
+        pc: torch.Tensor,
+        patch_tokens: torch.Tensor,
+        patch_idx: torch.Tensor,
+        patch_centers: torch.Tensor,
         head: nn.Module,
     ) -> torch.Tensor:
-        """Predict per-point SDF using local patch features only."""
+        """Per-point SDF prediction. Same logic as SDFSegmentor._predict_point."""
         B, N, _ = pc.shape
         D = self.encoder.feature_dim
         P, K = patch_tokens.shape[1], patch_idx.shape[2]
 
-        # ---- Scatter patch centers to per-point ----
+        # Scatter patch centers to per-point
         pt_centers = torch.zeros(B, N, 3, device=pc.device, dtype=pc.dtype)
         exp_ctr = patch_centers.unsqueeze(2).expand(B, P, K, 3)
         flat_ctr_idx = patch_idx.reshape(B, P * K, 1).expand(B, P * K, 3)
         flat_ctr = exp_ctr.reshape(B, P * K, 3)
         pt_centers.scatter_(1, flat_ctr_idx, flat_ctr)
 
-        # ---- Relative coordinate embedding ----
-        rel_xyz = pc - pt_centers                    # (B, N, 3)
-        pt_rel_xyz = self.xyz_embed(rel_xyz)         # (B, N, D)
+        # Relative coordinate embedding
+        rel_xyz = pc - pt_centers
+        pt_rel_xyz = self.xyz_embed(rel_xyz)
 
-        # ---- Scatter patch tokens to per-point ----
+        # Scatter patch tokens to per-point
         pt_patch = torch.zeros(B, N, D, device=pc.device, dtype=pc.dtype)
         exp_tok = patch_tokens.unsqueeze(2).expand(B, P, K, D)
         flat_idx = patch_idx.reshape(B, P * K, 1).expand(B, P * K, D)
         flat_tok = exp_tok.reshape(B, P * K, D)
         pt_patch.scatter_(1, flat_idx, flat_tok)
 
-        # ---- Concatenate: [rel_xyz_embed, patch_token] ----
-        feat = torch.cat([pt_rel_xyz, pt_patch], dim=-1)  # (B, N, 2*D)
+        feat = torch.cat([pt_rel_xyz, pt_patch], dim=-1)
         return head(feat).squeeze(-1)
 
-    def _predict_patch(
+    def _predict_patch_sdf(
         self,
-        patch_tokens: torch.Tensor,    # (B, P, D) — patch tokens
+        patch_tokens: torch.Tensor,
         head: nn.Module,
     ) -> torch.Tensor:
-        """Predict per-patch SDF using patch token only."""
+        """Per-patch SDF prediction. Same logic as SDFSegmentor._predict_patch."""
         return head(patch_tokens).squeeze(-1)
 
-    def forward(
-        self,
-        tool_pc: torch.Tensor,
-        obj_pc: torch.Tensor,
-        tool_sdf_gt: torch.Tensor = None,
-        obj_sdf_gt: torch.Tensor = None,
-        **kwargs,
-    ) -> Tuple[torch.Tensor, dict]:
+    # ── Forward (routes to loss for DDP) ──────────────────────────────────
+
+    def forward(self, *args, **kwargs):
         """Route through loss() so DDP gradient sync hooks fire."""
-        if tool_sdf_gt is not None and obj_sdf_gt is not None:
-            return self.loss(tool_pc, obj_pc, tool_sdf_gt, obj_sdf_gt, **kwargs)
-        # Inference path: just predict SDF values
-        res = self.encoder.encode(tool_pc, obj_pc)
-        P = self.encoder.num_patches
-        tool_tok, obj_tok = _split_tokens(res, P)
-        if self.head_mode == "point":
-            tool_sdf = self._predict_point(
-                tool_pc, tool_tok,
-                res.tool_patch_idx, res.tool_patch_centers, self.tool_head,
-            )
-            obj_sdf = self._predict_point(
-                obj_pc, obj_tok,
-                res.obj_patch_idx, res.obj_patch_centers, self.obj_head,
-            )
-        else:
-            tool_sdf = self._predict_patch(tool_tok, self.tool_head)
-            obj_sdf = self._predict_patch(obj_tok, self.obj_head)
-        return tool_sdf, obj_sdf
+        return self.loss(*args, **kwargs)
 
-    def loss(
+    def _compose_condition(
         self,
-        tool_pc: torch.Tensor,
-        obj_pc: torch.Tensor,
-        tool_sdf_gt: torch.Tensor,
-        obj_sdf_gt: torch.Tensor,
-        # SDF inputs at INIT pose (optional)
-        tool_pc_init: torch.Tensor = None,
-        init_tool_sdf_gt: torch.Tensor = None,
-        init_obj_sdf_gt: torch.Tensor = None,
-        sdf_weight: float = 1.0,
-    ) -> Tuple[torch.Tensor, dict]:
-        """Compute SDF loss at both contact and init poses (if available)."""
-        res = self.encoder.encode(tool_pc, obj_pc)
-        P = self.encoder.num_patches
-        tool_tok, obj_tok = _split_tokens(res, P)
-
-        # ---- SDF at CONTACT pose ----
-        if self.head_mode == "point":
-            tool_pred = self._predict_point(
-                tool_pc, tool_tok,
-                res.tool_patch_idx, res.tool_patch_centers, self.tool_head,
-            )
-            obj_pred = self._predict_point(
-                obj_pc, obj_tok,
-                res.obj_patch_idx, res.obj_patch_centers, self.obj_head,
-            )
-        else:
-            tool_sdf_gt_agg = _aggregate_sdf(tool_sdf_gt, res.tool_patch_idx, self.patch_agg)
-            obj_sdf_gt_agg = _aggregate_sdf(obj_sdf_gt, res.obj_patch_idx, self.patch_agg)
-            tool_pred = self._predict_patch(tool_tok, self.tool_head)
-            obj_pred = self._predict_patch(obj_tok, self.obj_head)
-            tool_sdf_gt = tool_sdf_gt_agg
-            obj_sdf_gt = obj_sdf_gt_agg
-
-        tool_loss = F.smooth_l1_loss(tool_pred, tool_sdf_gt)
-        obj_loss = F.smooth_l1_loss(obj_pred, obj_sdf_gt)
-        total = sdf_weight * (tool_loss + obj_loss)
-        metrics = {
-            "tool_sdf_loss": tool_loss.item(),
-            "obj_sdf_loss": obj_loss.item(),
-        }
-
-        # ---- SDF at INIT pose (optional) ----
-        has_init_sdf = (
-            tool_pc_init is not None
-            and init_tool_sdf_gt is not None
-            and init_obj_sdf_gt is not None
-        )
-        if has_init_sdf:
-            res_init = self.encoder.encode(tool_pc_init, obj_pc)
-            init_tool_tok, init_obj_tok = _split_tokens(res_init, P)
-
-            if self.head_mode == "point":
-                init_tool_pred = self._predict_point(
-                    tool_pc_init, init_tool_tok,
-                    res_init.tool_patch_idx, res_init.tool_patch_centers, self.tool_head,
-                )
-                init_obj_pred = self._predict_point(
-                    obj_pc, init_obj_tok,
-                    res_init.obj_patch_idx, res_init.obj_patch_centers, self.obj_head,
-                )
-            else:
-                init_tool_sdf_gt_agg = _aggregate_sdf(init_tool_sdf_gt, res_init.tool_patch_idx, self.patch_agg)
-                init_obj_sdf_gt_agg = _aggregate_sdf(init_obj_sdf_gt, res_init.obj_patch_idx, self.patch_agg)
-                init_tool_pred = self._predict_patch(init_tool_tok, self.tool_head)
-                init_obj_pred = self._predict_patch(init_obj_tok, self.obj_head)
-                init_tool_sdf_gt = init_tool_sdf_gt_agg
-                init_obj_sdf_gt = init_obj_sdf_gt_agg
-
-            init_tool_loss = F.smooth_l1_loss(init_tool_pred, init_tool_sdf_gt)
-            init_obj_loss = F.smooth_l1_loss(init_obj_pred, init_obj_sdf_gt)
-            total = total + sdf_weight * (init_tool_loss + init_obj_loss)
-            metrics["init_tool_sdf_loss"] = init_tool_loss.item()
-            metrics["init_obj_sdf_loss"] = init_obj_loss.item()
-
-        return total, metrics
-
-
-# --------------------------------------------------------------------------- #
-# DiffusionModel - Combined SDF + Flow Matching training
-# --------------------------------------------------------------------------- #
-
-class DiffusionModel(nn.Module):
-    """Joint training of SDF prediction + pose flow matching (no movement).
-
-    Uses shared encoder with:
-        - SDFSegmentor (local-only SDF prediction)
-        - Velocity net: MLPVelocityNet (default) or TransformerForDiffusion
-        - AuxRegressionHead (optional, for regression warmup)
-
-    The velocity net (flow matching) uses ALL patch tokens as conditioning.
-    SDF heads use only local patch features (no global_feat).
-    """
-
-    def __init__(
-        self,
-        # SDF head
-        head_mode: str = "point",
-        patch_agg: str = "mean",
-        head_hidden: tuple[int, ...] = (256, 128),
-        # Encoder (shared)
-        num_pts: int = 512,
-        patch_size: int = 32,
-        encoder_channel: int = 128,
-        vit_depth: int = 4,
-        vit_heads: int = 4,
-        freeze_encoder: bool = False,
-        # Flow matching / diffusion head
-        n_layer: int = 4,
-        n_head: int = 4,
-        n_emb: int = 256,
-        p_drop_emb: float = 0.0,
-        p_drop_attn: float = 0.0,
-        use_mlp_head: bool = True,
-        pose_dim: int = 9,
-        aux_pose_dim: int = 9,
-        # Auxiliary regression
-        aux_reg: bool = True,
-        # Loss weights
-        sdf_weight: float = 1.0,
-        diffusion_weight: float = 1.0,
-        aux_weight: float = 1.0,
-    ):
-        super().__init__()
-        self.sdf_weight = sdf_weight
-        self.diffusion_weight = diffusion_weight
-        self.aux_weight = aux_weight
-        self.use_mlp_head = use_mlp_head
-        self.pose_dim = pose_dim
-
-        # Shared encoder
-        enc_cfg = SDFEncoderCfg(
-            num_pts=num_pts,
-            patch_size=patch_size,
-            encoder_channel=encoder_channel,
-            vit_depth=vit_depth,
-            vit_heads=vit_heads,
-            freeze=freeze_encoder,
-        )
-        self.encoder = SDFPointCloudEncoder(enc_cfg)
-        D = self.encoder.feature_dim  # 128
-        P = self.encoder.num_patches   # 16
-
-        # SDF head (shares encoder — avoid duplicate param registration for DDP)
-        self.sdf_head = SDFSegmentor(
-            head_mode=head_mode,
-            patch_agg=patch_agg,
-            head_hidden=head_hidden,
-            num_pts=num_pts,
-            patch_size=patch_size,
-            encoder_channel=encoder_channel,
-            vit_depth=vit_depth,
-            vit_heads=vit_heads,
-            freeze_encoder=freeze_encoder,
-        )
-        # Delete the duplicate encoder that SDFSegmentor created internally,
-        # and replace with a plain (non-registered) reference to the shared one.
-        del self.sdf_head.encoder
-        object.__setattr__(self.sdf_head, 'encoder', self.encoder)
-
-        # Velocity network (flow matching)
-        if use_mlp_head:
-            self.velocity_net = MLPVelocityNet(
-                pose_dim=pose_dim, cond_dim=D, hidden=n_emb, n_layers=n_layer,
-            )
-        else:
-            self.velocity_net = TransformerForDiffusion(
-                input_dim=pose_dim,
-                output_dim=pose_dim,
-                horizon=1,
-                n_obs_steps=2 * P,
-                cond_dim=D,
-                n_layer=n_layer,
-                n_head=n_head,
-                n_emb=n_emb,
-                p_drop_emb=p_drop_emb,
-                p_drop_attn=p_drop_attn,
-                obs_as_cond=True,
-                time_as_cond=True,
-                n_cond_layers=1,
-            )
-        # Backward compat aliases
-        self.noise_predictor = self.velocity_net
-        self.transformer = self.velocity_net
-
-        # Position-aware conditioning: project tool-obj centroids into token space
-        self.cond_pos_proj = nn.Linear(6, D)
-
-        # Auxiliary regression head (optional)
-        self.aux_reg_head = AuxRegressionHead(cond_dim=D, pose_dim=aux_pose_dim) if aux_reg else None
-
-        # Flow matching inference steps
-        self.n_inference_steps = 20
-
-    def build_condition(self, tool_pc_init: torch.Tensor,
-                        obj_pc: torch.Tensor) -> torch.Tensor:
-        """Encode tool@init + object → condition tokens with position bias."""
-        enc_result = self.encoder.encode(tool_pc_init, obj_pc)
-        cond = enc_result.fused_tokens  # (B, 2P, D) — already [tool, obj] concatenated
-
-        tool_centroid = tool_pc_init.mean(dim=1)
-        obj_centroid = obj_pc.mean(dim=1)
-        pos_bias = self.cond_pos_proj(
-            torch.cat([tool_centroid, obj_centroid], dim=-1)
-        )
-        cond = cond + pos_bias.unsqueeze(1)
+        cond_tool_post_delta9d: torch.Tensor | None,
+        cond_object_post_delta9d: torch.Tensor | None,
+        physics: torch.Tensor | None,
+        *,
+        include_object_delta: bool,
+    ) -> torch.Tensor:
+        if not include_object_delta:
+            cond_object_post_delta9d = torch.zeros_like(cond_object_post_delta9d)
+        cond = torch.cat((cond_tool_post_delta9d, cond_object_post_delta9d, physics), dim=-1)
+        if cond.shape[-1] < self.movement_cond_dim:
+            cond = F.pad(cond, (0, self.movement_cond_dim - cond.shape[-1]))
+        elif cond.shape[-1] > self.movement_cond_dim:
+            cond = cond[..., : self.movement_cond_dim]
+        if bool(self.condition_normalization_enabled.item()):
+            mean = self.condition_mean.to(device=cond.device, dtype=cond.dtype)
+            std = self.condition_std.to(device=cond.device, dtype=cond.dtype).clamp_min(self.condition_norm_eps)
+            cond = (cond - mean) / std
         return cond
 
-    def forward(self, *args, **kwargs):
-        """Route through forward() so DDP gradient sync hooks fire."""
-        return self.loss(*args, **kwargs)
+    def _pool_conditioned_tokens(self, fused_tokens: torch.Tensor) -> torch.Tensor:
+        P = self.num_patches
+        tool_cond = fused_tokens[:, :P, :]
+        obj_cond = fused_tokens[:, P:, :]
+        return torch.cat((tool_cond.mean(dim=1), obj_cond.mean(dim=1)), dim=-1)
 
-    def loss(
+    def _signed_mesh_sdf_labels(
         self,
-        # SDF inputs (tool at CONTACT pose)
-        tool_pc: torch.Tensor,
-        obj_pc: torch.Tensor,
-        tool_sdf_gt: torch.Tensor,
-        obj_sdf_gt: torch.Tensor,
-        # SDF inputs (tool at INIT pose - optional)
-        init_tool_sdf_gt: torch.Tensor = None,
-        init_obj_sdf_gt: torch.Tensor = None,
-        # Flow matching inputs (tool at INIT pose)
-        tool_pc_init: torch.Tensor = None,
-        delta_pose_gt: torch.Tensor = None,
-        init_pose_gt: torch.Tensor = None,
-        # Phase control
-        enable_flow: bool = True,
-    ) -> Tuple[torch.Tensor, dict]:
-        """Joint SDF + flow matching loss computation."""
-        metrics = {}
-        total_loss = torch.tensor(0.0, device=tool_pc.device)
+        *,
+        tool_points_E_k: torch.Tensor,
+        object_points_E_k: torch.Tensor,
+        object_mesh_vertices,
+        object_mesh_faces,
+        tool_mesh_vertices,
+        tool_mesh_faces,
+        object_rotation_E: torch.Tensor,
+        object_bbox_center_E: torch.Tensor,
+        tool_rotation_E_k: torch.Tensor,
+        tool_translation_E_k: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        missing = [
+            name
+            for name, value in {
+                "object_mesh_vertices": object_mesh_vertices,
+                "object_mesh_faces": object_mesh_faces,
+                "tool_mesh_vertices": tool_mesh_vertices,
+                "tool_mesh_faces": tool_mesh_faces,
+                "object_rotation_E": object_rotation_E,
+                "object_bbox_center_E": object_bbox_center_E,
+                "tool_rotation_E_k": tool_rotation_E_k,
+                "tool_translation_E_k": tool_translation_E_k,
+            }.items()
+            if value is None
+        ]
+        if missing:
+            raise ValueError(f"SDF head requires on-the-fly signed mesh SDF fields: missing {missing}")
+        tool_query_points_E = tool_points_E_k + tool_translation_E_k.unsqueeze(-2)
+        object_query_points_E = object_points_E_k + object_bbox_center_E[:, None, None, :]
+        return mutual_signed_sdf_labels_env_frame(
+            tool_query_points_E=tool_query_points_E,
+            object_query_points_E=object_query_points_E,
+            object_mesh_vertices=object_mesh_vertices,
+            object_mesh_faces=object_mesh_faces,
+            tool_mesh_vertices=tool_mesh_vertices,
+            tool_mesh_faces=tool_mesh_faces,
+            object_rotation_E=object_rotation_E,
+            object_bbox_center_E=object_bbox_center_E,
+            tool_rotation_E_k=tool_rotation_E_k,
+            tool_translation_E_k=tool_translation_E_k,
+            chunk_size=self.sdf_chunk_size,
+            backend=self.sdf_backend,
+        )
 
-        # ---- SDF task at CONTACT pose ----
-        enc_result_contact = self.encoder.encode(tool_pc, obj_pc)
-        P = self.encoder.num_patches
-        contact_tool_tok, contact_obj_tok = _split_tokens(enc_result_contact, P)
+    def _loss_contact_v1(
+        self,
+        *,
+        tool_points_E_k: torch.Tensor,
+        object_points_E_k: torch.Tensor,
+        rel_tool_object_t_k: torch.Tensor,
+        cond_tool_post_delta9d: torch.Tensor,
+        cond_object_post_delta9d: torch.Tensor,
+        physics: torch.Tensor,
+        object_mesh_vertices=None,
+        object_mesh_faces=None,
+        tool_mesh_vertices=None,
+        tool_mesh_faces=None,
+        object_rotation_E: torch.Tensor | None = None,
+        object_bbox_center_E: torch.Tensor | None = None,
+        tool_rotation_E_k: torch.Tensor | None = None,
+        tool_translation_E_k: torch.Tensor | None = None,
+        target_tool_denoise_pose9d_k: torch.Tensor | None = None,
+        target_object_post_delta9d: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, dict]:
+        B, T, N, _ = tool_points_E_k.shape
+        device = tool_points_E_k.device
+        K = max(T - 1, 0)
+        tool_flat = tool_points_E_k.reshape(B * T, N, 3)
+        obj_flat = object_points_E_k.reshape(B * T, N, 3)
+        rel_flat = rel_tool_object_t_k.reshape(B * T, 3)
 
-        if self.sdf_head.head_mode == "point":
-            tool_pred = self.sdf_head._predict_point(
-                tool_pc, contact_tool_tok,
-                enc_result_contact.tool_patch_idx,
-                enc_result_contact.tool_patch_centers,
-                self.sdf_head.tool_head,
+        encoder_result = self.encoder.encode(tool_flat, obj_flat)
+        fused = encoder_result.fused_tokens
+        metrics: dict[str, float] = {}
+        total_loss = tool_flat.new_zeros(())
+
+        if "sdf" in self.enabled_heads:
+            zero_cond = torch.zeros(B * T, self.movement_cond_dim, device=device, dtype=tool_flat.dtype)
+            fused_sdf = self.pose_cross_attn(fused, rel_flat, zero_cond)
+            P = self.num_patches
+            tool_tok_cond = fused_sdf[:, :P, :]
+            obj_tok_cond = fused_sdf[:, P:, :]
+            tool_sdf_gt_full, obj_sdf_gt_full = self._signed_mesh_sdf_labels(
+                tool_points_E_k=tool_points_E_k,
+                object_points_E_k=object_points_E_k,
+                object_mesh_vertices=object_mesh_vertices,
+                object_mesh_faces=object_mesh_faces,
+                tool_mesh_vertices=tool_mesh_vertices,
+                tool_mesh_faces=tool_mesh_faces,
+                object_rotation_E=object_rotation_E,
+                object_bbox_center_E=object_bbox_center_E,
+                tool_rotation_E_k=tool_rotation_E_k,
+                tool_translation_E_k=tool_translation_E_k,
             )
-            obj_pred = self.sdf_head._predict_point(
-                obj_pc, contact_obj_tok,
-                enc_result_contact.obj_patch_idx,
-                enc_result_contact.obj_patch_centers,
-                self.sdf_head.obj_head,
-            )
-        else:
-            tool_sdf_gt_agg = _aggregate_sdf(tool_sdf_gt, enc_result_contact.tool_patch_idx, self.sdf_head.patch_agg)
-            obj_sdf_gt_agg = _aggregate_sdf(obj_sdf_gt, enc_result_contact.obj_patch_idx, self.sdf_head.patch_agg)
-            tool_pred = self.sdf_head._predict_patch(contact_tool_tok, self.sdf_head.tool_head)
-            obj_pred = self.sdf_head._predict_patch(contact_obj_tok, self.sdf_head.obj_head)
-            tool_sdf_gt = tool_sdf_gt_agg
-            obj_sdf_gt = obj_sdf_gt_agg
+            tool_sdf_gt = tool_sdf_gt_full.reshape(B * T, N)
+            obj_sdf_gt = obj_sdf_gt_full.reshape(B * T, N)
 
-        tool_loss = F.smooth_l1_loss(tool_pred, tool_sdf_gt)
-        obj_loss = F.smooth_l1_loss(obj_pred, obj_sdf_gt)
-        sdf_loss = tool_loss + obj_loss
-        total_loss = total_loss + self.sdf_weight * sdf_loss
-        metrics["tool_sdf_loss"] = tool_loss.item()
-        metrics["obj_sdf_loss"] = obj_loss.item()
-
-        # ---- SDF task at INIT pose (optional) ----
-        has_init_sdf = init_tool_sdf_gt is not None and init_obj_sdf_gt is not None and tool_pc_init is not None
-        if has_init_sdf:
-            enc_result_init = self.encoder.encode(tool_pc_init, obj_pc)
-            init_tool_tok, init_obj_tok = _split_tokens(enc_result_init, P)
-
-            if self.sdf_head.head_mode == "point":
-                init_tool_pred = self.sdf_head._predict_point(
-                    tool_pc_init, init_tool_tok,
-                    enc_result_init.tool_patch_idx,
-                    enc_result_init.tool_patch_centers,
-                    self.sdf_head.tool_head,
+            if self.head_mode == "point":
+                tool_sdf_pred = self._predict_point_sdf(
+                    tool_flat,
+                    tool_tok_cond,
+                    encoder_result.tool_patch_idx,
+                    encoder_result.tool_patch_centers,
+                    self.tool_sdf_head,
                 )
-                init_obj_pred = self.sdf_head._predict_point(
-                    obj_pc, init_obj_tok,
-                    enc_result_init.obj_patch_idx,
-                    enc_result_init.obj_patch_centers,
-                    self.sdf_head.obj_head,
+                obj_sdf_pred = self._predict_point_sdf(
+                    obj_flat,
+                    obj_tok_cond,
+                    encoder_result.obj_patch_idx,
+                    encoder_result.obj_patch_centers,
+                    self.obj_sdf_head,
                 )
             else:
-                init_tool_sdf_gt_agg = _aggregate_sdf(init_tool_sdf_gt, enc_result_init.tool_patch_idx, self.sdf_head.patch_agg)
-                init_obj_sdf_gt_agg = _aggregate_sdf(init_obj_sdf_gt, enc_result_init.obj_patch_idx, self.sdf_head.patch_agg)
-                init_tool_pred = self.sdf_head._predict_patch(init_tool_tok, self.sdf_head.tool_head)
-                init_obj_pred = self.sdf_head._predict_patch(init_obj_tok, self.sdf_head.obj_head)
-                init_tool_sdf_gt = init_tool_sdf_gt_agg
-                init_obj_sdf_gt = init_obj_sdf_gt_agg
+                tool_sdf_gt = _aggregate_sdf(tool_sdf_gt, encoder_result.tool_patch_idx, self.patch_agg)
+                obj_sdf_gt = _aggregate_sdf(obj_sdf_gt, encoder_result.obj_patch_idx, self.patch_agg)
+                tool_sdf_pred = self._predict_patch_sdf(tool_tok_cond, self.tool_sdf_head)
+                obj_sdf_pred = self._predict_patch_sdf(obj_tok_cond, self.obj_sdf_head)
 
-            init_tool_loss = F.smooth_l1_loss(init_tool_pred, init_tool_sdf_gt)
-            init_obj_loss = F.smooth_l1_loss(init_obj_pred, init_obj_sdf_gt)
-            init_sdf_loss = init_tool_loss + init_obj_loss
-            total_loss = total_loss + self.sdf_weight * init_sdf_loss
-            metrics["init_tool_sdf_loss"] = init_tool_loss.item()
-            metrics["init_obj_sdf_loss"] = init_obj_loss.item()
+            tool_sdf_loss = _sdf_supervision_loss(
+                tool_sdf_pred,
+                tool_sdf_gt,
+                relative=self.sdf_relative_loss,
+                eps=self.sdf_relative_eps,
+            )
+            obj_sdf_loss = _sdf_supervision_loss(
+                obj_sdf_pred,
+                obj_sdf_gt,
+                relative=self.sdf_relative_loss,
+                eps=self.sdf_relative_eps,
+            )
+            sdf_loss = tool_sdf_loss + obj_sdf_loss
+            total_loss = total_loss + self.loss_weights["sdf"] * sdf_loss
+            metrics["tool_sdf_loss"] = float(tool_sdf_loss.detach().cpu())
+            metrics["obj_sdf_loss"] = float(obj_sdf_loss.detach().cpu())
+            metrics["sdf_loss"] = float(sdf_loss.detach().cpu())
 
-        # ---- Flow matching + auxiliary regression ----
-        has_init = tool_pc_init is not None
-        has_delta = delta_pose_gt is not None
-        has_init_pose = init_pose_gt is not None
+        if "diff" in self.enabled_heads and K > 0:
+            if target_tool_denoise_pose9d_k is None:
+                raise ValueError("diff head requires target_tool_denoise_pose9d_k")
+            pre_slice = torch.arange(B * T, device=device).reshape(B, T)[:, 1:].reshape(-1)
+            diff_fused = fused.index_select(0, pre_slice)
+            diff_rel = rel_tool_object_t_k[:, 1:, :].reshape(B * K, 3)
+            diff_time = torch.arange(1, T, device=device).repeat(B)
+            diff_cond = torch.zeros(B * K, self.movement_cond_dim, device=device, dtype=tool_flat.dtype)
+            diff_tokens = self.pose_cross_attn(diff_fused, diff_rel, diff_cond)
+            diff_head_input = self._pool_conditioned_tokens(diff_tokens) + self.diff_time_emb(diff_time.float())
+            diff_pred = self.diff_translation_head(diff_head_input)
+            diff_target = target_tool_denoise_pose9d_k.reshape(B * K, 9)
+            diff_loss, diff_parts = _translation_loss(
+                diff_pred,
+                diff_target[..., :3],
+            )
+            total_loss = total_loss + self.loss_weights["diff"] * diff_loss
+            metrics["denoise_loss"] = float(diff_loss.detach().cpu())
+            metrics["denoise_translation_loss"] = float(diff_parts["translation_loss"].detach().cpu())
+            metrics["denoise_pose_trans_loss"] = metrics["denoise_translation_loss"]
 
-        if has_init and (has_delta or has_init_pose):
-            B = tool_pc_init.shape[0]
-            device = tool_pc_init.device
+        if "postcontact" in self.enabled_heads:
+            if target_object_post_delta9d is None:
+                raise ValueError("postcontact head requires target_object_post_delta9d")
+            if cond_tool_post_delta9d is None or cond_object_post_delta9d is None or physics is None:
+                raise ValueError("postcontact head requires post delta and physics conditioning fields")
+            contact_slice = torch.arange(B * T, device=device).reshape(B, T)[:, 0]
+            post_fused = fused.index_select(0, contact_slice)
+            post_rel = rel_tool_object_t_k[:, 0, :]
+            post_cond = self._compose_condition(
+                cond_tool_post_delta9d,
+                cond_object_post_delta9d,
+                physics,
+                include_object_delta=False,
+            )
+            post_tokens = self.pose_cross_attn(post_fused, post_rel, post_cond)
+            post_pred = self.postcontact_head(self._pool_conditioned_tokens(post_tokens))
+            post_child_points = object_points_E_k[:, 0, :, :]
+            gt_trans_mag, gt_rot_mag_deg = _pose9d_delta_magnitudes(target_object_post_delta9d)
+            pred_trans_mag, pred_rot_mag_deg = _pose9d_delta_magnitudes(post_pred)
+            post_loss, post_parts = _pose9d_loss(
+                post_pred,
+                target_object_post_delta9d,
+                child_points=post_child_points,
+                rot_weight=self.denoise_rot_weight,
+                chamfer_weight=self.chamfer_weight,
+                quat_norm_beta=self.quat_norm_beta,
+            )
+            total_loss = total_loss + self.loss_weights["postcontact"] * post_loss
+            metrics["postcontact_loss"] = float(post_loss.detach().cpu())
+            metrics["postcontact_gt_translation_abs_mean"] = float(gt_trans_mag.mean().detach().cpu())
+            metrics["postcontact_gt_rotation_abs_deg_mean"] = float(gt_rot_mag_deg.mean().detach().cpu())
+            metrics["postcontact_pred_translation_abs_mean"] = float(pred_trans_mag.mean().detach().cpu())
+            metrics["postcontact_pred_rotation_abs_deg_mean"] = float(pred_rot_mag_deg.mean().detach().cpu())
+            metrics["postcontact_pose_trans_loss"] = float(post_parts["pose_trans_loss"].detach().cpu())
+            metrics["postcontact_pose_rot_geodesic_loss"] = float(post_parts["pose_rot_geodesic_loss"].detach().cpu())
+            metrics["postcontact_pose_chamfer_loss"] = float(post_parts["pose_chamfer_loss"].detach().cpu())
 
-            cond = self.build_condition(tool_pc_init, obj_pc)
-
-            # Auxiliary regression: predict init_pose (directly solvable)
-            # Active during BOTH warmup and joint phases — keeps encoder
-            # discriminative and provides position-aware gradients.
-            if self.aux_reg_head is not None and has_init_pose:
-                ip_pred = self.aux_reg_head(cond)
-                aux_loss = F.mse_loss(ip_pred, init_pose_gt)
-                total_loss = total_loss + self.aux_weight * aux_loss
-                metrics["aux_loss"] = aux_loss.item()
-
-            # Flow matching (disabled during warmup phase)
-            if enable_flow and has_delta:
-                x_0 = delta_pose_gt.unsqueeze(1)       # (B, 1, pose_dim) data
-                eps = torch.randn_like(x_0)             # (B, 1, pose_dim) noise
-
-                # Logit-normal time sampling (SD3 recipe):
-                # Concentrates near t=0 and t=1 where signal is clearest,
-                # unlike uniform which overweights the hard t≈0.5 region.
-                sigma_min = 1e-4
-                u = torch.randn(B, device=device) * 0.5  # std=0.5 for mild concentration
-                t = torch.sigmoid(u)                       # logit-normal in (0, 1)
-                t = t * (1.0 - sigma_min) + sigma_min      # clamp to [σ_min, 1]
-
-                # Linear interpolation: x_t = (1-t)·x_0 + t·ε
-                t_expand = t[:, None, None]             # (B, 1, 1)
-                x_t = (1.0 - t_expand) * x_0 + t_expand * eps
-
-                # Velocity target: v = ε - x_0
-                v_target = eps - x_0
-
-                # Predict velocity
-                v_pred = self.velocity_net(
-                    sample=x_t, timestep=t, cond=cond,
-                )
-                # Huber loss: linear for large errors → bounds gradients from
-                # Gaussian-tail outliers without biasing the target distribution.
-                flow_loss = F.smooth_l1_loss(v_pred, v_target)
-                total_loss = total_loss + self.diffusion_weight * flow_loss
-                metrics["flow_loss"] = flow_loss.item()
-
-        metrics["total"] = total_loss.item()
+        if not metrics:
+            raise ValueError("At least one enabled head must produce a loss")
+        metrics["total_loss"] = float(total_loss.detach().cpu())
         return total_loss, metrics
 
-    @torch.no_grad()
-    def sample(
-        self,
-        tool_pc_init: torch.Tensor,
-        obj_pc: torch.Tensor,
-        n_steps: int = None,
-    ) -> torch.Tensor:
-        """Generate delta_pose via Euler integration from noise to data.
-
-        Args:
-            tool_pc_init: (B, P, 3) tool point cloud at initial pose
-            obj_pc:       (B, Q, 3) object point cloud
-            n_steps:      number of Euler steps (default: self.n_inference_steps)
-
-        Returns: (B, pose_dim) predicted delta target
-        """
-        if n_steps is None:
-            n_steps = self.n_inference_steps
-        B = tool_pc_init.shape[0]
-        device = tool_pc_init.device
-
-        cond = self.build_condition(tool_pc_init, obj_pc)
-        dt = 1.0 / n_steps
-
-        # Start from pure noise (t=1)
-        x = torch.randn(B, 1, self.pose_dim, device=device)
-
-        # Euler integration: t goes from 1 → 0
-        for i in range(n_steps):
-            t_val = 1.0 - i * dt
-            t = torch.full((B,), t_val, device=device)
-            v = self.velocity_net(sample=x, timestep=t, cond=cond)
-            x = x - v * dt  # step toward data
-
-        return x.squeeze(1)  # (B, pose_dim)
-
-# --------------------------------------------------------------------------- #
-# MovementModel — SDF + per-point movement prediction (no flow matching)
-# --------------------------------------------------------------------------- #
-
-class MovementModel(nn.Module):
-    """Joint SDF prediction + per-object-point movement prediction.
-
-    Architecture:
-        encoder: SDFPointCloudEncoder (shared)
-        sdf_head: SDFSegmentor (local-only, patch or point mode)
-        movement_head: MovementPredictionHead (local + cross-attn)
-
-    Given tool+object at contact configuration and a tool action (ΔT),
-    predicts how each object point moves (the object response ΔO).
-    """
-
-    def __init__(
-        self,
-        # SDF head
-        head_mode: str = "patch",
-        patch_agg: str = "min",
-        head_hidden: tuple[int, ...] = (128, 64),
-        # Encoder (shared)
-        num_pts: int = 512,
-        patch_size: int = 32,
-        encoder_channel: int = 128,
-        vit_depth: int = 4,
-        vit_heads: int = 4,
-        freeze_encoder: bool = False,
-        # Movement head
-        movement_head_hidden: tuple[int, ...] = (128, 64),
-        # Loss weights
-        sdf_weight: float = 1.0,
-        movement_weight: float = 1.0,
-    ):
-        super().__init__()
-        self.sdf_weight = sdf_weight
-        self.movement_weight = movement_weight
-
-        # Shared encoder
-        enc_cfg = SDFEncoderCfg(
-            num_pts=num_pts,
-            patch_size=patch_size,
-            encoder_channel=encoder_channel,
-            vit_depth=vit_depth,
-            vit_heads=vit_heads,
-            freeze=freeze_encoder,
-        )
-        self.encoder = SDFPointCloudEncoder(enc_cfg)
-        D = self.encoder.feature_dim
-
-        # SDF head (shares encoder)
-        self.sdf_head = SDFSegmentor(
-            head_mode=head_mode,
-            patch_agg=patch_agg,
-            head_hidden=head_hidden,
-            num_pts=num_pts,
-            patch_size=patch_size,
-            encoder_channel=encoder_channel,
-            vit_depth=vit_depth,
-            vit_heads=vit_heads,
-            freeze_encoder=freeze_encoder,
-        )
-        del self.sdf_head.encoder
-        object.__setattr__(self.sdf_head, 'encoder', self.encoder)
-
-        # Movement prediction head (MLP-based)
-        self.movement_head = MovementPredictionHead(
-            patch_dim=D,
-            pose_dim=9,
-            head_hidden=movement_head_hidden,
-        )
-
-    def forward(self, *args, **kwargs):
-        """Route through loss() so DDP gradient sync hooks fire."""
-        return self.loss(*args, **kwargs)
+    # ── Joint loss computation ────────────────────────────────────────────
 
     def loss(
         self,
-        # SDF inputs (tool at CONTACT pose)
-        tool_pc: torch.Tensor,
-        obj_pc: torch.Tensor,
-        tool_sdf_gt: torch.Tensor,
-        obj_sdf_gt: torch.Tensor,
-        # SDF inputs at INIT pose (optional)
-        tool_pc_init: torch.Tensor = None,
-        init_tool_sdf_gt: torch.Tensor = None,
-        init_obj_sdf_gt: torch.Tensor = None,
-        # Movement inputs
-        tool_delta_action: torch.Tensor = None,
-        obj_displacement_gt: torch.Tensor = None,
-        # Unused (for interface compat with run_epoch)
-        **kwargs,
-    ) -> Tuple[torch.Tensor, dict]:
-        """Joint SDF + movement loss."""
-        metrics = {}
-        total_loss = torch.tensor(0.0, device=tool_pc.device)
-
-        # ---- Encode at CONTACT pose ----
-        enc = self.encoder.encode(tool_pc, obj_pc)
-        P = self.encoder.num_patches
-        tool_tok, obj_tok = _split_tokens(enc, P)
-
-        # ---- SDF task at CONTACT pose ----
-        if self.sdf_head.head_mode == "point":
-            tool_pred = self.sdf_head._predict_point(
-                tool_pc, tool_tok,
-                enc.tool_patch_idx, enc.tool_patch_centers,
-                self.sdf_head.tool_head,
+        tool_points_E_k: torch.Tensor | None = None,
+        object_points_E_k: torch.Tensor | None = None,
+        rel_tool_object_t_k: torch.Tensor | None = None,
+        cond_tool_post_delta9d: torch.Tensor | None = None,
+        cond_object_post_delta9d: torch.Tensor | None = None,
+        physics: torch.Tensor | None = None,
+        object_mesh_vertices=None,
+        object_mesh_faces=None,
+        tool_mesh_vertices=None,
+        tool_mesh_faces=None,
+        object_rotation_E: torch.Tensor | None = None,
+        object_bbox_center_E: torch.Tensor | None = None,
+        tool_rotation_E_k: torch.Tensor | None = None,
+        tool_translation_E_k: torch.Tensor | None = None,
+        target_tool_denoise_pose9d_k: torch.Tensor | None = None,
+        target_object_post_delta9d: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, dict]:
+        """Compute contact_pt_env_v1 pretrain losses from schema dataset batches."""
+        if tool_points_E_k is not None:
+            return self._loss_contact_v1(
+                tool_points_E_k=tool_points_E_k,
+                object_points_E_k=object_points_E_k,
+                rel_tool_object_t_k=rel_tool_object_t_k,
+                cond_tool_post_delta9d=cond_tool_post_delta9d,
+                cond_object_post_delta9d=cond_object_post_delta9d,
+                physics=physics,
+                object_mesh_vertices=object_mesh_vertices,
+                object_mesh_faces=object_mesh_faces,
+                tool_mesh_vertices=tool_mesh_vertices,
+                tool_mesh_faces=tool_mesh_faces,
+                object_rotation_E=object_rotation_E,
+                object_bbox_center_E=object_bbox_center_E,
+                tool_rotation_E_k=tool_rotation_E_k,
+                tool_translation_E_k=tool_translation_E_k,
+                target_tool_denoise_pose9d_k=target_tool_denoise_pose9d_k,
+                target_object_post_delta9d=target_object_post_delta9d,
             )
-            obj_pred = self.sdf_head._predict_point(
-                obj_pc, obj_tok,
-                enc.obj_patch_idx, enc.obj_patch_centers,
-                self.sdf_head.obj_head,
-            )
-        else:
-            tool_sdf_gt_agg = _aggregate_sdf(tool_sdf_gt, enc.tool_patch_idx, self.sdf_head.patch_agg)
-            obj_sdf_gt_agg = _aggregate_sdf(obj_sdf_gt, enc.obj_patch_idx, self.sdf_head.patch_agg)
-            tool_pred = self.sdf_head._predict_patch(tool_tok, self.sdf_head.tool_head)
-            obj_pred = self.sdf_head._predict_patch(obj_tok, self.sdf_head.obj_head)
-            tool_sdf_gt = tool_sdf_gt_agg
-            obj_sdf_gt = obj_sdf_gt_agg
 
-        tool_loss = F.smooth_l1_loss(tool_pred, tool_sdf_gt)
-        obj_loss = F.smooth_l1_loss(obj_pred, obj_sdf_gt)
-        sdf_loss = tool_loss + obj_loss
-        total_loss = total_loss + self.sdf_weight * sdf_loss
-        metrics["tool_sdf_loss"] = tool_loss.item()
-        metrics["obj_sdf_loss"] = obj_loss.item()
-
-        # ---- SDF task at INIT pose (optional) ----
-        has_init_sdf = (
-            tool_pc_init is not None
-            and init_tool_sdf_gt is not None
-            and init_obj_sdf_gt is not None
+        raise NotImplementedError(
+            "Legacy pretrain loss path is disabled. Use contact_pt_env_v1 batches from "
+            "pretrain.dataset and configure diff/postcontact pose heads explicitly."
         )
-        if has_init_sdf:
-            enc_init = self.encoder.encode(tool_pc_init, obj_pc)
-            init_tool_tok, init_obj_tok = _split_tokens(enc_init, P)
-
-            if self.sdf_head.head_mode == "point":
-                init_tool_pred = self.sdf_head._predict_point(
-                    tool_pc_init, init_tool_tok,
-                    enc_init.tool_patch_idx, enc_init.tool_patch_centers,
-                    self.sdf_head.tool_head,
-                )
-                init_obj_pred = self.sdf_head._predict_point(
-                    obj_pc, init_obj_tok,
-                    enc_init.obj_patch_idx, enc_init.obj_patch_centers,
-                    self.sdf_head.obj_head,
-                )
-            else:
-                init_tool_sdf_gt_agg = _aggregate_sdf(init_tool_sdf_gt, enc_init.tool_patch_idx, self.sdf_head.patch_agg)
-                init_obj_sdf_gt_agg = _aggregate_sdf(init_obj_sdf_gt, enc_init.obj_patch_idx, self.sdf_head.patch_agg)
-                init_tool_pred = self.sdf_head._predict_patch(init_tool_tok, self.sdf_head.tool_head)
-                init_obj_pred = self.sdf_head._predict_patch(init_obj_tok, self.sdf_head.obj_head)
-                init_tool_sdf_gt = init_tool_sdf_gt_agg
-                init_obj_sdf_gt = init_obj_sdf_gt_agg
-
-            init_tool_loss = F.smooth_l1_loss(init_tool_pred, init_tool_sdf_gt)
-            init_obj_loss = F.smooth_l1_loss(init_obj_pred, init_obj_sdf_gt)
-            init_sdf_loss = init_tool_loss + init_obj_loss
-            total_loss = total_loss + self.sdf_weight * init_sdf_loss
-            metrics["init_tool_sdf_loss"] = init_tool_loss.item()
-            metrics["init_obj_sdf_loss"] = init_obj_loss.item()
-
-        # ---- Movement prediction (local patch + cross-attn) ----
-        if tool_delta_action is not None and obj_displacement_gt is not None:
-            disp_pred = self.movement_head(
-                pc=obj_pc,
-                patch_tokens=obj_tok,
-                patch_idx=enc.obj_patch_idx,
-                patch_centers=enc.obj_patch_centers,
-                tool_delta_pose=tool_delta_action,
-            )  # (B, N, 3)
-            movement_loss = F.smooth_l1_loss(disp_pred, obj_displacement_gt)
-            total_loss = total_loss + self.movement_weight * movement_loss
-            metrics["movement_loss"] = movement_loss.item()
-            # Log average absolute displacement magnitude for diagnostics
-            metrics["movement_gt_mean_abs"] = obj_displacement_gt.abs().mean().item()
-            metrics["movement_gt_max_abs"] = obj_displacement_gt.abs().max().item()
-
-        metrics["total"] = total_loss.item()
-        return total_loss, metrics
-
-
-# --------------------------------------------------------------------------- #
-# JointModel — SDF prediction + pose flow matching + movement prediction
-# --------------------------------------------------------------------------- #
-
-class JointModel(DiffusionModel):
-    """Joint training of SDF prediction, pose flow matching, and movement prediction.
-
-    Shares one SDFPointCloudEncoder across all heads:
-        - sdf_head: local SDF prediction at contact/init poses
-        - velocity_net: flow matching for tool delta pose
-        - aux_reg_head: optional init pose regression
-        - movement_head: per-object-point displacement prediction
-    """
-
-    def __init__(
-        self,
-        # SDF head
-        head_mode: str = "patch",
-        patch_agg: str = "min",
-        head_hidden: tuple[int, ...] = (128, 64),
-        # Encoder (shared)
-        num_pts: int = 512,
-        patch_size: int = 32,
-        encoder_channel: int = 128,
-        vit_depth: int = 4,
-        vit_heads: int = 4,
-        freeze_encoder: bool = False,
-        # Flow matching / diffusion head
-        n_layer: int = 4,
-        n_head: int = 4,
-        n_emb: int = 256,
-        p_drop_emb: float = 0.0,
-        p_drop_attn: float = 0.0,
-        use_mlp_head: bool = True,
-        pose_dim: int = 9,
-        aux_pose_dim: int = 9,
-        aux_reg: bool = True,
-        # Movement head
-        movement_head_hidden: tuple[int, ...] = (128, 64),
-        # Loss weights
-        sdf_weight: float = 1.0,
-        diffusion_weight: float = 1.0,
-        movement_weight: float = 1.0,
-        aux_weight: float = 1.0,
-    ):
-        super().__init__(
-            head_mode=head_mode,
-            patch_agg=patch_agg,
-            head_hidden=head_hidden,
-            num_pts=num_pts,
-            patch_size=patch_size,
-            encoder_channel=encoder_channel,
-            vit_depth=vit_depth,
-            vit_heads=vit_heads,
-            freeze_encoder=freeze_encoder,
-            n_layer=n_layer,
-            n_head=n_head,
-            n_emb=n_emb,
-            p_drop_emb=p_drop_emb,
-            p_drop_attn=p_drop_attn,
-            use_mlp_head=use_mlp_head,
-            pose_dim=pose_dim,
-            aux_pose_dim=aux_pose_dim,
-            aux_reg=aux_reg,
-            sdf_weight=sdf_weight,
-            diffusion_weight=diffusion_weight,
-            aux_weight=aux_weight,
-        )
-        self.movement_weight = movement_weight
-        self.movement_head = MovementPredictionHead(
-            patch_dim=self.encoder.feature_dim,
-            pose_dim=9,
-            head_hidden=movement_head_hidden,
-        )
-
-    def loss(
-        self,
-        # SDF inputs (tool at CONTACT pose)
-        tool_pc: torch.Tensor,
-        obj_pc: torch.Tensor,
-        tool_sdf_gt: torch.Tensor,
-        obj_sdf_gt: torch.Tensor,
-        # SDF inputs (tool at INIT pose - optional)
-        init_tool_sdf_gt: torch.Tensor = None,
-        init_obj_sdf_gt: torch.Tensor = None,
-        # Flow matching inputs (tool at INIT pose)
-        tool_pc_init: torch.Tensor = None,
-        delta_pose_gt: torch.Tensor = None,
-        init_pose_gt: torch.Tensor = None,
-        # Movement inputs
-        tool_delta_action: torch.Tensor = None,
-        obj_displacement_gt: torch.Tensor = None,
-        # Phase control
-        enable_flow: bool = True,
-    ) -> Tuple[torch.Tensor, dict]:
-        """Joint SDF + flow matching + movement loss computation."""
-        total_loss, metrics = super().loss(
-            tool_pc=tool_pc,
-            obj_pc=obj_pc,
-            tool_sdf_gt=tool_sdf_gt,
-            obj_sdf_gt=obj_sdf_gt,
-            init_tool_sdf_gt=init_tool_sdf_gt,
-            init_obj_sdf_gt=init_obj_sdf_gt,
-            tool_pc_init=tool_pc_init,
-            delta_pose_gt=delta_pose_gt,
-            init_pose_gt=init_pose_gt,
-            enable_flow=enable_flow,
-        )
-
-        if tool_delta_action is None:
-            raise ValueError("JointModel requires tool_delta_action for movement prediction.")
-        if obj_displacement_gt is None:
-            raise ValueError("JointModel requires obj_displacement_gt for movement prediction.")
-
-        enc = self.encoder.encode(tool_pc, obj_pc)
-        P = self.encoder.num_patches
-        _, obj_tok = _split_tokens(enc, P)
-        disp_pred = self.movement_head(
-            pc=obj_pc,
-            patch_tokens=obj_tok,
-            patch_idx=enc.obj_patch_idx,
-            patch_centers=enc.obj_patch_centers,
-            tool_delta_pose=tool_delta_action,
-        )
-        movement_loss = F.smooth_l1_loss(disp_pred, obj_displacement_gt)
-        total_loss = total_loss + self.movement_weight * movement_loss
-        metrics["movement_loss"] = movement_loss.item()
-        metrics["movement_gt_mean_abs"] = obj_displacement_gt.abs().mean().item()
-        metrics["movement_gt_max_abs"] = obj_displacement_gt.abs().max().item()
-        metrics["total"] = total_loss.item()
-        return total_loss, metrics

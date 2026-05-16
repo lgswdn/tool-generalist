@@ -33,13 +33,48 @@ class Cloud:
         cache_path = cache_dir / f"{obj_path.stem}.npy"
 
         if cache_path.exists():
-            points_np = np.load(cache_path)
+            try:
+                cache_size = cache_path.stat().st_size
+            except OSError:
+                cache_size = -1
+            print(
+                "[cloud_cache] load "
+                f"obj={obj_path} cache={cache_path} bytes={cache_size} "
+                f"target_num_points={target_num_points}",
+                flush=True,
+            )
+            try:
+                points_np = np.load(cache_path)
+            except Exception as exc:
+                raise RuntimeError(
+                    "Point-cloud cache load failed. "
+                    f"obj_path={obj_path} cache_path={cache_path} bytes={cache_size} "
+                    f"error={type(exc).__name__}: {exc}. "
+                    "The cache file is likely empty/corrupt; remove that .npy file to regenerate it."
+                ) from exc
+            if points_np.ndim != 2 or points_np.shape[1] != 3:
+                raise RuntimeError(
+                    "Point-cloud cache has invalid shape. "
+                    f"obj_path={obj_path} cache_path={cache_path} shape={points_np.shape}; "
+                    "remove that .npy file to regenerate it."
+                )
             if points_np.shape[0] != target_num_points:
+                print(
+                    "[cloud_cache] resample "
+                    f"cache={cache_path} cached_points={points_np.shape[0]} "
+                    f"target_num_points={target_num_points}",
+                    flush=True,
+                )
                 indices = np.random.choice(
                     points_np.shape[0], target_num_points, replace=False
                 )
                 points_np = points_np[indices]
         else:
+            print(
+                "[cloud_cache] miss "
+                f"obj={obj_path} cache={cache_path} target_num_points={target_num_points}",
+                flush=True,
+            )
             mesh = trimesh.load(str(obj_path), force="mesh")
             if isinstance(mesh, trimesh.Scene):
                 mesh = mesh.dump(concatenate=True)
@@ -64,6 +99,11 @@ class Cloud:
 
             cache_dir.mkdir(parents=True, exist_ok=True)
             np.save(cache_path, points_np.astype(np.float32))
+            print(
+                "[cloud_cache] saved "
+                f"obj={obj_path} cache={cache_path} points={points_np.shape[0]}",
+                flush=True,
+            )
 
         if initial_scale is not None:
             scale_arr = np.asarray(initial_scale, dtype=np.float32).reshape(1, 3)
@@ -91,6 +131,7 @@ class Cloud:
 
         # Per-device Torch tensor cache (for backward compat with old code paths)
         self._points_torch = {}
+        self._vertices_torch = {}
 
     def _to_numpy(self, x):
         if isinstance(x, torch.Tensor):
@@ -106,6 +147,25 @@ class Cloud:
             pts = self.points.to(device=device)
             self._points_torch[device] = pts
         return pts
+
+    def _get_vertices_torch(self, device: torch.device) -> torch.Tensor:
+        """Get full OBJ mesh vertices on specified device for conservative placement."""
+        verts = self._vertices_torch.get(device)
+        if verts is not None:
+            return verts
+
+        mesh = trimesh.load(self._obj_path, force="mesh")
+        if isinstance(mesh, trimesh.Scene):
+            mesh = mesh.dump(concatenate=True)
+        if hasattr(mesh, "vertices") and len(mesh.vertices) > 0:
+            verts_np = np.asarray(mesh.vertices, dtype=np.float32)
+        else:
+            mesh_data = meshio.read(self._obj_path)
+            verts_np = np.asarray(mesh_data.points[:, :3], dtype=np.float32)
+
+        verts = torch.as_tensor(verts_np, dtype=torch.float32, device=device)
+        self._vertices_torch[device] = verts
+        return verts
 
     @staticmethod
     def _quat_wxyz_to_rotmat_torch(quat_wxyz: torch.Tensor) -> torch.Tensor:

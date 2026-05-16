@@ -91,6 +91,12 @@ def _dbg_cloud(env: "ManagerBasedRLEnv", name: str, cloud_env: torch.Tensor) -> 
     env._dbg_cloud_cnt = cnt + 1
 
 
+def _bbox_center_env(pointcloud_env: torch.Tensor) -> torch.Tensor:
+    bbox_min = pointcloud_env.min(dim=1).values
+    bbox_max = pointcloud_env.max(dim=1).values
+    return (bbox_min + bbox_max) * 0.5
+
+
 def get_head_area_pos_w(env: "ManagerBasedRLEnv") -> torch.Tensor:
     """Return the head area center in world space for every environment.
 
@@ -268,7 +274,7 @@ def rel_pose_goal(
     from isaaclab.utils.math import quat_from_euler_xyz, quat_mul, quat_conjugate, matrix_from_quat
 
     target_goal = env.command_manager.get_command(command_name)  # (num_envs, 7)
-    object_pose_7d = object_pose_in_env_frame(env, object_cfg)
+    object_pose_7d = object_pose_in_env_frame(env, object_cfg, normalize=False)
     obj_pos_env = object_pose_7d[:, :3]
     obj_quat_w = object_pose_7d[:, 3:7]
 
@@ -299,28 +305,39 @@ def rel_pose_goal(
     return rel_pose_9d
 
 
+PHYS_PARAM_FIELD_NAMES = (
+    "object_mass",
+    "object_static_friction",
+    "object_dynamic_friction",
+    "object_restitution",
+    "tool_mass",
+    "tool_static_friction",
+    "tool_dynamic_friction",
+    "tool_restitution",
+    "ground_static_friction",
+    "ground_dynamic_friction",
+    "ground_restitution",
+    "table_static_friction",
+    "table_dynamic_friction",
+    "table_restitution",
+)
+
+
 @profile_obs
 def phys_params(
     env: ManagerBasedRLEnv,
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
     hand_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    field_names: tuple[str, ...] | list[str] | None = None,
 ) -> torch.Tensor:
-    """Physical parameters observation for non-prehensile manipulation.
-
-    Returns 7D tensor: [object_mass, object_friction, tool_mass, tool_friction,
-                        hand_friction, ground_friction, object_restitution]
-
-    Args:
-        env: The RL environment
-        object_cfg: Configuration for the object asset
-        hand_cfg: Configuration for the robot hand
-
-    Returns:
-        torch.Tensor: Shape (num_envs, 7)
-    """
+    """Physical parameter observation assembled from explicit sampled fields."""
     device = env.scene[object_cfg.name].data.root_pos_w.device
     object: RigidObject = env.scene[object_cfg.name]
     hand: RigidObject = env.scene[hand_cfg.name]
+    if field_names is None:
+        field_names = getattr(env.cfg, "physics_observation_fields", ())
+    field_names = tuple(field_names)
+    env._phys_param_field_names = field_names
 
     # 1. Get object mass from IsaacLab's built-in interface
     object_mass = object.root_physx_view.get_masses().squeeze(-1)  # Shape: (num_envs,)
@@ -328,8 +345,9 @@ def phys_params(
     # 2. Get object material properties from PhysX view
     # Material properties format: [static_friction, dynamic_friction, restitution]
     object_material_props = object.root_physx_view.get_material_properties()  # Shape: (num_envs, num_bodies, 3)
-    object_friction = object_material_props[:, :, 0].mean(dim=1)   # (num_envs,) - object static friction
-    object_restitution = object_material_props[:, :, 2].mean(dim=1)  # (num_envs,) - object restitution
+    object_static_friction = object_material_props[:, :, 0].mean(dim=1)
+    object_dynamic_friction = object_material_props[:, :, 1].mean(dim=1)
+    object_restitution = object_material_props[:, :, 2].mean(dim=1)
 
     # 3. Get tool mass and friction from robot articulation
     # Resolve tool body index (link_coacd_convex_piece_0)
@@ -349,41 +367,93 @@ def phys_params(
     shapes_per_body = num_shapes // num_bodies
     tool_shape_start = tool_idx * shapes_per_body
     tool_shape_end = min((tool_idx + 1) * shapes_per_body, num_shapes)
-    tool_friction = robot_material_props[:, tool_shape_start:tool_shape_end, 0].mean(dim=1)  # (num_envs,)
+    tool_material = robot_material_props[:, tool_shape_start:tool_shape_end, :]
+    tool_static_friction = tool_material[:, :, 0].mean(dim=1)
+    tool_dynamic_friction = tool_material[:, :, 1].mean(dim=1)
+    tool_restitution = tool_material[:, :, 2].mean(dim=1)
 
-    # 4. Get hand friction from robot's physics properties
-    hand_material_props = robot_material_props
-    hand_friction = hand_material_props[:, -1, 0]      # Use static friction for hand (last body before tool)
+    # 4. Get ground/terrain material only when runtime spec requests ground fields.
+    ground_static_value = None
+    ground_dynamic_value = None
+    ground_restitution_value = None
+    ground_fields_requested = any(name.startswith("ground_") for name in field_names)
+    if ground_fields_requested:
+        if bool(getattr(env.cfg, "table_enabled", False)):
+            raise ValueError(
+                "phys_params requested ground_* fields, but table is enabled and "
+                "the ground terrain is not part of the scene."
+            )
+        try:
+            terrain = env.scene["terrain"]
+        except Exception as exc:
+            raise ValueError(
+                "phys_params requested ground_* fields, but scene terrain is unavailable."
+            ) from exc
+        terrain_prim_path = terrain.cfg.prim_path + "/terrain"
+        physics_material_path = f"{terrain_prim_path}/physicsMaterial"
 
-    # 5. Get ground/terrain friction - read actual randomized values from USD prim
-    terrain = env.scene["terrain"]
-    terrain_prim_path = terrain.cfg.prim_path + "/terrain"
-    physics_material_path = f"{terrain_prim_path}/physicsMaterial"
+        import isaacsim.core.utils.prims as prim_utils
+        from pxr import UsdPhysics
 
-    import isaacsim.core.utils.prims as prim_utils
-    from pxr import UsdPhysics
+        physics_material_prim = prim_utils.get_prim_at_path(physics_material_path)
+        if (
+            physics_material_prim
+            and physics_material_prim.IsValid()
+            and physics_material_prim.HasAPI(UsdPhysics.MaterialAPI)
+        ):
+            physics_material = UsdPhysics.MaterialAPI(physics_material_prim)
+            ground_static_value = physics_material.GetStaticFrictionAttr().Get()
+            ground_dynamic_value = physics_material.GetDynamicFrictionAttr().Get()
+            ground_restitution_value = physics_material.GetRestitutionAttr().Get()
+    ground_static_friction = torch.full_like(object_mass, 1.0 if ground_static_value is None else float(ground_static_value))
+    ground_dynamic_friction = torch.full_like(object_mass, 1.0 if ground_dynamic_value is None else float(ground_dynamic_value))
+    ground_restitution = torch.full_like(object_mass, 0.0 if ground_restitution_value is None else float(ground_restitution_value))
 
-    physics_material_prim = prim_utils.get_prim_at_path(physics_material_path)
-    if physics_material_prim and physics_material_prim.IsValid() and physics_material_prim.HasAPI(UsdPhysics.MaterialAPI):
-        physics_material = UsdPhysics.MaterialAPI(physics_material_prim)
-        ground_friction_value = physics_material.GetStaticFrictionAttr().Get()
-        if ground_friction_value is None:
-            ground_friction_value = 1.0
+    # 5. Table material fields are configured explicitly by RLCfg.  If a future
+    # table material randomizer stores sampled values on env, those values take
+    # precedence over the config defaults here.
+    table_material = getattr(env.cfg, "table_material", None)
+    sampled_table = getattr(env, "_sampled_table_material", None)
+    table_static_default = getattr(table_material, "static_friction", 0.8)
+    table_dynamic_default = getattr(table_material, "dynamic_friction", 0.8)
+    table_restitution_default = getattr(table_material, "restitution", 0.0)
+    table_static_friction = torch.full_like(
+        object_mass,
+        float(getattr(sampled_table, "static_friction", table_static_default)),
+    )
+    table_dynamic_friction = torch.full_like(
+        object_mass,
+        float(getattr(sampled_table, "dynamic_friction", table_dynamic_default)),
+    )
+    table_restitution = torch.full_like(
+        object_mass,
+        float(getattr(sampled_table, "restitution", table_restitution_default)),
+    )
+
+    values = {
+        "object_mass": object_mass.to(device=device),
+        "object_static_friction": object_static_friction.to(device=device),
+        "object_dynamic_friction": object_dynamic_friction.to(device=device),
+        "object_restitution": object_restitution.to(device=device),
+        "tool_mass": tool_mass.to(device=device),
+        "tool_static_friction": tool_static_friction.to(device=device),
+        "tool_dynamic_friction": tool_dynamic_friction.to(device=device),
+        "tool_restitution": tool_restitution.to(device=device),
+        "ground_static_friction": ground_static_friction.to(device=device),
+        "ground_dynamic_friction": ground_dynamic_friction.to(device=device),
+        "ground_restitution": ground_restitution.to(device=device),
+        "table_static_friction": table_static_friction.to(device=device),
+        "table_dynamic_friction": table_dynamic_friction.to(device=device),
+        "table_restitution": table_restitution.to(device=device),
+    }
+    missing = [name for name in field_names if name not in values]
+    if missing:
+        raise ValueError(f"Unknown phys_params fields: {missing}")
+
+    if not field_names:
+        phys_params_tensor = torch.empty((env.num_envs, 0), device=device)
     else:
-        # Material not yet created (before first reset); use default
-        ground_friction_value = 1.0
-    ground_friction = torch.full_like(object_mass, ground_friction_value)
-
-    # Stack into observation tensor: 7D
-    phys_params_tensor = torch.stack([
-        object_mass.to(device=device),        # (num_envs,) - object mass [0.1, 0.5]
-        object_friction.to(device=device),     # (num_envs,) - object static friction [0.7, 1.0]
-        tool_mass.to(device=device),           # (num_envs,) - tool mass [0.1, 0.5]
-        tool_friction.to(device=device),       # (num_envs,) - tool static friction [0.8, 1.5]
-        hand_friction.to(device=device),       # (num_envs,) - hand friction coefficient
-        ground_friction.to(device=device),     # (num_envs,) - ground friction coefficient [0.3, 0.8]
-        object_restitution.to(device=device)   # (num_envs,) - object restitution coefficient [0.1, 0.2]
-    ], dim=1)  # (num_envs, 7)
+        phys_params_tensor = torch.stack([values[name] for name in field_names], dim=1)
 
     return _dbg(env, "phys_params", phys_params_tensor)
 
@@ -391,6 +461,7 @@ def phys_params(
 def object_pose_in_env_frame(
     env: ManagerBasedRLEnv,
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    normalize: bool | None = None,
 ) -> torch.Tensor:
     """The pose of the object in the environment coordinate frame.
 
@@ -406,8 +477,10 @@ def object_pose_in_env_frame(
     if env.cfg.visualize_current_object_pose:
         visualize_object_pose_in_env(env, pose_7d)
 
-    # Check normalization setting from environment config
-    normalize = getattr(env.cfg, 'normalize_observations', True)
+    # Check normalization setting from environment config unless an internal
+    # caller needs the raw pose for pose arithmetic.
+    if normalize is None:
+        normalize = getattr(env.cfg, 'normalize_observations', True)
     
     if normalize:
         # Use hand-specific normalization parameters for object pose
@@ -626,7 +699,10 @@ def get_object_pointcloud(
 
     # Initialize per-env Cloud instances on first call
     if not hasattr(env, "_object_clouds"):
-        assets_cfg = object.cfg.spawn.assets_cfg
+        from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
+            get_object_asset_cfg_for_env,
+        )
+
         num_envs = object.data.root_pos_w.shape[0]
         device = object.data.root_pos_w.device
         scales = mdp.get_rigid_body_scale(
@@ -635,8 +711,7 @@ def get_object_pointcloud(
 
         env._object_clouds = []
         for env_idx in range(num_envs):
-            asset_idx = env_idx % len(assets_cfg)
-            obj_path = assets_cfg[asset_idx].obj_path
+            obj_path = get_object_asset_cfg_for_env(env_idx).obj_path
             initial_scale = scales[env_idx].detach().cpu().numpy()
             cloud = Cloud(
                 obj_path,
@@ -683,17 +758,13 @@ def get_object_pointcloud_in_env_frame(
     env: ManagerBasedRLEnv,
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
 ) -> torch.Tensor:
-    """Get object point cloud CENTERED at (0,0,0) in the environment frame.
+    """Get object point cloud in the environment frame.
 
-    Mirrors the pretraining pipeline (contact_gen.py filter_and_save):
-      obj_centroid = obj_world.mean(0)
-      P_obj_c = obj_world - obj_centroid
-
-    The per-env centroid (env-frame position) is cached as ``env._obs_obj_centroid``
-    so that ``get_obj_centroid()`` can return it cheaply as a separate observation.
+    The point cloud remains in env-frame coordinates for the observation.  A
+    separate bbox-center term is cached for the policy context.
 
     Returns:
-        Tensor (num_envs, num_points*3) — centered at (0,0,0) per env.
+        Tensor (num_envs, num_points*3) in env-frame coordinates.
     """
     pointcloud_w = get_object_pointcloud(env, object_cfg)
     num_envs, flat_dim = pointcloud_w.shape
@@ -702,36 +773,34 @@ def get_object_pointcloud_in_env_frame(
     # Convert to env frame (subtract world env origin)
     pointcloud_env = pointcloud_w_reshaped - env.scene.env_origins.unsqueeze(1)  # (N, P, 3)
 
-    # Center at (0,0,0): subtract per-env centroid
-    obj_centroid = pointcloud_env.mean(dim=1)          # (N, 3)  env-frame centroid
-    env._obs_obj_centroid = obj_centroid.detach()      # cache for get_obj_centroid()
-    pointcloud_centered = pointcloud_env - obj_centroid.unsqueeze(1)
+    obj_bbox_center = _bbox_center_env(pointcloud_env)
+    env._obs_obj_bbox_center = obj_bbox_center.detach()
 
-    return pointcloud_centered.reshape(num_envs, num_points * 3)
+    return pointcloud_env.reshape(num_envs, num_points * 3)
 
 
-def get_obj_centroid(
+def get_obj_bbox_center(
     env: ManagerBasedRLEnv,
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
 ) -> torch.Tensor:
-    """Return the object cloud centroid in the environment frame (3D per env).
+    """Return the object cloud AABB center in the environment frame (3D per env).
 
     Must be listed AFTER ``object_cloud`` in the observation config so the
-    centroid cache (``env._obs_obj_centroid``) is populated first.
+    bbox-center cache (``env._obs_obj_bbox_center``) is populated first.
 
     Returns:
         Tensor (num_envs, 3)
     """
-    if hasattr(env, "_obs_obj_centroid"):
-        return env._obs_obj_centroid
+    if hasattr(env, "_obs_obj_bbox_center"):
+        return env._obs_obj_bbox_center
     # Fallback: recompute (should not happen in normal operation)
     pointcloud_w = get_object_pointcloud(env, object_cfg)
     num_envs, flat_dim = pointcloud_w.shape
     num_points = flat_dim // 3
     pc_env = pointcloud_w.view(num_envs, num_points, 3) - env.scene.env_origins.unsqueeze(1)
-    centroid = pc_env.mean(dim=1)
-    env._obs_obj_centroid = centroid.detach()
-    return centroid
+    bbox_center = _bbox_center_env(pc_env)
+    env._obs_obj_bbox_center = bbox_center.detach()
+    return bbox_center
 
 
 def visualize_tool_pointcloud(
@@ -804,12 +873,14 @@ def get_tool_pointcloud_in_env_frame(
         torch.Tensor: shape (num_envs, num_points*3), float32
     """
     from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
-        get_cached_cloud, TOOL_DATA, TOOL_SCALE,
+        get_cached_cloud,
+        get_tool_data_for_env,
+        get_tool_index_for_env,
+        TOOL_SCALE,
     )
 
     num_envs = env.num_envs
     device = env.device
-    num_tools = len(TOOL_DATA)
 
     # Get tool body world pose from the robot articulation
     robot = env.scene["robot"]
@@ -827,13 +898,13 @@ def get_tool_pointcloud_in_env_frame(
     # Group envs by tool type for efficient batch processing
     tool_to_envs: dict[int, list[int]] = {}
     for env_id in range(num_envs):
-        tidx = env_id % num_tools
+        tidx = get_tool_index_for_env(env_id)
         if tidx not in tool_to_envs:
             tool_to_envs[tidx] = []
         tool_to_envs[tidx].append(env_id)
 
-    for tidx, env_ids_list in tool_to_envs.items():
-        td = TOOL_DATA[tidx]
+    for _tidx, env_ids_list in tool_to_envs.items():
+        td = get_tool_data_for_env(env_ids_list[0])
         tool_cloud = get_cached_cloud(td["obj_path"])
         base_pts = tool_cloud._get_points_torch(device).float()  # (M, 3)
 
@@ -906,13 +977,11 @@ def get_tool_pointcloud_in_env_frame(
     pointcloud_w = out_tensor  # (num_envs, M, 3) in world frame
     pointcloud_env = pointcloud_w - env.scene.env_origins.unsqueeze(1)  # (N, M, 3)
 
-    # Center at (0,0,0): subtract per-env centroid
-    tool_centroid = pointcloud_env.mean(dim=1)          # (N, 3)  env-frame centroid
-    env._obs_tool_centroid = tool_centroid.detach()     # cache for get_tool_centroid()
-    pointcloud_centered = pointcloud_env - tool_centroid.unsqueeze(1)
+    tool_bbox_center = _bbox_center_env(pointcloud_env)
+    env._obs_tool_bbox_center = tool_bbox_center.detach()
 
     # Flatten to (num_envs, M*3)
-    pointcloud_env_flat = pointcloud_centered.reshape(num_envs, -1)
+    pointcloud_env_flat = pointcloud_env.reshape(num_envs, -1)
 
     # Optional visualization (world frame for marker rendering)
     if getattr(env.cfg, "visualize_tool_pointcloud", False):
@@ -921,22 +990,22 @@ def get_tool_pointcloud_in_env_frame(
     return pointcloud_env_flat
 
 
-def get_tool_centroid(
+def get_tool_bbox_center(
     env: ManagerBasedRLEnv,
 ) -> torch.Tensor:
-    """Return the tool cloud centroid in the environment frame (3D per env).
+    """Return the tool cloud AABB center in the environment frame.
 
     Must be listed AFTER ``tool_cloud`` in the observation config so the
-    centroid cache (``env._obs_tool_centroid``) is populated first.
+    bbox-center cache (``env._obs_tool_bbox_center``) is populated first.
 
     Returns:
         Tensor (num_envs, 3)
     """
-    if hasattr(env, "_obs_tool_centroid"):
-        return env._obs_tool_centroid
+    if hasattr(env, "_obs_tool_bbox_center"):
+        return env._obs_tool_bbox_center
     # Fallback: recompute by calling the full function
     get_tool_pointcloud_in_env_frame(env)
-    return env._obs_tool_centroid
+    return env._obs_tool_bbox_center
 
 
 # ---------------------------------------------------------------------------
@@ -1112,18 +1181,20 @@ def get_tool_pointcloud_with_mass_velocity(
 
     Each point is [x, y, z, mass_per_point, vx, vy, vz] in environment frame.
     Velocity is derived from the tool body's rigid body kinematics.
-    Preserves Z-shift behavior from get_tool_pointcloud_in_env_frame.
+    Uses the same adjusted decomposed mesh contract as get_tool_pointcloud_in_env_frame.
 
     Returns:
         torch.Tensor: shape (num_envs, 512*7) = (num_envs, 3584), dtype float16
     """
     from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
-        get_cached_cloud, TOOL_DATA, TOOL_SCALE,
+        get_cached_cloud,
+        get_tool_data_for_env,
+        get_tool_index_for_env,
+        TOOL_SCALE,
     )
 
     num_envs = env.num_envs
     device = env.device
-    num_tools = len(TOOL_DATA)
 
     # Get tool body world pose from the robot articulation
     robot = env.scene["robot"]
@@ -1142,20 +1213,20 @@ def get_tool_pointcloud_with_mass_velocity(
     # Group envs by tool type for efficient batch processing
     tool_to_envs: dict[int, list[int]] = {}
     for env_id in range(num_envs):
-        tidx = env_id % num_tools
+        tidx = get_tool_index_for_env(env_id)
         if tidx not in tool_to_envs:
             tool_to_envs[tidx] = []
         tool_to_envs[tidx].append(env_id)
 
-    for tidx, env_ids_list in tool_to_envs.items():
-        td = TOOL_DATA[tidx]
+    for _tidx, env_ids_list in tool_to_envs.items():
+        td = get_tool_data_for_env(env_ids_list[0])
         tool_cloud = get_cached_cloud(td["obj_path"])
         base_pts = tool_cloud._get_points_torch(device).float()  # (M, 3)
 
         # Scale canonical points
         pts = base_pts * TOOL_SCALE  # (M, 3)
 
-        # Compute the body-frame offset from base_center
+        # Preserve existing body-frame alignment behavior.
         pts = pts.clone()
         base_center_norm = td.get("base_center")
         if base_center_norm is not None:
@@ -1260,12 +1331,14 @@ def get_tool_head_area_pointcloud_with_mass_velocity(
         torch.Tensor: shape (num_envs, num_points*7), dtype float16
     """
     from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
-        get_cached_cloud, TOOL_DATA, TOOL_SCALE,
+        get_cached_cloud,
+        get_tool_data_for_env,
+        get_tool_index_for_env,
+        TOOL_SCALE,
     )
 
     num_envs = env.num_envs
     device = env.device
-    num_tools = len(TOOL_DATA)
 
     # Get tool body world pose from the robot articulation
     robot = env.scene["robot"]
@@ -1288,13 +1361,13 @@ def get_tool_head_area_pointcloud_with_mass_velocity(
     # Group envs by tool type
     tool_to_envs: dict[int, list[int]] = {}
     for env_id in range(num_envs):
-        tidx = env_id % num_tools
+        tidx = get_tool_index_for_env(env_id)
         if tidx not in tool_to_envs:
             tool_to_envs[tidx] = []
         tool_to_envs[tidx].append(env_id)
 
     for tidx, env_ids_list in tool_to_envs.items():
-        td = TOOL_DATA[tidx]
+        td = get_tool_data_for_env(env_ids_list[0])
 
         # Get or compute the head-area filtered canonical points for this tool
         if tidx not in env._tool_head_area_cache:
@@ -1303,8 +1376,6 @@ def get_tool_head_area_pointcloud_with_mass_velocity(
 
             # Scale canonical points
             pts_canonical = base_pts * TOOL_SCALE  # (M, 3)
-
-            # Compute the body-frame offset from base_center
             pts_canonical = pts_canonical.clone()
             base_center_norm = td.get("base_center")
             if base_center_norm is not None:

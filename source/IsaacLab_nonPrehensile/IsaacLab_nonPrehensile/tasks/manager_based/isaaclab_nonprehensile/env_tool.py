@@ -43,6 +43,13 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 import IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.mdp as mdp
 from collections.abc import Sequence
 
+from utils.assets import (
+    ToolAssetContractError,
+    load_selected_tool_ids,
+    load_tool_adjusted_entry,
+    load_tool_head_area,
+    resolve_tool_mesh_path,
+)
 from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.cloud import Cloud
 
 _CLOUD_CACHE = {}
@@ -62,6 +69,61 @@ from isaaclab.sensors import FrameTransformerCfg, CameraCfg
 from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.sensors.frame_transformer.frame_transformer_cfg import OffsetCfg
 from isaaclab_tasks.manager_based.manipulation.cabinet.cabinet_env_cfg import FRAME_MARKER_SMALL_CFG
+from utils.experiment.rl_runtime_spec import load_runtime_spec_from_env, runtime_spec_contract
+from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.asset_assignment import (
+    OBJECT_ASSIGNMENT_SALT,
+    TOOL_ASSIGNMENT_SALT,
+    asset_indices_for_rank,
+)
+
+_RL_RUNTIME_SPEC = load_runtime_spec_from_env()
+_RL_CONTRACT = runtime_spec_contract(_RL_RUNTIME_SPEC)
+_PHYSICS_OBSERVATION_FIELDS = tuple(_RL_RUNTIME_SPEC["physics_observation_fields"])
+_ACTION_DIM = int(_RL_RUNTIME_SPEC["action_dim"])
+_OBSERVATION_DIM = int(_RL_RUNTIME_SPEC["observation_dim"])
+_PHYSICS_DIM = int(_RL_RUNTIME_SPEC["physics_dim"])
+_ASSET_ASSIGNMENT = _RL_RUNTIME_SPEC["asset_assignment_params"]
+_ASSET_ASSIGNMENT_SEED = int(_ASSET_ASSIGNMENT["seed"])
+_RANDOMIZE_TOOL_ASSIGNMENT = bool(_ASSET_ASSIGNMENT["randomize_tool_assignment"])
+_RANDOMIZE_OBJECT_ASSIGNMENT = bool(_ASSET_ASSIGNMENT["randomize_object_assignment"])
+# Per-rank env count from the runtime spec; the helper derives global ids as
+# global_rank * _NUM_ENVS_PER_RANK + local_env_id.
+_NUM_ENVS_PER_RANK = int(_RL_RUNTIME_SPEC["num_envs"])
+_GLOBAL_RANK = int(os.environ.get("TOOL_GENERALIST_GLOBAL_RANK", "0"))
+_LOCAL_RANK = int(os.environ.get("TOOL_GENERALIST_LOCAL_RANK", "0"))
+_WORLD_SIZE = int(os.environ.get("TOOL_GENERALIST_WORLD_SIZE", "1"))
+
+if _NUM_ENVS_PER_RANK <= 0:
+    raise ValueError("RL runtime spec num_envs must be > 0")
+if _GLOBAL_RANK < 0:
+    raise ValueError("TOOL_GENERALIST_GLOBAL_RANK must be >= 0")
+if _LOCAL_RANK < 0:
+    raise ValueError("TOOL_GENERALIST_LOCAL_RANK must be >= 0")
+if _WORLD_SIZE <= 0:
+    raise ValueError("TOOL_GENERALIST_WORLD_SIZE must be > 0")
+
+
+def _dr_event_enabled(term_cfg) -> bool:
+    return bool(_RL_CONTRACT.domain_randomization.enabled and getattr(term_cfg, "enabled", False))
+
+
+def _unsupported_event(enabled: bool, name: str):
+    if enabled:
+        raise NotImplementedError(f"{name} is not wired to an Isaac event yet")
+    return None
+
+
+def _table_top_z() -> float:
+    return float(_RL_CONTRACT.table.pose_xyz[2]) + 0.5 * float(_RL_CONTRACT.table.size_xyz[2])
+
+
+def _table_bounds_xy() -> tuple[tuple[float, float], tuple[float, float]]:
+    center_x = float(_RL_CONTRACT.table.pose_xyz[0])
+    center_y = float(_RL_CONTRACT.table.pose_xyz[1])
+    half_x = 0.5 * float(_RL_CONTRACT.table.size_xyz[0])
+    half_y = 0.5 * float(_RL_CONTRACT.table.size_xyz[1])
+    return ((center_x - half_x, center_y - half_y), (center_x + half_x, center_y + half_y))
+
 
 def load_object_candidates(
     source_path,
@@ -137,70 +199,143 @@ def load_object_candidates(
 def get_cached_cloud(obj_path):
     key = obj_path
     if key not in _CLOUD_CACHE:
+        print(f"[cloud_cache] create key={key}", flush=True)
         _CLOUD_CACHE[key] = Cloud(obj_path)  # No scale parameter needed
     return _CLOUD_CACHE[key]
 
 
 # ---------------------------------------------------------------------------
-# Multi-tool data: each robot USD has a different welded tool. We build a
-# list of per-tool metadata (obj_path, head_area, base_center, name) that is
-# indexed at runtime via  env_id % len(TOOL_DATA).
+# Multi-tool data: each robot USD has a different welded tool. We keep the
+# unique base lists, then expand them per local env using the runtime assignment
+# contract and global rank metadata.
 #
-# Tool selection is driven by tools_selected.json (a list of tool names).
-# All metadata (head_area, base_center) comes from a single tools.json.
+# Tool selection is driven by tools_selected.json.  Mesh/head-area resolution
+# goes through utils.assets and the adjusted decomposed mesh contract.
 # ---------------------------------------------------------------------------
 TOOL_SCALE: float = float(_PATHS.get("tools", _PATHS.get("tool_mesh", {})).get("scale", 0.1))
 
 _TOOLS_CFG = _PATHS["tools"]
-
-# Load the single metadata file: tools.json (has head_area + base_center)
-with open(_TOOLS_CFG["tools_json"], "r") as _tf:
-    _tool_meta_list = json.load(_tf)
-_tool_meta_lookup = {t["name"]: t for t in _tool_meta_list}
+_TOOL_MESH_ROOT = _TOOLS_CFG.get("meshdata_adjusted_root")
+if not _TOOL_MESH_ROOT:
+    raise ValueError("paths.yaml must define tools.meshdata_adjusted_root for adjusted tool meshes")
+_TOOLS_ADJUSTED_JSON = _TOOLS_CFG.get("tools_adjusted_json", _TOOLS_CFG.get("tools_json"))
 
 # Load the tool selection manifest: a list of tool names to include
-with open(_TOOLS_CFG["tools_selected_json"], "r") as _sf:
-    _selected_tool_names: list[str] = json.load(_sf)
+_selected_tool_names: list[str] = load_selected_tool_ids(_TOOLS_CFG["tools_selected_json"])
 
 # Build per-tool metadata + USD paths, filtered by the manifest
 TOOL_USD_PATHS: list[str] = []
 TOOL_DATA: list[dict] = []
 for _tool_name in _selected_tool_names:
     _usd_path = os.path.join(_TOOLS_CFG["robots_usd_dir"], f"panda_instanceable_{_tool_name}.usd")
-    _obj_path = os.path.join(_TOOLS_CFG["obj_dir"], f"{_tool_name}.obj")
+    _obj_path = str(resolve_tool_mesh_path(_TOOL_MESH_ROOT, _tool_name))
 
     if not os.path.isfile(_usd_path):
         print(f"[WARNING] Robot USD not found for tool '{_tool_name}': {_usd_path}, skipping")
         continue
 
-    _meta = _tool_meta_lookup.get(_tool_name, {})
-    _head_area = _meta.get("head_area")
-    _base_center = _meta.get("base_center")
+    try:
+        _adjusted_entry = load_tool_adjusted_entry(_TOOLS_ADJUSTED_JSON, _tool_name)
+        _head_area = load_tool_head_area(_TOOLS_ADJUSTED_JSON, _obj_path, _tool_name)
+    except ToolAssetContractError as exc:
+        print(f"[WARNING] Tool '{_tool_name}' violates adjusted asset contract, skipping: {exc}")
+        continue
+    _base_center = _adjusted_entry.get("base_center")
     if _head_area is None:
-        print(f"[WARNING] head_area not found for tool '{_tool_name}' in {_TOOLS_CFG['tools_json']}")
-    if _base_center is None:
-        print(f"[WARNING] base_center not found for tool '{_tool_name}' in {_TOOLS_CFG['tools_json']}")
+        print(f"[WARNING] head_area not found for tool '{_tool_name}' in {_TOOLS_ADJUSTED_JSON}")
     if not os.path.isfile(_obj_path):
-        print(f"[WARNING] OBJ mesh not found for tool '{_tool_name}': {_obj_path}")
+        print(f"[WARNING] adjusted decomposed mesh not found for tool '{_tool_name}': {_obj_path}")
 
     TOOL_USD_PATHS.append(_usd_path)
     TOOL_DATA.append({
         "name": _tool_name,
         "obj_path": _obj_path,
+        "mesh_source": "adjusted_decomposed_mesh",
         "head_area": _head_area,
         "base_center": _base_center,
     })
 
 print(f"[INFO] Loaded {len(TOOL_DATA)} tool variants from {_TOOLS_CFG['robots_usd_dir']}")
+if not TOOL_DATA:
+    raise RuntimeError(
+        "No valid tool variants remain after filtering tools_selected.json. "
+        "Check tools.tools_adjusted_json head_area entries and robot USD paths."
+    )
+TOOL_ASSET_INDICES_BY_ENV: list[int] = asset_indices_for_rank(
+    _NUM_ENVS_PER_RANK,
+    _GLOBAL_RANK,
+    len(TOOL_DATA),
+    randomize=_RANDOMIZE_TOOL_ASSIGNMENT,
+    seed=_ASSET_ASSIGNMENT_SEED,
+    salt=TOOL_ASSIGNMENT_SALT,
+)
+TOOL_USD_PATHS_BY_ENV: list[str] = [TOOL_USD_PATHS[index] for index in TOOL_ASSET_INDICES_BY_ENV]
+print(
+    f"[INFO] Tool assignment rank={_GLOBAL_RANK}/{_WORLD_SIZE} "
+    f"local_rank={_LOCAL_RANK} envs={_NUM_ENVS_PER_RANK} "
+    f"randomize={_RANDOMIZE_TOOL_ASSIGNMENT}"
+)
 
 # Legacy single-tool aliases (index 0) for backward-compatible imports
 TOOL_OBJ_PATH: str = TOOL_DATA[0]["obj_path"] if TOOL_DATA else ""
 TOOL_HEAD_AREA_NORM = TOOL_DATA[0].get("head_area") if TOOL_DATA else None
 
 
+def _assigned_index_for_env(env_id: int, assignment: list[int], label: str) -> int:
+    if len(assignment) == 0:
+        raise ValueError(f"No {label} assignment entries are available")
+    env_id = int(env_id)
+    if env_id < 0:
+        raise ValueError("env_id must be >= 0")
+    if env_id >= len(assignment):
+        raise ValueError(
+            f"env_id {env_id} is outside the precomputed {label} assignment "
+            f"for {len(assignment)} local envs"
+        )
+    return assignment[env_id]
+
+
+def get_tool_index_for_env(env_id: int) -> int:
+    """Return the unique tool index assigned to a local env."""
+    return _assigned_index_for_env(env_id, TOOL_ASSET_INDICES_BY_ENV, "tool")
+
+
 def get_tool_data_for_env(env_id: int) -> dict:
     """Return per-tool metadata dict for the given env_id."""
-    return TOOL_DATA[env_id % len(TOOL_DATA)]
+    return TOOL_DATA[get_tool_index_for_env(env_id)]
+
+
+OBJECT_ASSET_CFGS: list[sim_utils.UsdFileCfg] = load_object_candidates(
+    _PATHS["dgn"]["candidates_json"],
+    usd_dir=_PATHS["dgn"]["usd_dir"],
+    obj_dir=_PATHS["dgn"]["obj_dir"],
+)
+OBJECT_ASSET_INDICES_BY_ENV: list[int] = asset_indices_for_rank(
+    _NUM_ENVS_PER_RANK,
+    _GLOBAL_RANK,
+    len(OBJECT_ASSET_CFGS),
+    randomize=_RANDOMIZE_OBJECT_ASSIGNMENT,
+    seed=_ASSET_ASSIGNMENT_SEED,
+    salt=OBJECT_ASSIGNMENT_SALT,
+)
+OBJECT_ASSET_CFGS_BY_ENV: list[sim_utils.UsdFileCfg] = [
+    OBJECT_ASSET_CFGS[index] for index in OBJECT_ASSET_INDICES_BY_ENV
+]
+print(
+    f"[INFO] Object assignment rank={_GLOBAL_RANK}/{_WORLD_SIZE} "
+    f"local_rank={_LOCAL_RANK} envs={_NUM_ENVS_PER_RANK} "
+    f"randomize={_RANDOMIZE_OBJECT_ASSIGNMENT}"
+)
+
+
+def get_object_index_for_env(env_id: int) -> int:
+    """Return the unique object index assigned to a local env."""
+    return _assigned_index_for_env(env_id, OBJECT_ASSET_INDICES_BY_ENV, "object")
+
+
+def get_object_asset_cfg_for_env(env_id: int) -> sim_utils.UsdFileCfg:
+    """Return the base object asset config assigned to a local env."""
+    return OBJECT_ASSET_CFGS[get_object_index_for_env(env_id)]
 
 
 default_joint_pos = FRANKA_PANDA_HIGH_PD_CFG.init_state.joint_pos.copy()
@@ -234,22 +369,45 @@ class NonPrehensileSceneCfg(InteractiveSceneCfg):
     
     # Disable physics replication to avoid conflicts with MultiAssetSpawnerCfg
     replicate_physics: bool = False
-    # Terrain
-    terrain = TerrainImporterCfg(
-        prim_path="/World/ground",
-        terrain_type="plane",  # optional: "plane", "usd", "generator"
-        collision_group=-1,
-        # Explicitly None to skip bind_physics_material in spawn_ground_plane().
-        # Terrain friction is set at reset by the randomize_terrain_material event.
-        physics_material=None,
-        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.5, 0.5, 0.5)),
-        debug_vis=False,
-    )
+    if not _RL_CONTRACT.table.enabled:
+        terrain = TerrainImporterCfg(
+            prim_path="/World/ground",
+            terrain_type="plane",  # optional: "plane", "usd", "generator"
+            collision_group=-1,
+            # Explicitly None to skip bind_physics_material in spawn_ground_plane().
+            # Terrain friction is set at reset by the randomize_terrain_material event.
+            physics_material=None,
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.5, 0.5, 0.5)),
+            debug_vis=False,
+        )
     # Lights
     light = AssetBaseCfg(
         prim_path="/World/light",
         spawn=sim_utils.DomeLightCfg(color=(0.75, 0.75, 0.75), intensity=3000.0),
     )
+    if _RL_CONTRACT.table.enabled:
+        table = AssetBaseCfg(
+            prim_path="{ENV_REGEX_NS}/Table",
+            init_state=AssetBaseCfg.InitialStateCfg(
+                pos=tuple(_RL_CONTRACT.table.pose_xyz),
+            ),
+            spawn=sim_utils.CuboidCfg(
+                size=tuple(_RL_CONTRACT.table.size_xyz),
+                rigid_props=RigidBodyPropertiesCfg(
+                    disable_gravity=True,
+                    kinematic_enabled=True,
+                ),
+                collision_props=sim_utils.CollisionPropertiesCfg(),
+                physics_material=sim_utils.RigidBodyMaterialCfg(
+                    static_friction=_RL_CONTRACT.table.material.static_friction,
+                    dynamic_friction=_RL_CONTRACT.table.material.dynamic_friction,
+                    restitution=_RL_CONTRACT.table.material.restitution,
+                ),
+                visual_material=sim_utils.PreviewSurfaceCfg(
+                    diffuse_color=tuple(_RL_CONTRACT.table.color_rgba[:3]),
+                ),
+            ),
+        )
     # # Table
     # table = AssetBaseCfg(
     #     prim_path="{ENV_REGEX_NS}/Table",
@@ -273,7 +431,7 @@ class NonPrehensileSceneCfg(InteractiveSceneCfg):
     object = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Object",
         spawn=sim_utils.MultiAssetSpawnerCfg(
-            assets_cfg=load_object_candidates(_PATHS["dgn"]["candidates_json"], usd_dir=_PATHS["dgn"]["usd_dir"], obj_dir=_PATHS["dgn"]["obj_dir"]),
+            assets_cfg=OBJECT_ASSET_CFGS_BY_ENV,
             random_choice=False,
             rigid_props=RigidBodyPropertiesCfg(
                 solver_position_iteration_count=16,
@@ -287,7 +445,7 @@ class NonPrehensileSceneCfg(InteractiveSceneCfg):
     )
 
     # Multi-tool robot: each env gets a different tool USD via MultiUsdFileCfg
-    robot = build_multi_tool_robot_cfg(TOOL_USD_PATHS).replace(
+    robot = build_multi_tool_robot_cfg(TOOL_USD_PATHS_BY_ENV, random_choice=False).replace(
         prim_path="{ENV_REGEX_NS}/Robot",
         init_state=ArticulationCfg.InitialStateCfg(
             joint_pos=custom_joint_init
@@ -321,8 +479,8 @@ class CommandsCfg:
     target_object_pose = mdp.StablePoseCommandCfg(
         resampling_time_range=(1e9, 1e9),
         debug_vis=True,  # Visualize target pose
-        xy_offset_range=0.15,
-        initial_position_range=0.15,
+        xy_offset_range=_RL_CONTRACT.object_pose_sampling.xy_offset_range,
+        initial_position_range=_RL_CONTRACT.object_pose_sampling.initial_position_range,
     )
 
 @configclass
@@ -332,7 +490,7 @@ class RelativeJointPositionActionsCfg:
     arm_action = RelativeJointPositionActionCfg(
         asset_name="robot",
         joint_names=["panda_joint.*"],
-        scale=0.1,
+        scale=_RL_CONTRACT.action.scale,
         use_zero_offset=True,
     )
 
@@ -350,20 +508,17 @@ class ObservationsCfg:
             noise=GaussianNoiseCfg(mean=0.0, std=0.005, operation="add"),
         )
 
-        # Tool Cloud (512*3=1536D: tool point cloud xyz, centered at (0,0,0))
+        # Tool Cloud (512*3=1536D: tool point cloud xyz in env frame)
         tool_cloud = ObsTerm(
             func=mdp.get_tool_pointcloud_in_env_frame,
             noise=GaussianNoiseCfg(mean=0.0, std=0.002, operation="add"),
         )
 
-        # Object Centroid (3D: env-frame position of object cloud centroid).
-        # MUST come AFTER object_cloud so the centroid cache is populated.
-        # No noise: centroid is a derived geometric fact used as pose context.
-        obj_centroid = ObsTerm(func=mdp.get_obj_centroid)
+        # Object bbox center (3D): MUST come AFTER object_cloud so the cache is populated.
+        object_bbox_center = ObsTerm(func=mdp.get_obj_bbox_center)
 
-        # Tool Centroid (3D: env-frame position of tool cloud centroid).
-        # MUST come AFTER tool_cloud so the centroid cache is populated.
-        tool_centroid = ObsTerm(func=mdp.get_tool_centroid)
+        # Tool bbox center (3D): MUST come AFTER tool_cloud so the cache is populated.
+        tool_bbox_center = ObsTerm(func=mdp.get_tool_bbox_center)
 
         # Hand State (9D: hand position[3] + rotation_matrix[6])
         hand_state = ObsTerm(
@@ -381,7 +536,7 @@ class ObservationsCfg:
         previous_action = ObsTerm(func=mdp.last_action)
         
         # Relative Pose Goal (9D: goal relative to current object pose)
-        rel_goal = ObsTerm(
+        relative_goal_pose = ObsTerm(
             func=mdp.rel_pose_goal, params={"command_name": "target_object_pose"},
             noise=GaussianNoiseCfg(mean=0.0, std=0.005, operation="add"),
         )
@@ -389,8 +544,11 @@ class ObservationsCfg:
         # abs_goal = ObsTerm(func=mdp.abs_pose_goal, params={"command_name": "target_object_pose"})
         # cur_pose = ObsTerm(func=mdp.object_pose_9d_in_env_frame)
         
-        # Physical Parameters (7D: object_mass, object_friction, tool_mass, tool_friction, hand_friction, ground_friction, restitution)
-        phys_params = ObsTerm(func=mdp.phys_params)
+        # Physical parameters: field order comes from rl_runtime_spec.json.
+        phys_params = ObsTerm(
+            func=mdp.phys_params,
+            params={"field_names": _PHYSICS_OBSERVATION_FIELDS},
+        )
 
         def __post_init__(self):
             self.enable_corruption = True
@@ -417,30 +575,30 @@ class EventCfg:
         func=mdp.randomize_rigid_body_scale,
         mode="prestartup",
         params={
-            "scale_range": (0.1, 0.2),
+            "scale_range": _RL_CONTRACT.domain_randomization.object.scale.range,
             "asset_cfg": SceneEntityCfg("object"),
         },
-    )
+    ) if _dr_event_enabled(_RL_CONTRACT.domain_randomization.object.scale) else None
 
     # Tool mass randomization: randomize the mass of the tool body (link_coacd_convex_piece_0)
     randomize_tool_mass = EventTerm(
         func=mdp.randomize_tool_mass,
         mode="reset",
         params={
-            "mass_range": (0.1, 0.5),  # Tool mass range in kg
+            "mass_range": _RL_CONTRACT.domain_randomization.tool.mass.range,
         },
-    )
+    ) if _dr_event_enabled(_RL_CONTRACT.domain_randomization.tool.mass) else None
 
     # Tool friction randomization: randomize friction of the tool body's collision shapes
     randomize_tool_friction = EventTerm(
         func=mdp.randomize_tool_friction,
         mode="reset",
         params={
-            "static_friction_range": (0.8, 1.5),
-            "dynamic_friction_range": (0.8, 1.5),
-            "restitution_range": (0.0, 0.0),
+            "static_friction_range": _RL_CONTRACT.domain_randomization.tool.material.static_friction_range,
+            "dynamic_friction_range": _RL_CONTRACT.domain_randomization.tool.material.dynamic_friction_range,
+            "restitution_range": _RL_CONTRACT.domain_randomization.tool.material.restitution_range,
         },
-    )
+    ) if _dr_event_enabled(_RL_CONTRACT.domain_randomization.tool.material) else None
 
     # Physical parameter randomization events
     randomize_object_mass = EventTerm(
@@ -448,12 +606,12 @@ class EventCfg:
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("object"),
-            "mass_distribution_params": (0.1, 0.5),  # Mass range: 0.1 to 0.5 kg
+            "mass_distribution_params": _RL_CONTRACT.domain_randomization.object.mass.range,
             "operation": "abs",  # Absolute value operation
             "distribution": "uniform",
-            "recompute_inertia": True,
+            "recompute_inertia": _RL_CONTRACT.domain_randomization.object.mass.recompute_inertia,
         },
-    )
+    ) if _dr_event_enabled(_RL_CONTRACT.domain_randomization.object.mass) else None
 
     # object material randomization
     randomize_object_material = EventTerm(
@@ -461,24 +619,33 @@ class EventCfg:
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("object"),
-            "static_friction_range": (0.7, 1.0),
-            "dynamic_friction_range": (0.7, 1.0),
-            "restitution_range": (0.1, 0.2),
-            "num_buckets": 256,
-            "make_consistent": True,  # Ensure dynamic <= static friction
+            "static_friction_range": _RL_CONTRACT.domain_randomization.object.material.static_friction_range,
+            "dynamic_friction_range": _RL_CONTRACT.domain_randomization.object.material.dynamic_friction_range,
+            "restitution_range": _RL_CONTRACT.domain_randomization.object.material.restitution_range,
+            "num_buckets": _RL_CONTRACT.domain_randomization.object.material.num_buckets,
+            "make_consistent": _RL_CONTRACT.domain_randomization.object.material.make_consistent,
         },
-    )
+    ) if _dr_event_enabled(_RL_CONTRACT.domain_randomization.object.material) else None
 
     # Terrain friction randomization - using custom function to randomize terrain material
     randomize_terrain_material = EventTerm(
         func=mdp.randomize_terrain_material,
         mode="reset",
         params={
-            "static_friction_range": (0.3, 0.8),  # Terrain static friction range: 0.3-1.2
-            "dynamic_friction_range": (0.3, 0.8),  # Terrain dynamic friction range: 0.2-1.0
-            "restitution_range": (0.0, 0.0),  # Terrain restitution range: 0.0-0.3
-            "num_buckets": 256,  # Moderate randomization
+            "static_friction_range": _RL_CONTRACT.domain_randomization.ground.material.static_friction_range,
+            "dynamic_friction_range": _RL_CONTRACT.domain_randomization.ground.material.dynamic_friction_range,
+            "restitution_range": _RL_CONTRACT.domain_randomization.ground.material.restitution_range,
+            "num_buckets": _RL_CONTRACT.domain_randomization.ground.material.num_buckets,
         },
+    ) if (
+        not _RL_CONTRACT.table.enabled
+        and _dr_event_enabled(_RL_CONTRACT.domain_randomization.ground.material)
+    ) else None
+
+    randomize_table_material = _unsupported_event(
+        _RL_CONTRACT.table.enabled
+        and _dr_event_enabled(_RL_CONTRACT.domain_randomization.table_surface.material),
+        "table_surface material randomization",
     )
 
 @configclass
@@ -489,51 +656,51 @@ class RewardsCfg:
         func=mdp.task_success_reward,
         params={
             "command_name": "target_object_pose", 
-            "threshold": 0.05, 
-            "rotation_threshold": 0.1,
+            "threshold": _RL_CONTRACT.reward.success_threshold,
+            "rotation_threshold": _RL_CONTRACT.reward.rotation_threshold,
             "planar": False,
-            "base_reward": 1.0,  # Base reward for success
+            "base_reward": 1.0,
         },
-        weight=2000.0
+        weight=_RL_CONTRACT.reward.task_success_term_weight
     )
 
     contact_reward = RewTerm(
         func=mdp.object_ee_distance_tanh,
         params={
-            "std": 0.15,
+            "std": _RL_CONTRACT.reward.contact_std,
         },
-        weight=1,
+        weight=_RL_CONTRACT.reward.contact_term_weight,
     )
 
     object_goal_tracking = RewTerm(
         func=mdp.object_goal_distance_tanh,
         params={
-            "std": 0.6,
+            "std": _RL_CONTRACT.reward.object_goal_std,
             "command_name": "target_object_pose",
-            "obj_ee_distance_threshold": 0.15,
+            "obj_ee_distance_threshold": _RL_CONTRACT.reward.contact_std,
             "ee_frame_cfg": SceneEntityCfg("ee_frame"),
             "object_cfg": SceneEntityCfg("object"),
         },
-        weight=4.0,
+        weight=_RL_CONTRACT.reward.object_goal_tracking_term_weight,
     )
 
     object_goal_tracking_fine_grained = RewTerm(
         func=mdp.object_goal_distance_tanh,
         params={
-            "std": 0.3,
+            "std": _RL_CONTRACT.reward.object_goal_fine_std,
             "command_name": "target_object_pose",
-            "obj_ee_distance_threshold": 0.15,
+            "obj_ee_distance_threshold": _RL_CONTRACT.reward.contact_std,
             "ee_frame_cfg": SceneEntityCfg("ee_frame"),
             "object_cfg": SceneEntityCfg("object"),
         },
-        weight=12.0,
+        weight=_RL_CONTRACT.reward.object_goal_tracking_fine_term_weight,
     )
     
     # Energy penalty: c_energy = k_e * Σ(τ_i * q̇_i)
     energy_penalty = RewTerm(
         func=mdp.joint_power_penalty,
-        params={"k_e": 0.0001},  # scaling coefficient
-        weight=-0.5,  # negative weight for penalty
+        params={"k_e": 0.0001},
+        weight=_RL_CONTRACT.reward.energy_penalty_weight,
     )
 
 @configclass
@@ -543,17 +710,25 @@ class TerminationsCfg:
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
     reached = DoneTerm(
         func=mdp.object_reached_goal,
-        params={"command_name": "target_object_pose", "threshold": 0.05, "rotation_threshold": 0.1, "planar": False},
+        params={
+            "command_name": "target_object_pose",
+            "threshold": _RL_CONTRACT.reward.success_threshold,
+            "rotation_threshold": _RL_CONTRACT.reward.rotation_threshold,
+            "planar": False,
+        },
     )
     object_dropped = DoneTerm(
         func=mdp.object_dropped_off_table,
-        params={"minimum_height": -0.15}  # 15cm below table surface
+        params={"minimum_height": _table_top_z() - 0.15}
     )
 
 @configclass
 class NonPrehensileEnvCfg(ManagerBasedRLEnvCfg):
     # Scene settings
-    scene: NonPrehensileSceneCfg = NonPrehensileSceneCfg(num_envs=64, env_spacing=2.0)
+    scene: NonPrehensileSceneCfg = NonPrehensileSceneCfg(
+        num_envs=_RL_CONTRACT.env.num_envs,
+        env_spacing=_RL_CONTRACT.env.env_spacing,
+    )
     # Basic settings
     observations: ObservationsCfg = ObservationsCfg()
     actions: RelativeJointPositionActionsCfg = RelativeJointPositionActionsCfg()
@@ -566,6 +741,20 @@ class NonPrehensileEnvCfg(ManagerBasedRLEnvCfg):
     
     # Observation normalization
     normalize_observations: bool = True  # Whether to normalize observations to [-1,1] range, except hand_state and pointcloud 
+    object_cloud_centering: str = _RL_CONTRACT.observation.object_cloud_centering
+    tool_cloud_centering: str = _RL_CONTRACT.observation.tool_cloud_centering
+    mesh_centering: str = _RL_CONTRACT.observation.mesh_centering
+    action_dim: int = _ACTION_DIM
+    observation_dim: int = _OBSERVATION_DIM
+    physics_dim: int = _PHYSICS_DIM
+    physics_observation_fields: tuple[str, ...] = _PHYSICS_OBSERVATION_FIELDS
+    table_enabled: bool = _RL_CONTRACT.table.enabled
+    table_size_xyz: tuple[float, float, float] = tuple(_RL_CONTRACT.table.size_xyz)
+    table_pose_xyz: tuple[float, float, float] = tuple(_RL_CONTRACT.table.pose_xyz)
+    table_bounds_xy: tuple[tuple[float, float], tuple[float, float]] = _table_bounds_xy()
+    table_placement_margin_xy: float = _RL_CONTRACT.table.placement_margin_xy
+    table_placement_max_attempts: int = _RL_CONTRACT.table.placement_max_attempts
+    table_material = _RL_CONTRACT.table.material
     # Visualization settings
     visualize_current_object_pose: bool = True  # Enable current object pose visualization
     visualize_object_pointcloud: bool = False  # Enable object point cloud visualization for debug in first env
@@ -605,20 +794,20 @@ class NonPrehensileEnvCfg(ManagerBasedRLEnvCfg):
                         noise.std = 0.0
         
         # General settings - match reference config
-        self.decimation = 8
-        self.episode_length_s = 30
+        self.decimation = _RL_CONTRACT.env.decimation
+        self.episode_length_s = _RL_CONTRACT.env.episode_length_s
         
         # Viewer settings
         self.viewer.eye = (2.5, 0.5, 0.8)
         # self.viewer.eye = (6, 0, 6)
         
         # Simulation settings - match reference config dt
-        self.sim.dt = 1 / 80
+        self.sim.dt = _RL_CONTRACT.env.sim_dt
         self.sim.render_interval = self.decimation
         
         # Physics settings - match reference config
-        self.sim.physx.solver_position_iteration_count = 8  # pos_iter=8
-        self.sim.physx.solver_velocity_iteration_count = 1  # vel_iter=1
+        self.sim.physx.solver_position_iteration_count = _RL_CONTRACT.env.solver_position_iteration_count
+        self.sim.physx.solver_velocity_iteration_count = _RL_CONTRACT.env.solver_velocity_iteration_count
 
 
 class NonPrehensileEnv(ManagerBasedRLEnv):
@@ -720,7 +909,7 @@ class NonPrehensileEnv(ManagerBasedRLEnv):
 
     def post_reset(self):
         # NOTE: _object_scales and _tool_scales removed — scales are now baked into
-        # per-env Cloud instances at init time (in get_object_pointcloud).
+        # per-env sampled point clouds at init time (in get_object_pointcloud).
 
         # Compute per-env head area offsets from the fixed fork OBJ + head_area_norm.
         # Each offset is in the tool's local frame (relative to link_coacd_convex_piece_0 origin).

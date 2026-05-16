@@ -1,3 +1,39 @@
+重要：
+- 首先，任何可运行的 pretrain / contact generation 的python都不要有任何的cli argument，并且也不要有任何的在对应文件夹目录下的config.py
+- 由于最后我们希望能够一键跑实验，所以我们希望每个实验对应一个 Config 类
+
+关于 config：
+这个非常重要。这个是一键跑实验并且保证大家CONSISTENT的关键模块。所以一定注意任何，任何参数都一定要写进 config 文件。每个训练文件和模型文件不能有任何的  default value 和 cli argument（唯一 cli argument 是 config）. 
+
+首先，config_xxx.py (xxx!=exp) 里面需要建立自己 config 的 class. 然后一个 config_exp.py 需要建立 ExpCfg 的 class，然后 ExpCfg 需要包含剩下 config 的实例。也就是说，只要有一个 ExpCfg 的实例，我们就获得了整个项目的所有 parameters. 然后在 ExpCfg 中，我们可以对各个子 config 进行微调什么的
+
+首先，config_model.py 记录了关于 pretrain&RL model 的所有模型上的参数，详细到包括到每一个模型的大小应该是什么样子的，多少layer多少head，MLP的hidden是怎么样子的。
+
+然后，config_general.py 记录了比较广泛的参数，比如采多少点云之类的，以及采用的工具的工具列表（是 tools_selected.json 还是什么）。
+
+其次，config_RL.py 记录了所有训 RL 时候需要的参数，比如任何出现在 rsl_rl_ppo_cfg 中的东西。我们希望我们不需要再手动修改 rsl_rl_ppo_cfg.py 的任何内容了。现在 rsl_rl 以及 cfg 中有很多不同的模型，我们现在希望只统一到一个模型，然后加载不同的训练 checkpoint 只需要修改 geometry encoder 的 checkpoint 就行了。但是不同 geometry encoder 的输出规模有所不同（TCE 的输出是 (2*P, B)，但是不同的 geometry checkpoint这个也确实不大一样，比如corn比如point2vec比如concerto），所以这里我们希望每个 encoder 都有一个自己的子 EncoderCfg，比如 TCECfg, P2VCfg, ConcertoCFG. 这都是继承自 config_RL 的. 还有，reward！environment 的 reward 也应该从 config_RL 中加载，所以 config_RL 也应该有一个 RewardCfg. 
+
+config_pretrain.py 记录了 pretrain 的参数，比如用什么 head 训练的（sdf / diff / postcontact 可以用一个三个二进制位表示每个 task 是否参与训练），比如 learning rate / batch size / epoch 数等等。
+
+config_contact.py 记录了 contact 的各种参数，比如 generate 多少个 contact 什么的，以及 contact generation 中的各种 paramters。
+
+---
+
+以上描述了 config。然后说一下如何做到一键跑实验。
+
+不同实验之间可能共享了一点东西，比如不同 encoder 可能共享同一套 contact dataset（但是不同工具列表肯定不会），然后不同的 RL reward 可能共享同一套 encoder (但是也有可能不共享，而且有可能甚至都不需要我们 pretrain而是用的已有的 encoder)。
+
+这个就需要我们给每个 contact dataset 和 encoder 起名字。每一个 contact dataset 唯一对应一个 （GeneralCfg, ContactGenCfg) 的 pair，所以将这个 cfg 的名字用 _ concat 起来得到 contact dataset 的名字，然后建立在 contact/{GeneralCfg name}/ 下，然后每个 pretrained-TCE encoder 唯一对应一个 (GeneralCfg, ContactGenCfg, PretrainCfg, ModelCfg) 的 pair，所以将 PretrainCfg 和 ModelCfg concat 起来得到 encoder 的名字 encodername，然后在 /{GeneralCfg name}/{ContactGenCfg name}/{encodername} 下存储该 encoder 的 checkpoint
+
+哦对了，如果对于跑那种已有 encoder 的实验，那就直接 pretrain contact cfg 什么 = None 就行了。
+
+然后我们跑一次实验的时候，就先检查这个名字的 dataset 是否被生成了，如果没有就生成 dataset；然后看 encoder 是否有，如果没有就 train。然后最后总是要跑一个 RL。
+
+然后一键运行实验的时候，我们会在一开始给定可以用哪些 GPU，通过 CUDA_VISIBLE_DEVICES 方式。
+
+train encoder 的时候需要 wandb，wandb 的 project name 就是 {GeneralCfg name}-{ContactGenCfg name}，曲线名称就是 {pretraincfg name}-{modelcfg name}. 这个 wandb 对 RL 也是同理的，不要用时间来起名字，而是用类似的取名方法。
+
+
 # Tool-Generalist 重构实现报告
 
 本报告分为两部分：
@@ -78,7 +114,7 @@ utils/
 - 所有工具相关点云都从 `eef/meshdata_adjusted/<tool_id>/coacd/decomposed.obj` 采样。contact generation、pretrain loader、RL observation 和可视化若需要 tool cloud，都必须使用同一份 adjusted decomposed mesh。
 - `eef/tools_adjusted.json` 是 adjusted 工具 mesh 对应的功能端 AABB manifest。每个 entry 至少包含 `name` 和 `head_area`，其中 `head_area` 是相对整工具 adjusted bbox 的归一化 axis-aligned AABB，格式为 `[[min_x,min_y,min_z],[max_x,max_y,max_z]]`。
 - 工具 USD 焊接到 Franka 的固定挂载参数必须进入 `GeneralCfg`，尤其是 `tool_mount.scale_xyz = [0.1, 0.1, 0.1]`。contact generation 如果直接使用 `decomposed.obj` 做物理几何，也必须使用同一个工具尺度，避免 pretrain 几何和 RL 中机器人末端工具尺寸不一致。
-- 工具生成和后处理的固定参数必须进入单独的 `tool_asset_metadata.json`，该 json 应当存于工具文件夹下，不应存于当前代码库。该 json 应包括 Hunyuan 3D、随机化、DGN/COACD、URDF 转 USD、Franka 焊接和筛选 manifest 的参数。训练代码不运行这些步骤，但必须记录 metadata path/hash，并在 artifact manifest 与 W&B 中保存。
+- 工具生成管线是不可变的外部输入，runtime 不运行、不校验、也不记录工具生成 hash。运行时只消费 `tools.tools_adjusted_json`、`tools.tools_selected_json` 和 `tools.meshdata_adjusted_root`；实验仍可通过 `GeneralCfg.tools_selected_json` 覆盖本次选择的 tool manifest。
 - `eef/objects_usd/<tool_id>/<tool_id>.usd` 和 `Robots/panda_instanceable_<tool_id>.usd` 只用于仿真资产加载；它们不是 tool point cloud 的 source of truth。
 
 ### 4. Contact Dataset 生成
@@ -97,7 +133,7 @@ Contact generation 的目标是生成有效的 tool-object 接触状态，并为
 4. 过滤掉不满足几何约束的候选。
 5. 对每个 pair 保留一个 best candidate，写入中间 contact `.pt`。
 
-当前代码库已有 `pretrain/new_pretrain/contact_gen_new.py` 作为 rejection sampler 的实现基础。
+当前 canonical rejection sampler 位于 `contact_generation.generator`，batch 入口位于 `contact_generation.batch_generate`。
 
 #### 4.2 Isaac Sim Stabilize
 
@@ -112,9 +148,9 @@ Contact generation 的目标是生成有效的 tool-object 接触状态，并为
 
 Stabilize 阶段必须写清楚：
 
-- 稳定判据：速度阈值、角速度阈值、最大 step 数。
-- 接触判据：接触点距离或 SDF 阈值。
-- 穿模判据：最大 penetration depth。
+- 几何阶段已经过滤 no penetration / no under floor / no pointing upwards。
+- Stabilize success 只判断 stabilize 后 tool-object 是否 contact / near-contact。
+- 不使用速度或 penetration 作为 Isaac stabilize success 条件。
 
 #### 4.3 Post-contact Rollout
 
@@ -123,7 +159,7 @@ Stabilize 阶段必须写清楚：
 1. 随机采样 tool delta pose。
 2. 在 sim 中控制 tool 达到该 delta pose。
 3. 运行 `t_postcontact` steps。
-4. 记录 tool commanded delta pose `ΔP_T` 和 object observed delta pose `ΔP_O`。
+4. 记录 env-frame tool commanded delta pose `ΔP_tool_E` 和 env-frame object observed delta pose `ΔP_obj_E`。
 5. 保存最终 contact `.pt`。
 
 最终 `.pt` schema 见附录 B。训练 loader 应读取 schema version，并拒绝未知或不完整 schema。
@@ -133,8 +169,8 @@ Stabilize 阶段必须写清楚：
 TCE 输入为 bbox-centered 的 tool point cloud 和 object point cloud：
 
 ```text
-P'_T: (B, N, 3)
-P'_O: (B, N, 3)
+P'_tool: (B, N, 3)
+P'_obj:  (B, N, 3)
 ```
 
 推荐实现沿用当前 `SDFPointCloudEncoder` ，并更名为 `TCEPointCloudEncoder`：
@@ -179,11 +215,11 @@ Pretrain 的训练目标是让 TCE 学到可用于接触推理和 RL 的几何�
 
 Pretrain decoder 由 TCE 后接多个 condition-specific query decoder 组成。对每个 timestep $k$ ：
 
-1. 当前 bbox-centered point clouds $P'^k_T, P'^k_O$ 先过 TCE，得到 $Z^k \in R^{2P \times D}$。
+1. 当前 bbox-centered point clouds $P'^k_{tool}, P'^k_{obj}$ 先过 TCE，得到 $Z^k \in R^{2P \times D}$。
 2. 构造四类 conditioning：
-   - `A^k = T_T^k - T_O`，当前 tool bbox center 相对 object bbox center 的 translation。
-   - `B = ΔP_T`，post-contact tool 的 9D delta pose。
-   - `C = ΔP_O`，post-contact object 的 9D delta pose。
+   - `A^k = tool_bbox_center_E^k - object_bbox_center_E`，当前 tool bbox center 相对 object bbox center 的 translation，仍使用 env/world axes。
+   - `B = ΔP_tool_E`，post-contact tool 的 env-frame 9D delta pose。
+   - `C = ΔP_obj_E`，post-contact object 的 env-frame 9D delta pose。
    - `D`，物理属性，包括 object/tool mass 与 object/tool/ground friction。
 3. 四个 MLP decoder-query generators 分别将 `A^k, B, C, D` 映射成 query tokens：
    - `Q_A^k = M_A(A^k)`
@@ -196,8 +232,8 @@ Pretrain decoder 由 TCE 后接多个 condition-specific query decoder 组成。
    - `F_C^k = CrossAttn(Q_C, Z^k)`
    - `F_D^k = CrossAttn(Q_D, Z^k)`
 5. SDF decoder 使用 `F_A^k` 和每个 patch token 预测 patch signed distance。
-6. Denoise decoder 在 `k > 0` 时使用 `F_A^k, F_B^k, F_C^k, F_D^k` 和 timestep sinusoidal embedding 预测 9D denoise pose `\hat ΔP_T^k`。
-7. Post-contact decoder 在 `k = 0` 时使用 `F_A^0, F_B^0, F_D^0` 预测 9D object post-contact delta `\hat ΔP_O`。
+6. Denoise decoder 在 `k > 0` 时使用 `F_A^k, F_B^k, F_C^k, F_D^k` 和 timestep sinusoidal embedding 预测 9D denoise pose `\hat ΔP_tool_E^k`。
+7. Post-contact decoder 在 `k = 0` 时使用 `F_A^0, F_B^0, F_D^0` 预测 9D object post-contact delta `\hat ΔP_obj_E`。
 
 训练目标：
 
@@ -207,7 +243,7 @@ Pretrain decoder 由 TCE 后接多个 condition-specific query decoder 组成。
 
 需要避免 target leakage：
 
-- 如果 `ΔP_T` 或 `ΔP_O` 是 label，则不能以原始 label 形式直接作为同一 head 的输入。
+- 如果 `ΔP_tool_E` 或 `ΔP_obj_E` 是 label，则不能以原始 label 形式直接作为同一 head 的输入。
 - conditioning 与 prediction target 必须在 `PretrainCfg` 和 dataset schema 中分开命名。
 - 推荐字段命名使用 `cond_*` 和 `target_*`，不要混用 A/B/C。
 
@@ -259,7 +295,7 @@ ctx = [
 6. fusion MLP 输出 actor 和 critic 特征。
 7. actor 输出 action distribution，critic 输出 value。
 
-当前 `ActorCriticSDF` 已有相近实现，但 context 目前使用 centroid 字段而不是 bbox center 字段。
+当前 `ActorCriticTG` 已有相近实现，但 context 目前使用 centroid 字段而不是 bbox center 字段。
 
 RL 的 Domain Randomization 必须由 `config_rl.py` 中的 `RLCfg.domain_randomization` 配置，不能继续硬编码在 Isaac env 文件里。`RLCfg` 负责声明随机化范围和开关，Isaac task wrapper 负责把它翻译成 `EventCfg`。至少覆盖当前环境已经使用的随机化项：
 
@@ -294,7 +330,7 @@ configs/
 - 训练脚本不应再散落业务参数 CLI。
 - Isaac Lab 必需 runtime 参数可保留为 wrapper 参数，例如 `--headless`、`--device`、`--distributed`，但它们不应改变实验语义。
 - `paths.yaml` 只存机器相关绝对路径；实验参数不放在 `paths.yaml`。
-- 物体资产目录、`objects_selected.json`、 工具资产目录、tool USD/robot USD 根目录、`tools_adjusted.json`、`tools_selected.json` 和 `tool_asset_metadata.json` 的绝对路径属于 `paths.yaml`
+- 物体资产目录、`objects_selected.json`、工具资产目录、tool USD/robot USD 根目录、`tools_adjusted.json`、`tools_selected.json` 和 `meshdata_adjusted_root` 的绝对路径属于 `paths.yaml`
 - W&B 的少量通用参数记录在 `GeneralCfg` 中，而不是放在 `PretrainCfg` 或 `RLCfg` 中。pretrain 和 RL 都读取同一组通用 logging 参数，并按固定命名规则生成各自 run。
 
 每个 dataset/checkpoint 都必须保存 manifest：
@@ -358,7 +394,7 @@ python run_experiment.py --config configs/experiments/<exp>.py
 
 1. 先冻结 schema、frame 定义和工具资产消费契约。
 2. 新增 geometry utils，并给 bbox center / SDF / pose transform 写单元测试。
-3. 新增 tool asset metadata validator，检查 `tools_adjusted.json`、`decomposed.obj`、Franka mount scale 和 metadata hash。
+3. 新增 tool runtime asset validator，只检查 `tools_adjusted.json`、`tools_selected.json`、`meshdata_adjusted_root/<tool_id>/coacd/decomposed.obj` 和 Franka mount scale；runtime 不使用工具生成 metadata/hash。
 4. 新增 contact schema validator。
 5. 改 contact generation，使其输出 v1 schema。
 6. 改 pretrain loader，使其只依赖 v1 schema。
@@ -379,19 +415,19 @@ python run_experiment.py --config configs/experiments/<exp>.py
 | raw mesh frame | `M_raw` | mesh 文件原始坐标系。 |
 | scaled mesh frame | `M` | mesh vertices 乘以 scale 后的坐标系。bbox center 在此 frame 计算。 |
 | env frame | `E` | Isaac env/world frame，multi-env 下已减去 env origin。 |
-| object-center frame | `O` | 原点为当前 object bbox center，朝向为当前 object rotation。 |
+| object bbox-centered env-axes coordinates | `obj_centered_Eaxes` | 仅把原点平移到当前 object bbox center；坐标轴仍与 env/world frame 平行，不使用 object rotation 作为坐标轴。 |
 | tool-center frame | `T` | 原点为当前 tool bbox center，朝向为当前 tool rotation。 |
 
 核心公式：
 
 ```text
-object_points_O = object_points_M - object_bbox_center_M
+object_points_centered = object_points_M - object_bbox_center_M
 tool_points_T   = tool_points_M - tool_bbox_center_M
 
-x_E = object_bbox_center_E + object_rotation_E @ x_O
+object_vector_centered_Eaxes = x_E - object_bbox_center_E
 
-R_tool_E = object_rotation_E @ tool_rotation_O
-t_tool_E = object_bbox_center_E + object_rotation_E @ tool_translation_O
+R_tool_E = tool_rotation_E
+t_tool_E = tool_translation_E
 ```
 
 9D pose 格式固定为：
@@ -471,92 +507,18 @@ local_rot1_wxyz  = [1.0, 0.0, 0.0, 0.0]
 
 这组 scale 是工具从无量纲 adjusted mesh 进入机器人末端物理尺寸的关键参数，必须写入 `GeneralCfg.franka_mount.scale_xyz`，并进入 contact dataset metadata、RL run metadata 和本地 artifact manifest。当前值是 uniform scale，因此 contact schema 可把它展开为 `tool_scale_xyz=[0.1,0.1,0.1]`；如果未来改为非 uniform scale，bbox center/extent 和点云采样必须按 xyz scale 重新计算。
 
-#### A.4 `tool_asset_metadata.json` 建议 schema
+#### A.4 工具 runtime 输入契约
 
-工具生成管线的固定参数应写入一个单独 metadata artifact。训练代码不需要知道如何生成工具，但必须能校验“当前实验使用的是哪一批工具资产”。建议 schema：
+工具生成管线被视为不可变的外部输入。训练、contact generation、pretrain 和 RL runtime 不消费工具生成参数、不要求工具生成 metadata，也不记录工具生成 hash。runtime 只需要下面三项：
 
 ```text
-schema_version: "tool_asset_metadata_v1"
-created_at: ISO-8601 timestamp
-pipeline_root: "/home/galbot/tool"
-tool_count: 1700
-selected_tools_manifest: "eef/tools_selected.json"
-head_area_manifest: "eef/tools_adjusted.json"
-pointcloud_source:
-  stage: "meshdata_adjusted"
-  template: "eef/meshdata_adjusted/{tool_id}/coacd/decomposed.obj"
-  mesh_kind: "coacd_decomposed_adjusted"
-standalone_tool_usd_template: "eef/objects_usd/{tool_id}/{tool_id}.usd"
-franka_robot_usd_template: "Robots/panda_instanceable_{tool_id}.usd"
-hashes:
-  tools_adjusted_json: ...
-  tools_selected_json: ...
-  meshdata_adjusted_manifest: ...
-generation_constants:
-  image_edit:
-    model: "gemini-3.1-flash-image-preview"
-    input_dir: "tool_pictures"
-    output_dir: "tool_pictures_edited"
-    prompt_sha256: ...
-  hunyuan_3d:
-    model: "3.1"
-    region: "ap-guangzhou"
-    endpoint: "ai3d.tencentcloudapi.com"
-    input_dir: "tool_pictures_edited"
-    output_dir: "hunyuan_3d_outputs"
-    approx_triangle_count: 50000
-  randomize_open3d:
-    output_dir: "randomized_20"
-    count: 19
-    seed: 42
-    red_threshold: 0.55
-    handle_scale_xyz_range: [[0.8,1.2], [0.8,1.2], [0.8,1.2]]
-    functional_end_scale_xyz_range: [[0.8,1.2], [0.8,1.2], [0.8,1.2]]
-    simplify_target_faces: 1000
-    repair_method: "pymeshfix"
-    repair_alpha: 0.07
-    repair_samples: 8000
-    collapse_min_bbox_ratio: 0.4
-    collapse_max_bbox_ratio: 2.5
-    collapse_min_face_ratio: 0.5
-    collapse_max_repair_scale_ratio: 2.5
-  prepare_eef:
-    output_eef_dir: "eef"
-    validate_tools: "validate_tools.json"
-    head_area_format: "bbox_relative_aabb_minmax_2x3"
-    base_center_definition: "full_tool_bbox_bottom_center"
-  dgn_coacd:
-    pipeline: "coarse"
-    normalize_dmax_factor: 1.03
-    coacd_t: 0.08
-    coacd_k: 0.3
-    pool_workers: 32
-    urdf_mesh_scale: 1.0
-    urdf_origin_xyz: [0,0,0]
-    urdf_origin_rpy: [0,0,0]
-  urdf_to_usd:
-    fix_base: false
-    merge_fixed_joints: true
-    force_usd_conversion: true
-    joint_drive_stiffness: 0.0
-    joint_drive_damping: 0.0
-    joint_drive_target_type: "none"
-  franka_weld:
-    tool_mount_translate: [0.08799998, -4.9709342e-8, 0.926]
-    tool_mount_rot_wxyz: [-1.4551854e-11, 0.9238795, 0.38268346, -4.6566123e-10]
-    tool_mount_scale_xyz: [0.1,0.1,0.1]
-    attach_link_name: "panda_link7"
-    joint_name: "tool_weld_joint"
-    local_pos0: [0.0,0.0,0.107]
-    local_rot0_wxyz: [0.9238795,0.0,0.0,-0.38268346]
-    local_pos1: [0.0,0.0,0.0]
-    local_rot1_wxyz: [1.0,0.0,0.0,0.0]
-    mass_kg: 0.2
-    contact_offset: 0.005
-    rest_offset: 0.0
+tools:
+  meshdata_adjusted_root: "eef/meshdata_adjusted"
+  tools_adjusted_json: "eef/tools_adjusted.json"
+  tools_selected_json: "eef/tools_selected.json"
 ```
 
-`image_edit` 和 `hunyuan_3d` 可以只记录模型名、prompt hash、输入输出目录和 API 参数，不需要把外部服务返回的大文件内嵌进 config。`meshdata_adjusted_manifest` 建议至少包含每个 `tool_id` 的 `decomposed.obj` 相对路径、文件 size、mtime 或 sha256，以及 `head_area`。
+`tools_selected_json` 是默认 tool selection manifest；单个实验可以用 `GeneralCfg.tools_selected_json` 覆盖它。运行时 artifact 继续保存普通 `config_hash`、dataset hash、`tools_adjusted.json` 路径和实际 selection manifest 路径，但不保存任何工具生成 hash。
 
 #### A.5 当前工具管线固定参数
 
@@ -604,14 +566,14 @@ generation_constants:
 | mesh local raw frame | `M_raw` | mesh 文件原始坐标系，未 scale、未 center。 |
 | mesh local scaled frame | `M` | 对 `M_raw` 乘以 `object_scale` 或 `tool_scale_xyz` 后的坐标系。bbox center 在该 frame 下计算。 |
 | env frame | `E` | Isaac env/world frame；如果是多 env，已减去 `env_origin`。 |
-| object-center frame | `O` | 原点为当前 object 的 bbox center，朝向为当前 object rotation。坐标变换为 `x_E = object_bbox_center_E + object_rotation_E @ x_O`。 |
+| object bbox-centered env-axes coordinates | `obj_centered_Eaxes` | 原点为当前 object 的 bbox center，坐标轴仍与 env/world frame 平行。bbox-centered 点云 / 向量只减 `object_bbox_center_E`，不乘 `object_rotation_E`。 |
 | tool-center frame | `T` | 原点为当前 tool 的 bbox center，朝向为当前 tool rotation。 |
 
 #### B.3 顶层字段
 
 | 字段名 | shape / type | required | frame | 含义 |
 | --- | --- | --- | --- | --- |
-| `schema_version` | `str` | yes | - | schema 版本，建议当前写 `"contact_pt_v1"`。 |
+| `schema_version` | `str` | yes | - | schema 版本，当前写 `"contact_pt_env_v1"`。 |
 | `created_at` | `str` | yes | - | ISO-8601 时间戳。 |
 | `generator` | `str` | yes | - | 生成脚本或模块名，例如 `"new_pretrain.contact_gen"`。 |
 | `config_name` | `str` | yes | - | 生成该 dataset 的 `GeneralCfg.name + "_" + ContactGenCfg.name`。 |
@@ -624,7 +586,6 @@ generation_constants:
 | `object_scale` | `scalar` | yes | - | object uniform scale。 |
 | `tool_scale_xyz` | `(3,)` | yes | - | 应用于 `tool_mesh_path` 的工具几何尺度。当前应等于 Franka 挂载尺度 `[0.1,0.1,0.1]`；不要从 USD xform 里临时反查。 |
 | `tool_head_area_aabb_norm` | `(2,3)` | yes | bbox-relative | 从 `tools_adjusted.json` 复制的功能端 AABB，格式为 `[[min],[max]]`，相对 `tool_mesh_path` adjusted mesh 的整工具 bbox。 |
-| `tool_asset_metadata_hash` | `str` | yes | - | 使用的 `tool_asset_metadata.json` hash，防止同名 tool manifest 被替换后 dataset 无法追溯。 |
 | `object_bbox_center_M` | `(3,)` | yes | `M` | object scale 后、pose 前的 bbox center。centralize object mesh/point cloud 时必须减这个量。 |
 | `tool_bbox_center_M` | `(3,)` | yes | `M` | tool scale 后、pose 前的 bbox center。centralize tool mesh/point cloud 时必须减这个量。 |
 | `object_bbox_extent_M` | `(3,)` | yes | `M` | object scale 后 bbox size，用于校验 bbox center 和采样范围。 |
@@ -638,22 +599,21 @@ generation_constants:
 
 | 字段名 | shape / type | required | frame | 含义 |
 | --- | --- | --- | --- | --- |
-| `object_rotation_E` | `(N, 3, 3)` | yes | `E <- O` | 当前 object 的 rotation。所有 object rotation 都绕 bbox center 施加。 |
+| `object_rotation_E` | `(N, 3, 3)` | yes | `E` | 当前 object 在 env frame 下的 rotation。所有 object rotation 都绕 bbox center 施加；它不是 persisted tool/contact frame 的 basis。 |
 | `object_bbox_center_E` | `(N, 3)` | yes | `E` | 当前 object bbox center 在 env frame 下的位置。若 dataset 完全 object-centered，可为全 0，但字段仍保留。 |
-| `tool_translation_O` | `(N, 3)` | yes | `O` | tool bbox center 相对 object bbox center 的 translation。 |
-| `tool_rotation_O` | `(N, 3, 3)` | yes | `O <- T` | tool 相对 object-center frame 的 rotation。env frame 下 `R_tool_E = object_rotation_E @ tool_rotation_O`。 |
-| `contact_point_O` | `(N, 3)` | yes | `O` | 任意一个有效 contact point。必须在 object-center frame 下记录。 |
+| `tool_translation_E` | `(N, 3)` | yes | `E` | tool bbox center 在 env frame 下的位置。 |
+| `tool_rotation_E` | `(N, 3, 3)` | yes | `E` | tool 在 env frame 下的 rotation。 |
+| `contact_point_E` | `(N, 3)` | yes | `E` | 任意一个有效 contact point，记录在 env frame。 |
 | `object_mass` | `(N,)` | yes | - | 当前 contact case 的 object mass。 |
 | `tool_mass` | `(N,)` | yes | - | 当前 contact case 的 tool mass。 |
 | `object_friction` | `(N,)` | yes | - | 当前 contact case 的 object friction。 |
 | `tool_friction` | `(N,)` | yes | - | 当前 contact case 的 tool friction。 |
 | `ground_friction` | `(N,)` | yes | - | 当前 contact case 的 ground friction。 |
-| `post_tool_delta_pose9d_O` | `(N, 9)` | yes | `O` | post-contact tool commanded delta pose，相对 stabilized contact tool pose。格式为 `delta_t(3) + delta_R[:, :2](6)`。 |
-| `post_object_delta_pose9d_O` | `(N, 9)` | yes | `O` | post-contact 后 object observed delta pose，相对 stabilized contact object pose。格式同上。 |
+| `post_tool_delta_pose9d_E` | `(N, 9)` | yes | `E` | post-contact tool commanded delta pose，相对 stabilized contact tool pose，delta translation 和 rotation composition 都在 env frame。格式为 `delta_t(3) + delta_R[:, :2](6)`。 |
+| `post_tool_achieved_delta_pose9d_E` | `(N, 9)` | yes | `E` | post-contact 后实际 tool delta pose，相对 stabilized contact tool pose。格式同上。 |
+| `post_object_delta_pose9d_E` | `(N, 9)` | yes | `E` | post-contact 后 object observed delta pose，相对 stabilized contact object pose。格式同上。 |
 | `stabilize_steps` | `(N,)` | yes | - | 该 contact case 在 Isaac Sim 中实际 stabilize 的 step 数。 |
 | `postcontact_steps` | `(N,)` | yes | - | post-contact rollout 的 step 数。 |
-| `contact_distance_min` | `(N,)` | yes | meter | stabilize 后 tool/object 的最小 signed distance。用于 loader 校验仍有接触。 |
-| `penetration_depth_max` | `(N,)` | yes | meter | stabilize 后最大穿透深度；无穿透时应为 `0`。 |
 
 #### B.5 可选 cache 字段
 
@@ -661,9 +621,9 @@ generation_constants:
 
 | 字段名 | shape / type | required | frame | 含义 |
 | --- | --- | --- | --- | --- |
-| `object_points_O` | `(Q, 3)` | no | `O` | 从 object mesh 采样并 bbox-centered 后的 object point cloud cache。 |
+| `object_points_centered` | `(Q, 3)` | no | `obj_centered_Eaxes` | 从 object mesh 采样并 bbox-centered 后的 object point cloud cache；只做 translation centering，不使用 object rotation 作为坐标轴。 |
 | `tool_points_T` | `(P, 3)` | no | `T` | 从 `tool_mesh_path` 指向的 adjusted `decomposed.obj` 采样、乘 `tool_scale_xyz`、再 bbox-centered 后的 tool point cloud cache。 |
-| `contact_normal_O` | `(N, 3)` | no | `O` | contact point 附近的 object surface normal。 |
+| `contact_normal_E` | `(N, 3)` | no | `E` | contact point 附近的 object surface normal。 |
 | `source_candidate_index` | `(N,)` | no | - | brute-force candidate 的索引，便于 debug。 |
 | `debug_metrics` | `dict[str, Tensor]` | no | - | 不参与训练的调试指标。 |
 
@@ -672,7 +632,7 @@ generation_constants:
 | 字段名 / 类型 | 原因 |
 | --- | --- |
 | point cloud mean / centroid | 本项目统一使用 bbox center。 |
-| `tool_translation_E` / `tool_rotation_E` | 可由 `object_rotation_E`、`object_bbox_center_E`、`tool_translation_O`、`tool_rotation_O` 推导，避免重复字段不一致。 |
+| object-rotated persisted tool/contact fields | 持久化 `.pt` 不保存 object-rotated tool/contact pose；tool pose、contact point、postcontact delta 均直接保存 env-frame `_E` 字段。 |
 | quaternion 和 rotation matrix 同时存 | rotation 只保留 matrix；quat/rot6d/9D 表示由 loader 按需转换。 |
 | 成功/失败 contact 混在一个文件内 | contact `.pt` 只保存已通过 stabilize/post-contact 校验的有效 contact。失败样本应进入单独 debug 文件。 |
 
@@ -680,12 +640,12 @@ generation_constants:
 
 | 校验项 | 规则 |
 | --- | --- |
-| schema 版本 | `schema_version == "contact_pt_v1"`。 |
+| schema 版本 | `schema_version == "contact_pt_env_v1"`。 |
 | shape | 所有 per-contact 字段第一维等于 `num_contacts`。 |
 | rotation 正交性 | `R.T @ R` 与 `I` 的最大误差小于 config 中的 `rotation_orth_eps`。 |
 | bbox center | 重新从 scaled mesh 计算 bbox center，应与 `*_bbox_center_M` 一致。 |
-| tool pose | `R_tool_E = object_rotation_E @ tool_rotation_O`，`t_tool_E = object_bbox_center_E + object_rotation_E @ tool_translation_O`。 |
-| contact 合法性 | `penetration_depth_max <= ContactGenCfg.penetration_eps` 且 `contact_distance_min <= ContactGenCfg.contact_eps`。 |
+| tool pose | 直接读取 `tool_rotation_E` 与 `tool_translation_E`；不得通过 object rotation 重建 persisted tool pose。 |
+| contact 合法性 | geometry 阶段要求不穿模、tool 不低于 floor、朝向不向上；Isaac stabilize 阶段要求 stabilized 后 tool-object contact / near-contact。 |
 | 路径存在 | `object_mesh_path`、`tool_mesh_path` 必须能通过 `paths.yaml` 或绝对路径解析到文件。 |
 
 ### C. Contact Accept / Reject 条件
@@ -694,26 +654,19 @@ generation_constants:
 
 | 条件 | 公式 | 默认值来源 |
 | --- | --- | --- |
-| tool 朝向向下 | `R_tool[2, 2] <= upright_threshold` | 当前 `new_pretrain/contact_config.py` 默认为 `0.0` |
+| tool 朝向向下 | `R_tool[2, 2] <= upright_threshold` | 当前 `contact_generation.config` 默认为 `0.0` |
 | 不低于桌面 | `min_z(tool_points_E) >= -floor_eps` | 当前默认 `0.0` |
 | 不穿模 | `min_sdf(tool_points_E, object_mesh_E) > -epsilon` | 当前默认 `2e-3 m` |
-| 有接触 | `contact_distance_min <= contact_eps` | 需要补入新实现；当前 new sampler 主要靠 anchor 对齐隐式保证 |
 
 Stabilize accept 条件建议：
 
 ```text
-linear_velocity_norm(object)  < stable_lin_vel_eps
-angular_velocity_norm(object) < stable_ang_vel_eps
-contact_distance_min          < contact_eps
-penetration_depth_max         < penetration_eps
+stabilized tool-object contact / near-contact is true
 ```
 
 Post-contact accept 条件建议：
 
 ```text
-tool reaches commanded delta within tolerance
-object remains above table
-simulation does not explode
 object_delta_pose is finite
 ```
 
@@ -751,19 +704,19 @@ Pretrain 使用 contact `.pt` 中的 contact case 作为起点。由于 contact 
 | 字段 | shape | 用途 |
 | --- | --- | --- |
 | `tool_points_T` | `(B,N,3)` | tool canonical / bbox-centered cloud |
-| `object_points_O` | `(B,N,3)` | object bbox-centered cloud |
+| `object_points_centered` | `(B,N,3)` | object bbox-centered cloud，translation-only centering，axes remain env/world axes |
 | `tool_points_E_k` | `(B,K+1,N,3)` | timestep `k` 下 env frame、bbox-centered 后的 tool cloud |
 | `object_points_E_k` | `(B,K+1,N,3)` | timestep `k` 下 env frame、bbox-centered 后的 object cloud |
-| `rel_tool_object_t_k` | `(B,K+1,3)` | `A^k = T_T^k - T_O` |
-| `cond_tool_post_delta9d` | `(B,9)` | `B = ΔP_T`，post-contact tool delta pose |
-| `cond_object_post_delta9d` | `(B,9)` | `C = ΔP_O`，post-contact object delta pose；只作为允许的条件输入时使用 |
+| `rel_tool_object_t_k` | `(B,K+1,3)` | `A^k = tool_bbox_center_E^k - object_bbox_center_E`，env/world axes |
+| `cond_tool_post_delta9d_E` | `(B,9)` | `B = ΔP_tool_E`，post-contact tool delta pose |
+| `cond_object_post_delta9d_E` | `(B,9)` | `C = ΔP_obj_E`，post-contact object delta pose；只作为允许的条件输入时使用 |
 | `physics` | `(B,7)` | `D`，object/tool mass 与 object/tool/ground friction |
 | `target_tool_denoise_pose9d_k` | `(B,K,9)` | `k>0` 的 denoise target |
 | `target_object_post_delta9d` | `(B,9)` | `k=0` 的 post-contact object delta target |
 
 Decoder 输入和 query 构造：
 
-1. 对每个 timestep `k`，TCE 接收当前 `P_T'^k`、`P_O'^k`，输出 `Z^k in R^{B x 2P x D}`。
+1. 对每个 timestep `k`，TCE 接收当前 `P_tool'^k`、`P_obj'^k`，输出 `Z^k in R^{B x 2P x D}`。
 2. 四类条件分别过 MLP query generator：
    - `Q_A^k = M_A(A^k)`，其中 `A^k in R^3`。
    - `Q_B = M_B(B)`，其中 `B in R^9`。
@@ -781,8 +734,8 @@ Decoder 输入和 query 构造：
 | Head | 使用条件 | 输入 | 输出 |
 | --- | --- | --- | --- |
 | `sdf` | 所有 `k` | object/tool patch token 与 `F_A^k` | 每个 patch 或 point 的 signed distance `\hat SDF_i^k` |
-| `diff` | `k > 0` pre-contact pose | `F_A^k, F_B^k, F_C^k, F_D^k` 与 timestep sinusoidal embedding `e(k)` | 9D denoise pose `\hat ΔP_T^k` |
-| `postcontact` | `k = 0` contact pose | `F_A^0, F_B^0, F_D^0` | 9D object post-contact delta `\hat ΔP_O` |
+| `diff` | `k > 0` pre-contact pose | `F_A^k, F_B^k, F_C^k, F_D^k` 与 timestep sinusoidal embedding `e(k)` | 9D denoise pose `\hat ΔP_tool_E^k` |
+| `postcontact` | `k = 0` contact pose | `F_A^0, F_B^0, F_D^0` | 9D object post-contact delta `\hat ΔP_obj_E` |
 
 SDF head 以 object 为例：
 
@@ -799,7 +752,7 @@ Denoise head：
 ```text
 e_k                 = SinusoidalEmbedding(k / K)
 f_diff^k            = [pool(F_A^k), pool(F_B^k), pool(F_C^k), pool(F_D^k), e_k]
-\hat ΔP_T^k         = MLP_diff(f_diff^k)
+\hat ΔP_tool_E^k    = MLP_diff(f_diff^k)
 ```
 
 `target_tool_denoise_pose9d_k` 表示从当前 noised/pre-contact pose 向 contact/post-contact tool pose 去噪的一步或直接目标。若采用 RPDiff 的 transform loss，需要把 9D pose 转换为 translation 与 rotation matrix，并用当前 tool point cloud 构造 transformed child point cloud。
@@ -808,17 +761,17 @@ Post-contact head：
 
 ```text
 f_post              = [pool(F_A^0), pool(F_B^0), pool(F_D^0)]
-\hat ΔP_O           = MLP_postcontact(f_post)
+\hat ΔP_obj_E       = MLP_postcontact(f_post)
 ```
 
-这里不使用 `F_C`，因为 `C = ΔP_O` 本身就是 post-contact object delta；如果把同一个 `ΔP_O` 直接作为该 head 的输入，会形成 target leakage。
+这里不使用 `F_C`，因为 `C = ΔP_obj_E` 本身就是 post-contact object delta；如果把同一个 `ΔP_obj_E` 直接作为该 head 的输入，会形成 target leakage。
 
 Loss：
 
 ```text
 L_sdf  = sum_b sum_k sum_i SoftL1(\hat SDF_{b,i}^k, SDF_{b,i}^k)
-L_diff = RPDiffPoseLoss(\hat ΔP_T^k, target_tool_denoise_pose9d_k)
-L_post = RPDiffPoseLoss(\hat ΔP_O, target_object_post_delta9d)
+L_diff = RPDiffPoseLoss(\hat ΔP_tool_E^k, target_tool_denoise_pose9d_k)
+L_post = RPDiffPoseLoss(\hat ΔP_obj_E, target_object_post_delta9d)
 
 L = w_sdf * L_sdf
   + w_diff * L_diff
@@ -852,7 +805,7 @@ physics                  physics_dim
 
 `tool_cloud_flat` 的 source of truth 与 contact/pretrain 一致，必须是 adjusted `decomposed.obj` + `GeneralCfg.franka_mount.scale_xyz`，再用当前 tool pose 变换到 env frame 并按 bbox center centralize。
 
-`ActorCriticSDF` 的 split 逻辑必须与 env observation 顺序完全一致。若 action 维度变化，`previous_action` 的维度必须从 action config 推导，不能 hard code。
+`ActorCriticTG` 的 split 逻辑必须与 env observation 顺序完全一致。若 action 维度变化，`previous_action` 的维度必须从 action config 推导，不能 hard code。
 
 #### F.1 RL Domain Randomization 细节
 
@@ -972,8 +925,10 @@ tools:
   robots_usd_root
   tools_adjusted_json
   tools_selected_json
-  tool_asset_metadata_json
   franka_src_root
+
+models:
+  checkpoint_save_path
 ```
 
 #### `GeneralCfg`
@@ -1075,7 +1030,7 @@ group         = "{ExpCfg.name}-{ExpCfg.hash_short}"
    - 能 validate 一个小 contact `.pt`。
    - 缺 required field 会失败。
    - shape mismatch 会失败。
-3. `python -m pytest tests/test_tool_asset_metadata.py`
+3. `python -m pytest tests/test_tool_assets.py`
    - `tools_selected.json` 中的 tool 都能解析到 `tools_adjusted.json` 和 adjusted `decomposed.obj`。
    - `head_area` 格式为 `(2,3)`，并能还原成功能端 local AABB。
 4. contact generation smoke test：
@@ -1105,7 +1060,7 @@ group         = "{ExpCfg.name}-{ExpCfg.hash_short}"
 | `exp_cfg_path` | 启动时传入的 config 路径。 |
 | `exp_cfg_hash` | 完整 frozen `ExpCfg` 的 hash。 |
 | `general_cfg_name` / `hash` | `GeneralCfg` 名称和 hash。 |
-| `tool_asset_metadata_path` / `hash` | 工具资产 metadata 路径和 hash。 |
+| `tools_selected_json` | 本次实验实际使用的 tool selection manifest；可由 `GeneralCfg.tools_selected_json` 覆盖。 |
 | `contact_gen_cfg_name` / `hash` | `ContactGenCfg` 名称和 hash；若为 `None`，记录 `None`。 |
 | `pretrain_cfg_name` / `hash` | `PretrainCfg` 名称和 hash；若跳过 pretrain，记录 `None`。 |
 | `model_cfg_name` / `hash` | `ModelCfg` 名称和 hash。 |
@@ -1150,7 +1105,6 @@ group         = "{ExpCfg.name}-{ExpCfg.hash_short}"
 | `tool_pointcloud_mesh_template` | 当前应为 `eef/meshdata_adjusted/{tool_id}/coacd/decomposed.obj`。 |
 | `tool_head_area_manifest` | `tools_adjusted.json` 路径。 |
 | `tool_head_area_format` | 固定为 `bbox_relative_aabb_minmax_2x3`。 |
-| `tool_asset_metadata_hash` | `tool_asset_metadata.json` hash。 |
 | `tool_scale_xyz` | contact generation 中应用到 adjusted decomposed mesh 的工具尺度，当前应为 `[0.1,0.1,0.1]`。 |
 | `franka_mount_scale_xyz` | Franka `tool_mount` 的 scale，必须与 `tool_scale_xyz` 一致。 |
 | `object_mesh_root` | object mesh 根路径。 |
@@ -1158,7 +1112,7 @@ group         = "{ExpCfg.name}-{ExpCfg.hash_short}"
 | `contact_num_object_poses` | 每个 pair 的 object pose 数量。 |
 | `contact_B` / `contact_M` / `contact_chunk_B` | rejection sampler 参数。 |
 | `contact_mode_prob` | tool head/body contact sampling 比例。 |
-| `contact_epsilon` | penetration tolerance。 |
+| `penetration_epsilon` | penetration tolerance。 |
 | `contact_floor_eps` | floor tolerance。 |
 | `contact_upright_threshold` | tool downward orientation threshold。 |
 | `stabilize_steps` | stabilize step 数。 |
@@ -1288,7 +1242,7 @@ RL run 至少记录以下曲线：
 - git commit。
 - Python、PyTorch、Isaac Sim、Isaac Lab、CUDA 版本。
 - 使用的 object/tool manifests。
-- 使用的`tool_asset_metadata.json` 路径/hash、`tools_adjusted.json` 路径/hash。
+- 使用的 `tools_selected_json` 路径、`tools_adjusted.json` 路径和普通 dataset/config hash。
 - 工具点云 source template 和 Franka mount scale/pose。
 - dataset schema version。
 - checkpoint source。

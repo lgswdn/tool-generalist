@@ -1,33 +1,18 @@
-Copy `paths.yaml.example` to `paths.yaml` and update the paths for your machine before running (paths.yaml is gitignored).
+在本机运行代码前，执行
 
-python scripts/record_video.py --task tool-v0 --num_envs 30 --video_length 30 --headless
-
-生成 3s 的会存到 ./videos 的视频，
-
-## Frozen Contracts
-
-Stage-1 contract definitions live in pure Python modules so later migration work
-can share the same schema without importing Isaac Lab, Kaolin, or training code.
-
-- Frames and pose9d: `utils.geometry.frames`
-- Path/config dataclasses: `configs.*`
-- Contact `.pt` schema validator: `contact.schema`
-- Adjusted tool asset contract: `utils.artifacts.tool_assets`
-- RL observation layout: `configs.observation_layout`
-
-See `docs/contracts.md` for the frozen details. Current runtime code may still
-use legacy centroid, `base_center`, and normalized-model behavior until later
-phases explicitly migrate geometry/contact/pretrain/RL paths.
-
-## 从工具生成具有不同末端的机械臂
-
-```bash
-./isaaclab.sh -p batch_generate_franka_single_launch.py \
-  --tools-root /your/tools/root \
-  --src-root /../tool-generalist/FrankaEmika \
-  --output-root /../tool-generalist/robot_usd \
-  --overwrite --reuse-output-root --mirror-tool-assets --disable-gravity
 ```
+conda activate isaac
+```
+
+若 conda 不存在，执行
+
+```
+source /mnt/home/zhengyixin/.bashrc
+```
+
+-------------------------------------------------
+
+以下是关于本项目的原代码仓库的介绍，它实现了利用 Franka Hand 进行 Non-Prehensile Manipulation 的训练。
 
 ## Project Overview
 
@@ -44,7 +29,7 @@ This repository is an Isaac Lab implementation and adaptation of [CORN](https://
 ## Repository Structure
 
 - `scripts/`: Training, evaluation, play, and shared CLI args
-  - `train.py`: Training entrypoint
+  - `train.py`: Internal RL runtime-spec writer used by `run_experiment.py`
   - `eval.py`: Evaluation entrypoint (reports success rate and per-object stats)
   - `play.py`: Playback and export to JIT/ONNX
   - `cli_args.py`: Common RSL-RL CLI arguments
@@ -138,29 +123,33 @@ To utilize the customized version of `rsl_rl` included in this repository, expor
   export PYTHONPATH=/mnt/home/zhengyixin/tool-generalist:/mnt/home/zhengyixin/tool-generalist/source/IsaacLab_nonPrehensile
 
 
+
+python run_experiment.py --config configs/experiments/fork_sdf.py
+
 ```
 
 ### Train (RSL-RL / PPO)
 
+The canonical experiment entrypoint is:
+
 ```bash
-python scripts/train.py \
-  --task=Isaac-nonPrehensile-Franka-v0 \
-  --experiment_name=franka_nonprehensile \
-  --num_envs=4096 \
-  --video --headless
-
-python -m torch.distributed.run --nnodes=1 --nproc_per_node=2 scripts/train.py --distributed --task=tool-sdf-v0 --headless --logger wandb --num_envs 2048
-
-python -m torch.distributed.run --nnodes=1 --nproc_per_node=4 scripts/train.py --distributed --task=tool-sdf-v0 --headless --logger wandb --num_envs 1024
+python run_experiment.py --config configs/experiments/point2vec.py
 ```
 
-Common options:
-- `--video`, `--video_length`, `--video_interval`: record training videos
-- `--seed`: random seed (`-1` to sample randomly)
-- `--distributed`: multi-GPU/multi-node
-- See `scripts/cli_args.py` for shared RSL-RL args (e.g., `--logger`, `--run_name`)
+For multi-GPU RL, set the experiment config.  The launcher automatically
+spawns `torch.distributed.run`; users should not invoke `torchrun` manually:
 
-Training logs are saved under: `logs/rsl_rl/<experiment_name>/<time>[_run]`.
+```python
+EXP_CFG.num_gpus = 4
+EXP_CFG.rl.launch.distributed = True
+EXP_CFG.rl.env.num_envs = 1024  # per GPU/rank
+# total RL envs = 4096
+```
+
+`EXP_CFG.rl.env.num_envs` is always per-GPU/per-rank.  In distributed
+multi-GPU runs, total environment count is
+`EXP_CFG.num_gpus * EXP_CFG.rl.env.num_envs`.  Change RL training iterations
+in config with `EXP_CFG.rl.ppo.max_iterations`; the default is `1000000`.
 
 
 ### Evaluate (success rate + per-object stats)

@@ -21,18 +21,9 @@ import time
 import yaml
 from isaaclab.app import AppLauncher
 
-# local imports
-import cli_args  # isort: skip
+from utils.experiment.rl_runtime_spec import RUNTIME_SPEC_ENV_VAR, validate_runtime_spec
 
 
-DEFAULT_TASK = "tool-sdf-multitool-patch-v0"
-DEFAULT_CHECKPOINT = (
-    "/mnt/project/world_model/tool_generalist/RL/multitool_sdf_patch/"
-    "2026-04-29_15-14-36/model_1000.pt"
-)
-DEFAULT_PATHS_YAML = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "paths_multitool.yaml")
-)
 FFMPEG_PATH = "/usr/bin/ffmpeg"
 
 
@@ -84,8 +75,34 @@ def _prepare_paths_yaml_for_rank(paths_yaml: str, rank: int, world_size: int) ->
     return rank_paths_yaml
 
 
+def _backfill_runtime_spec_defaults(spec: dict) -> None:
+    """Fill policy fields that older runtime specs omitted but current configs default."""
+
+    policy = spec.get("policy_params")
+    if not isinstance(policy, dict):
+        return
+
+    observation = spec.get("observation_params")
+    if not isinstance(observation, dict):
+        observation = {}
+
+    policy.setdefault(
+        "model_input_centering",
+        observation.get("model_input_centering", "bbox_center"),
+    )
+    policy.setdefault("relative_translation_query_tokens", 2)
+    policy.setdefault("reuse_pretrain_pose_cross_attn", False)
+
+
 parser = argparse.ArgumentParser(description="Evaluate all tools in tools_selected.json with an RSL-RL checkpoint.")
-parser.add_argument("--task", type=str, default=DEFAULT_TASK, help="Name of the task.")
+parser.add_argument(
+    "--runtime_spec",
+    type=str,
+    required=True,
+    help="Path to the rl_runtime_spec.json written with the checkpoint.",
+)
+parser.add_argument("--checkpoint", type=str, required=True, help="Path to the RSL-RL checkpoint to evaluate.")
+parser.add_argument("--task", type=str, default=None, help="Name of the task. Defaults to runtime_spec['task_id'].")
 parser.add_argument("--num_envs", type=int, default=512, help="Number of environments to simulate per rank.")
 parser.add_argument("--num_episodes", type=int, default=10, help="Number of episodes to evaluate per tool.")
 parser.add_argument("--max_episode_steps", type=int, default=300, help="Safety cap on episode length (steps).")
@@ -105,18 +122,46 @@ parser.add_argument(
 parser.add_argument("--video_dir", type=str, default=None, help="Directory to write per-tool MP4 files.")
 parser.add_argument("--real_time", action="store_true", default=False, help="Run in real-time, if possible.")
 parser.add_argument("--distributed", action="store_true", default=False, help="Run evaluation across multiple GPUs.")
-cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 
-if args_cli.checkpoint is None:
-    args_cli.checkpoint = DEFAULT_CHECKPOINT
+runtime_spec_path = os.path.abspath(os.path.normpath(args_cli.runtime_spec))
+with open(runtime_spec_path, "r", encoding="utf-8") as f:
+    runtime_spec = json.load(f)
 
-paths_yaml = os.environ["TOOL_GENERALIST_PATHS_YAML"] if "TOOL_GENERALIST_PATHS_YAML" in os.environ else DEFAULT_PATHS_YAML
+if args_cli.task is None:
+    args_cli.task = runtime_spec.get("task_id")
+if not args_cli.task:
+    parser.error("--task is required when runtime_spec does not contain task_id")
+
+paths_yaml = runtime_spec.get("paths_yaml")
+if not paths_yaml:
+    parser.error("runtime_spec must contain paths_yaml")
 paths_yaml = os.path.abspath(os.path.normpath(paths_yaml))
 rank, world_size = _distributed_rank_info(args_cli.distributed)
+local_rank = int(os.environ.get("LOCAL_RANK", "0")) if args_cli.distributed else 0
+os.environ["TOOL_GENERALIST_GLOBAL_RANK"] = str(rank)
+os.environ["TOOL_GENERALIST_LOCAL_RANK"] = str(local_rank)
+os.environ["TOOL_GENERALIST_WORLD_SIZE"] = str(world_size)
 rank_paths_yaml = _prepare_paths_yaml_for_rank(paths_yaml, rank, world_size)
 os.environ["TOOL_GENERALIST_PATHS_YAML"] = rank_paths_yaml
+
+eval_runtime_spec = copy.deepcopy(runtime_spec)
+eval_runtime_spec["num_envs"] = args_cli.num_envs
+if isinstance(eval_runtime_spec.get("env_params"), dict):
+    eval_runtime_spec["env_params"]["num_envs"] = args_cli.num_envs
+eval_runtime_spec["paths_yaml"] = rank_paths_yaml
+_backfill_runtime_spec_defaults(eval_runtime_spec)
+eval_runtime_spec_path = os.path.join(
+    tempfile.gettempdir(),
+    "tool_generalist_eval_tools",
+    f"rl_runtime_spec_rank_{rank}_of_{world_size}_envs_{args_cli.num_envs}.json",
+)
+os.makedirs(os.path.dirname(eval_runtime_spec_path), exist_ok=True)
+validate_runtime_spec(eval_runtime_spec, eval_runtime_spec_path)
+with open(eval_runtime_spec_path, "w", encoding="utf-8") as f:
+    json.dump(eval_runtime_spec, f, ensure_ascii=False, indent=2)
+os.environ[RUNTIME_SPEC_ENV_VAR] = eval_runtime_spec_path
 
 if args_cli.video:
     args_cli.enable_cameras = True
@@ -162,7 +207,10 @@ import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import IsaacLab_nonPrehensile.tasks  # noqa: F401
-from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import TOOL_DATA
+from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
+    TOOL_DATA,
+    get_tool_index_for_env,
+)
 
 
 def _tool_names_from_loaded_data() -> list[str]:
@@ -176,16 +224,28 @@ def _init_tool_rows(tool_names: list[str]) -> list[dict]:
     return [{"name": name, "episodes": 0, "successes": 0} for name in tool_names]
 
 
-def _all_tools_finished(tool_rows: list[dict], episodes_per_tool: int) -> bool:
-    for row in tool_rows:
+def _all_tools_finished(
+    tool_rows: list[dict],
+    episodes_per_tool: int,
+    tool_indices: list[int] | None = None,
+) -> bool:
+    indices = range(len(tool_rows)) if tool_indices is None else tool_indices
+    for index in indices:
+        row = tool_rows[index]
         if int(row["episodes"]) < episodes_per_tool:
             return False
     return True
 
 
-def _count_finished_episodes(tool_rows: list[dict], episodes_per_tool: int) -> int:
+def _count_finished_episodes(
+    tool_rows: list[dict],
+    episodes_per_tool: int,
+    tool_indices: list[int] | None = None,
+) -> int:
     count = 0
-    for row in tool_rows:
+    indices = range(len(tool_rows)) if tool_indices is None else tool_indices
+    for index in indices:
+        row = tool_rows[index]
         episodes = int(row["episodes"])
         count += min(episodes, episodes_per_tool)
     return count
@@ -228,16 +288,16 @@ def _make_record_camera_cfg() -> TiledCameraCfg:
     return TiledCameraCfg(
         prim_path="{ENV_REGEX_NS}/EvalRecordCamera",
         offset=TiledCameraCfg.OffsetCfg(
-            # Diagonal overhead view aimed at the manipulation workspace near x=0.45, y=0.0, z=0.35.
-            pos=(1.55, 0.9, 1.35),
-            rot=(-0.1973, 0.3801, 0.8020, -0.4164),
+            # Front oblique view from the table end, aimed at the robot base.
+            pos=(1.5, 0.0, 1.0),
+            rot=(-0.3337, 0.6234, 0.6234, -0.3337),
             convention="ros",
         ),
         data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(
-            focal_length=16.0,
-            focus_distance=2.0,
-            horizontal_aperture=24.0,
+            focal_length=14.0,
+            focus_distance=1.8,
+            horizontal_aperture=28.0,
             clipping_range=(0.05, 20.0),
         ),
         width=args_cli.video_width,
@@ -280,17 +340,24 @@ def _close_ffmpeg_writer(writer: subprocess.Popen) -> None:
         raise RuntimeError(f"ffmpeg exited with code {return_code}")
 
 
-def _init_video_state(tool_names: list[str], video_dir: str) -> tuple[list[dict], list[int], list[int], set[int]]:
+def _init_video_state(
+    tool_names: list[str],
+    video_dir: str,
+    env_id_by_tool: dict[int, int],
+) -> tuple[list[dict], list[int], list[int], set[int]]:
     if not os.path.isfile(FFMPEG_PATH):
         raise FileNotFoundError(f"ffmpeg not found: {FFMPEG_PATH}")
     os.makedirs(video_dir, exist_ok=True)
     video_records = []
     for tool_idx, tool_name in enumerate(tool_names):
+        if tool_idx not in env_id_by_tool:
+            continue
         video_records.append(
             {
+                "record_idx": len(video_records),
                 "tool_idx": tool_idx,
                 "tool_name": tool_name,
-                "env_id": tool_idx,
+                "env_id": env_id_by_tool[tool_idx],
                 "state": "pending",
                 "frames": 0,
                 "path": os.path.join(video_dir, f"rank_{rank:03d}_{_safe_filename(tool_name)}.mp4"),
@@ -343,7 +410,7 @@ def _finish_recording(record: dict, recording: set[int]) -> None:
     _close_ffmpeg_writer(record["writer"])
     record["writer"] = None
     record["state"] = "done"
-    recording.remove(int(record["tool_idx"]))
+    recording.remove(int(record["record_idx"]))
 
 
 def _update_video_records_on_done(
@@ -417,9 +484,13 @@ def _write_summary(log_dir: str, resume_path: str, rows: list[dict]) -> None:
 
 @hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlOnPolicyRunnerCfg):
-    agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
     env_cfg.scene.num_envs = args_cli.num_envs
-    env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    if args_cli.device is not None:
+        env_cfg.sim.device = args_cli.device
+        agent_cfg.device = args_cli.device
+    if args_cli.seed is not None:
+        env_cfg.seed = args_cli.seed
+        agent_cfg.seed = args_cli.seed
     env_cfg.disable_obs_noise = True
 
     if args_cli.distributed:
@@ -449,7 +520,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     print(f"[INFO][rank {rank}]: Loading model checkpoint from: {resume_path}")
     ppo_runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     ppo_runner.load(resume_path)
-    policy_obj = ppo_runner.alg.policy
+    inference_policy = ppo_runner.get_inference_policy(device=agent_cfg.device)
 
     if not hasattr(env.unwrapped, "episode_success_buf"):
         raise AttributeError("Environment does not have episode_success_buf.")
@@ -458,15 +529,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     tool_rows = _init_tool_rows(tool_names)
     num_tools = len(tool_names)
     num_envs = env.unwrapped.num_envs
-    if args_cli.video and num_envs < num_tools:
-        raise ValueError(
-            f"Per-tool video recording requires num_envs >= tools on this rank, got {num_envs} envs for {num_tools} tools."
+    env_to_tool_idx = torch.tensor(
+        [get_tool_index_for_env(env_id) for env_id in range(num_envs)],
+        dtype=torch.long,
+    )
+    env_id_by_tool: dict[int, int] = {}
+    for env_id, tool_idx in enumerate(env_to_tool_idx.tolist()):
+        env_id_by_tool.setdefault(int(tool_idx), env_id)
+    target_tool_indices = sorted(env_id_by_tool)
+    missing_tool_indices = sorted(set(range(num_tools)).difference(env_id_by_tool))
+    if missing_tool_indices:
+        missing_names = [tool_names[index] for index in missing_tool_indices]
+        print(
+            f"[WARNING][rank {rank}]: No env assigned to {len(missing_names)} tools; "
+            f"they will be skipped on this rank: {missing_names}"
         )
-    env_to_tool_idx = torch.arange(num_envs, dtype=torch.long) % num_tools
 
     obs, _ = env.get_observations()
     dt = env.unwrapped.step_dt if hasattr(env.unwrapped, "step_dt") else None
-    total_required = len(tool_rows) * args_cli.num_episodes
+    total_required = len(target_tool_indices) * args_cli.num_episodes
     pbar = tqdm(total=total_required, desc=f"Rank {rank} evaluating tools", unit="episodes", disable=rank != 0)
 
     video_records = []
@@ -474,17 +555,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     video_waiting = []
     video_recording = set()
     if args_cli.video:
-        video_records, video_pending, video_waiting, video_recording = _init_video_state(tool_names, video_dir)
+        video_records, video_pending, video_waiting, video_recording = _init_video_state(
+            tool_names,
+            video_dir,
+            env_id_by_tool,
+        )
         _activate_video_slots(video_records, video_pending, video_waiting, video_recording, at_episode_start=True)
         print(f"[INFO][rank {rank}]: Recording per-tool videos to: {video_dir}")
 
     while (
-        not _all_tools_finished(tool_rows, args_cli.num_episodes)
+        not _all_tools_finished(tool_rows, args_cli.num_episodes, target_tool_indices)
         or (args_cli.video and not _videos_finished(video_records))
     ) and simulation_app.is_running():
         start_time = time.time()
         with torch.inference_mode():
-            actions = policy_obj.act(obs)
+            actions = inference_policy(obs)
             obs, _, dones, _ = env.step(actions)
 
         if args_cli.video:
@@ -494,7 +579,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if torch.any(ended):
             ended_ids = torch.where(ended)[0]
             ended_env_ids = set(ended_ids.tolist())
-            progress_before = _count_finished_episodes(tool_rows, args_cli.num_episodes)
+            progress_before = _count_finished_episodes(tool_rows, args_cli.num_episodes, target_tool_indices)
             for env_id in ended_ids.tolist():
                 tool_idx = int(env_to_tool_idx[env_id].item())
                 row = tool_rows[tool_idx]
@@ -506,10 +591,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     if episode_success:
                         row["successes"] = int(row["successes"]) + 1
 
-            progress_after = _count_finished_episodes(tool_rows, args_cli.num_episodes)
+            progress_after = _count_finished_episodes(tool_rows, args_cli.num_episodes, target_tool_indices)
             pbar.update(progress_after - progress_before)
             finished = progress_after
-            successes = sum(int(row["successes"]) for row in tool_rows)
+            successes = sum(int(tool_rows[index]["successes"]) for index in target_tool_indices)
             success_rate = float(successes) / float(finished) if finished > 0 else 0.0
             pbar.set_postfix({"Success Rate": f"{success_rate * 100.0:.2f}%", "Episodes": finished})
 
