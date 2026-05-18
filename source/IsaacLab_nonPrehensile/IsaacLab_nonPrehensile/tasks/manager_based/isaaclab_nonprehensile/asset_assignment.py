@@ -73,6 +73,27 @@ def asset_indices_for_rank(
     ]
 
 
+def sequential_spawn_indices_for_rank(
+    num_envs_per_rank: int,
+    global_rank: int,
+    num_assets: int,
+) -> list[int]:
+    """Return the compact spawn list for deterministic modulo assignment.
+
+    Isaac Lab's MultiAssetSpawnerCfg selects prototype ``local_env_id % len(assets_cfg)``
+    when ``random_choice=False``.  For deterministic assignment, the per-env sequence is
+    a rank-offset modulo cycle, so we only need one cycle of prototypes rather than one
+    entry per environment.
+    """
+
+    num_envs_per_rank = _require_positive_int("num_envs_per_rank", num_envs_per_rank)
+    global_rank = _require_non_negative_int("global_rank", global_rank)
+    num_assets = _require_positive_int("num_assets", num_assets)
+    start = (global_rank * num_envs_per_rank) % num_assets
+    count = min(num_envs_per_rank, num_assets)
+    return [(start + local_index) % num_assets for local_index in range(count)]
+
+
 def _require_int(name: str, value: int) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
         raise ValueError(f"{name} must be an int")

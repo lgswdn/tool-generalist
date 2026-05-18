@@ -54,6 +54,14 @@ def test_asset_assignment_deterministic_offsets_across_ranks():
     assert assignment.global_env_id(3, 4, 2) == 11
 
 
+def test_sequential_spawn_indices_compact_deterministic_cycles():
+    assignment = _load_asset_assignment_module()
+
+    assert assignment.sequential_spawn_indices_for_rank(4, 0, 3) == [0, 1, 2]
+    assert assignment.sequential_spawn_indices_for_rank(4, 1, 3) == [1, 2, 0]
+    assert assignment.sequential_spawn_indices_for_rank(2, 1, 5) == [2, 3]
+
+
 def test_asset_assignment_random_seed_and_salt_contract():
     assignment = _load_asset_assignment_module()
 
@@ -127,7 +135,7 @@ def test_runtime_spec_contains_asset_assignment_params(tmp_path):
     assert contract.asset_assignment.randomize_object_assignment is False
 
 
-def test_env_tool_uses_expanded_spawn_lists_with_deterministic_spawners():
+def test_env_tool_uses_compact_spawn_lists_with_deterministic_spawners():
     env_tool = _source(
         "source/IsaacLab_nonPrehensile/IsaacLab_nonPrehensile/tasks/manager_based/"
         "isaaclab_nonprehensile/env_tool.py"
@@ -137,8 +145,10 @@ def test_env_tool_uses_expanded_spawn_lists_with_deterministic_spawners():
     assert "OBJECT_ASSET_INDICES_BY_ENV" in env_tool
     assert "TOOL_USD_PATHS_BY_ENV" in env_tool
     assert "OBJECT_ASSET_CFGS_BY_ENV" in env_tool
-    assert "assets_cfg=OBJECT_ASSET_CFGS_BY_ENV" in env_tool
-    assert "build_multi_tool_robot_cfg(TOOL_USD_PATHS_BY_ENV, random_choice=False)" in env_tool
+    assert "TOOL_USD_PATHS_FOR_SPAWN" in env_tool
+    assert "OBJECT_ASSET_CFGS_FOR_SPAWN" in env_tool
+    assert "assets_cfg=OBJECT_ASSET_CFGS_FOR_SPAWN" in env_tool
+    assert "build_multi_tool_robot_cfg(TOOL_USD_PATHS_FOR_SPAWN, random_choice=False)" in env_tool
     assert "random_choice=False" in env_tool
 
 

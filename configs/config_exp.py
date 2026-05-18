@@ -150,6 +150,10 @@ class ExpCfg:
             errors.append("RLEnvCfg.sim_dt must be > 0")
         if self.rl.env.episode_length_s <= 0:
             errors.append("RLEnvCfg.episode_length_s must be > 0")
+        if not isinstance(self.rl.separate_actor_critic_fusion, bool):
+            errors.append("RLCfg.separate_actor_critic_fusion must be a bool")
+        if self.rl.reward.rotation_distance_divisor <= 0:
+            errors.append("RewardCfg.rotation_distance_divisor must be > 0")
         if self.pretrain.optimizer.learning_rate <= 0:
             errors.append("PretrainOptimizerCfg.learning_rate must be > 0")
         if self.pretrain.loss.sdf_relative_eps <= 0:

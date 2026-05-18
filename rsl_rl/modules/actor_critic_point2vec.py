@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import copy
 import os
 from typing import Any, Optional
 
@@ -55,6 +56,7 @@ class ActorCriticPoint2Vec(nn.Module):
         point2vec_ckpt_path: Optional[str] = None,
         freeze_encoder: bool = True,
         freeze_point2vec: Optional[bool] = None,
+        separate_actor_critic_fusion: bool = False,
         tokenizer_num_groups: int = 128,
         tokenizer_group_size: int = 32,
         tokenizer_group_radius: Optional[float] = None,
@@ -115,6 +117,7 @@ class ActorCriticPoint2Vec(nn.Module):
         self.num_actions = int(num_actions)
         self.noise_std_type = noise_std_type
         self.freeze_point2vec = bool(freeze_encoder if freeze_point2vec is None else freeze_point2vec)
+        self.separate_actor_critic_fusion = bool(separate_actor_critic_fusion)
         self.previous_action_dim = int(previous_action_dim) if previous_action_dim is not None else int(num_actions)
         self.physics_dim = int(physics_dim)
         self.sd_cat_ctx = bool(sd_cat_ctx)
@@ -222,6 +225,11 @@ class ActorCriticPoint2Vec(nn.Module):
             fusion_input_dim += ctx_dim
 
         self.fusion_mlp = build_fusion_mlp(fusion_input_dim, fusion_hidden_dims, activation_fn)
+        self.critic_state_cross_all = None
+        self.critic_fusion_mlp = None
+        if self.separate_actor_critic_fusion:
+            self.critic_state_cross_all = copy.deepcopy(self.state_cross_all)
+            self.critic_fusion_mlp = copy.deepcopy(self.fusion_mlp)
         fusion_out_dim = int(fusion_hidden_dims[-1]) if fusion_hidden_dims else int(fusion_input_dim)
         self.actor = build_mlp(fusion_out_dim, actor_hidden_dims, activation_fn, num_actions)
         self.critic = build_mlp(fusion_out_dim, critic_hidden_dims, activation_fn, 1)
@@ -312,15 +320,22 @@ class ActorCriticPoint2Vec(nn.Module):
         self,
         all_tokens: torch.Tensor,
         ctx_vec: torch.Tensor,
+        *,
+        branch: str = "actor",
     ) -> torch.Tensor:
-        sd_out = self.state_cross_all(all_tokens, ctx={"context": ctx_vec}, mask=None)
+        critic_branch = branch == "critic" and self.separate_actor_critic_fusion
+        state_cross_all = self.critic_state_cross_all if critic_branch else self.state_cross_all
+        fusion_mlp = self.critic_fusion_mlp if critic_branch else self.fusion_mlp
+        if state_cross_all is None or fusion_mlp is None:
+            raise RuntimeError("critic fusion requested before critic fusion module was initialized")
+        sd_out = state_cross_all(all_tokens, ctx={"context": ctx_vec}, mask=None)
         if self.sd_cat_ctx:
             sd_out = torch.cat([sd_out, ctx_vec], dim=-1)
-        return self.fusion_mlp(sd_out)
+        return fusion_mlp(sd_out)
 
-    def _get_features(self, observations: torch.Tensor) -> torch.Tensor:
+    def _get_features(self, observations: torch.Tensor, *, branch: str = "actor") -> torch.Tensor:
         all_tokens, ctx_vec = self._tokenize(observations)
-        return self._features_from_tokens_context(all_tokens, ctx_vec)
+        return self._features_from_tokens_context(all_tokens, ctx_vec, branch=branch)
 
     def update_distribution(self, observations: torch.Tensor):
         mean = self.actor(self._get_features(observations))
@@ -341,7 +356,7 @@ class ActorCriticPoint2Vec(nn.Module):
         return self.distribution.log_prob(actions).sum(dim=-1)
 
     def evaluate(self, critic_observations: torch.Tensor, **kwargs):
-        return self.critic(self._get_features(critic_observations))
+        return self.critic(self._get_features(critic_observations, branch="critic"))
 
     def reset(self, dones=None):
         pass
@@ -360,7 +375,7 @@ class ActorCriticPoint2Vec(nn.Module):
         return self.distribution.sample()
 
     def evaluate_from_cached_features(self, all_tokens: torch.Tensor, ctx_vec: torch.Tensor):
-        return self.critic(self._features_from_tokens_context(all_tokens, ctx_vec))
+        return self.critic(self._features_from_tokens_context(all_tokens, ctx_vec, branch="critic"))
 
     def get_actions_log_prob_from_cached_features(self, actions: torch.Tensor):
         return self.distribution.log_prob(actions).sum(dim=-1)

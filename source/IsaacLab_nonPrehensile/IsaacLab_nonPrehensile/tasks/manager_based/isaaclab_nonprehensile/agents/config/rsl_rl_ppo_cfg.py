@@ -67,6 +67,7 @@ class TGActorCriticCfg:
 
     encoder_weights_path: str = str(_policy("encoder_weights_path"))
     freeze_encoder: bool = bool(_policy("freeze_encoder"))
+    separate_actor_critic_fusion: bool = bool(_policy("separate_actor_critic_fusion", False))
 
     use_learnable_query_tokens: bool = bool(_policy("use_learnable_query_tokens", False))
     sd_num_query: int = int(_policy("sd_num_query"))
@@ -113,6 +114,7 @@ class Point2VecActorCriticCfg:
     point2vec_ckpt_path: str = str(_policy_for_class("point2vec_ckpt_path", "ActorCriticPoint2Vec", ""))
     freeze_encoder: bool = bool(_policy("freeze_encoder"))
     freeze_point2vec: bool = bool(_policy("freeze_point2vec", _policy("freeze_encoder")))
+    separate_actor_critic_fusion: bool = bool(_policy("separate_actor_critic_fusion", False))
 
     tokenizer_num_groups: int = int(_policy_for_class("tokenizer_num_groups", "ActorCriticPoint2Vec", 1))
     tokenizer_group_size: int = int(_policy_for_class("tokenizer_group_size", "ActorCriticPoint2Vec", 1))

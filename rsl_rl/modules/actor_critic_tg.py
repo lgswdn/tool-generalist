@@ -20,6 +20,7 @@ Observation layout:
 
 from __future__ import annotations
 
+import copy
 from typing import Any, Optional
 
 import torch
@@ -245,6 +246,7 @@ class ActorCriticTG(nn.Module):
         # Encoder weights
         encoder_weights_path: Optional[str] = None,
         freeze_encoder: bool = True,
+        separate_actor_critic_fusion: bool = False,
         # Cross-attention fusion settings
         use_learnable_query_tokens: bool = False,
         sd_num_query: int = 16,
@@ -290,6 +292,7 @@ class ActorCriticTG(nn.Module):
         self.num_actions = num_actions
         self.noise_std_type = noise_std_type
         self.freeze_encoder = freeze_encoder
+        self.separate_actor_critic_fusion = bool(separate_actor_critic_fusion)
         self.model_input_centering = str(model_input_centering)
         if self.model_input_centering not in {"bbox_center", "object_center"}:
             raise ValueError(
@@ -466,9 +469,21 @@ class ActorCriticTG(nn.Module):
 
         self.fusion_mlp = build_fusion_mlp(fusion_input_dim, fusion_hidden_dims, activation_fn)
         fusion_out_dim = fusion_hidden_dims[-1] if len(fusion_hidden_dims) > 0 else fusion_input_dim
+        self.critic_fusion_mlp = None
+        self.critic_state_cross_all = None
+        self.critic_query_tokens = None
+        self.critic_cross_decoder = None
+        if self.separate_actor_critic_fusion:
+            self.critic_fusion_mlp = copy.deepcopy(self.fusion_mlp)
+            if not self.use_learnable_query_tokens:
+                self.critic_state_cross_all = copy.deepcopy(self.state_cross_all)
+            else:
+                self.critic_query_tokens = nn.Parameter(self.query_tokens.detach().clone())
+                self.critic_cross_decoder = copy.deepcopy(self.cross_decoder)
 
         print(f"[ActorCriticTG] Fusion input dim: {fusion_input_dim}")
         print(f"  - Context dim: {self.context_dim}")
+        print(f"  - Separate actor/critic fusion: {self.separate_actor_critic_fusion}")
 
         # Actor / Critic heads
         self.actor = build_mlp(fusion_out_dim, actor_hidden_dims, activation_fn, num_actions)
@@ -666,21 +681,39 @@ class ActorCriticTG(nn.Module):
     # --------------------------------------------------------------------------
     # Feature extraction
     # --------------------------------------------------------------------------
-    def _features_from_tokens_context(self, all_tokens: torch.Tensor, ctx_vec: torch.Tensor):
+    def _features_from_tokens_context(
+        self,
+        all_tokens: torch.Tensor,
+        ctx_vec: torch.Tensor,
+        *,
+        branch: str = "actor",
+    ):
         """Get fused features from precomputed encoder tokens and context."""
+        critic_branch = branch == "critic" and self.separate_actor_critic_fusion
+        fusion_mlp = self.critic_fusion_mlp if critic_branch else self.fusion_mlp
+        if fusion_mlp is None:
+            raise RuntimeError("critic fusion requested before critic fusion module was initialized")
+
         if not self.use_learnable_query_tokens:
             rel_t = ctx_vec[:, :3]
-            sd_out = self.state_cross_all(all_tokens, rel_t=rel_t, ctx_vec=ctx_vec)
+            state_cross_all = self.critic_state_cross_all if critic_branch else self.state_cross_all
+            if state_cross_all is None:
+                raise RuntimeError("critic cross-attention requested before initialization")
+            sd_out = state_cross_all(all_tokens, rel_t=rel_t, ctx_vec=ctx_vec)
 
             if self.sd_cat_ctx:
                 sd_out = torch.cat([sd_out, ctx_vec], dim=-1)
 
-            return self.fusion_mlp(sd_out)
+            return fusion_mlp(sd_out)
 
         batch = all_tokens.shape[0]
-        query = self.query_tokens.expand(batch, -1, -1)  # (B, num_query_tokens, D)
+        query_tokens = self.critic_query_tokens if critic_branch else self.query_tokens
+        cross_decoder = self.critic_cross_decoder if critic_branch else self.cross_decoder
+        if query_tokens is None or cross_decoder is None:
+            raise RuntimeError("critic learnable-query fusion requested before initialization")
+        query = query_tokens.expand(batch, -1, -1)  # (B, num_query_tokens, D)
 
-        attn_out = self.cross_decoder(
+        attn_out = cross_decoder(
             tgt=query,
             memory=all_tokens,
             memory_key_padding_mask=None,
@@ -693,12 +726,12 @@ class ActorCriticTG(nn.Module):
             else attn_out_flat
         )
 
-        return self.fusion_mlp(fusion_input)
+        return fusion_mlp(fusion_input)
 
-    def _get_features(self, observations: torch.Tensor):
+    def _get_features(self, observations: torch.Tensor, *, branch: str = "actor"):
         """Get fused features using either SD-Cross or learnable query tokens."""
         all_tokens, ctx_vec = self._tokenize(observations)
-        return self._features_from_tokens_context(all_tokens, ctx_vec)
+        return self._features_from_tokens_context(all_tokens, ctx_vec, branch=branch)
 
     # --------------------------------------------------------------------------
     # Actor / Critic helpers
@@ -730,7 +763,7 @@ class ActorCriticTG(nn.Module):
         return self.distribution.log_prob(actions).sum(dim=-1)
 
     def evaluate(self, critic_observations: torch.Tensor, **kwargs):
-        features = self._get_features(critic_observations)
+        features = self._get_features(critic_observations, branch="critic")
         return self.critic(features)
 
     def get_cached_encoder_features(self, observations: torch.Tensor):
@@ -749,7 +782,7 @@ class ActorCriticTG(nn.Module):
         return self.distribution.sample()
 
     def evaluate_from_cached_features(self, all_tokens: torch.Tensor, ctx_vec: torch.Tensor):
-        return self.critic(self._features_from_tokens_context(all_tokens, ctx_vec))
+        return self.critic(self._features_from_tokens_context(all_tokens, ctx_vec, branch="critic"))
 
     def get_actions_log_prob_from_cached_features(self, actions: torch.Tensor):
         return self.distribution.log_prob(actions).sum(dim=-1)

@@ -74,6 +74,7 @@ from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.asset_ass
     OBJECT_ASSIGNMENT_SALT,
     TOOL_ASSIGNMENT_SALT,
     asset_indices_for_rank,
+    sequential_spawn_indices_for_rank,
 )
 
 _RL_RUNTIME_SPEC = load_runtime_spec_from_env()
@@ -270,10 +271,21 @@ TOOL_ASSET_INDICES_BY_ENV: list[int] = asset_indices_for_rank(
     salt=TOOL_ASSIGNMENT_SALT,
 )
 TOOL_USD_PATHS_BY_ENV: list[str] = [TOOL_USD_PATHS[index] for index in TOOL_ASSET_INDICES_BY_ENV]
+TOOL_SPAWN_ASSET_INDICES: list[int] = (
+    TOOL_ASSET_INDICES_BY_ENV
+    if _RANDOMIZE_TOOL_ASSIGNMENT
+    else sequential_spawn_indices_for_rank(_NUM_ENVS_PER_RANK, _GLOBAL_RANK, len(TOOL_DATA))
+)
+TOOL_USD_PATHS_FOR_SPAWN: list[str] = [TOOL_USD_PATHS[index] for index in TOOL_SPAWN_ASSET_INDICES]
 print(
     f"[INFO] Tool assignment rank={_GLOBAL_RANK}/{_WORLD_SIZE} "
     f"local_rank={_LOCAL_RANK} envs={_NUM_ENVS_PER_RANK} "
     f"randomize={_RANDOMIZE_TOOL_ASSIGNMENT}"
+)
+print(
+    f"[INFO] Tool spawn prototypes envs={_NUM_ENVS_PER_RANK} "
+    f"spawn_assets={len(TOOL_USD_PATHS_FOR_SPAWN)} "
+    f"total_assets={len(TOOL_USD_PATHS)}"
 )
 
 # Legacy single-tool aliases (index 0) for backward-compatible imports
@@ -321,10 +333,23 @@ OBJECT_ASSET_INDICES_BY_ENV: list[int] = asset_indices_for_rank(
 OBJECT_ASSET_CFGS_BY_ENV: list[sim_utils.UsdFileCfg] = [
     OBJECT_ASSET_CFGS[index] for index in OBJECT_ASSET_INDICES_BY_ENV
 ]
+OBJECT_SPAWN_ASSET_INDICES: list[int] = (
+    OBJECT_ASSET_INDICES_BY_ENV
+    if _RANDOMIZE_OBJECT_ASSIGNMENT
+    else sequential_spawn_indices_for_rank(_NUM_ENVS_PER_RANK, _GLOBAL_RANK, len(OBJECT_ASSET_CFGS))
+)
+OBJECT_ASSET_CFGS_FOR_SPAWN: list[sim_utils.UsdFileCfg] = [
+    OBJECT_ASSET_CFGS[index] for index in OBJECT_SPAWN_ASSET_INDICES
+]
 print(
     f"[INFO] Object assignment rank={_GLOBAL_RANK}/{_WORLD_SIZE} "
     f"local_rank={_LOCAL_RANK} envs={_NUM_ENVS_PER_RANK} "
     f"randomize={_RANDOMIZE_OBJECT_ASSIGNMENT}"
+)
+print(
+    f"[INFO] Object spawn prototypes envs={_NUM_ENVS_PER_RANK} "
+    f"spawn_assets={len(OBJECT_ASSET_CFGS_FOR_SPAWN)} "
+    f"total_assets={len(OBJECT_ASSET_CFGS)}"
 )
 
 
@@ -431,7 +456,7 @@ class NonPrehensileSceneCfg(InteractiveSceneCfg):
     object = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Object",
         spawn=sim_utils.MultiAssetSpawnerCfg(
-            assets_cfg=OBJECT_ASSET_CFGS_BY_ENV,
+            assets_cfg=OBJECT_ASSET_CFGS_FOR_SPAWN,
             random_choice=False,
             rigid_props=RigidBodyPropertiesCfg(
                 solver_position_iteration_count=16,
@@ -445,7 +470,7 @@ class NonPrehensileSceneCfg(InteractiveSceneCfg):
     )
 
     # Multi-tool robot: each env gets a different tool USD via MultiUsdFileCfg
-    robot = build_multi_tool_robot_cfg(TOOL_USD_PATHS_BY_ENV, random_choice=False).replace(
+    robot = build_multi_tool_robot_cfg(TOOL_USD_PATHS_FOR_SPAWN, random_choice=False).replace(
         prim_path="{ENV_REGEX_NS}/Robot",
         init_state=ArticulationCfg.InitialStateCfg(
             joint_pos=custom_joint_init
@@ -678,6 +703,7 @@ class RewardsCfg:
             "std": _RL_CONTRACT.reward.object_goal_std,
             "command_name": "target_object_pose",
             "obj_ee_distance_threshold": _RL_CONTRACT.reward.contact_std,
+            "rotation_distance_divisor": getattr(_RL_CONTRACT.reward, "rotation_distance_divisor", 5.0),
             "ee_frame_cfg": SceneEntityCfg("ee_frame"),
             "object_cfg": SceneEntityCfg("object"),
         },
@@ -690,6 +716,7 @@ class RewardsCfg:
             "std": _RL_CONTRACT.reward.object_goal_fine_std,
             "command_name": "target_object_pose",
             "obj_ee_distance_threshold": _RL_CONTRACT.reward.contact_std,
+            "rotation_distance_divisor": getattr(_RL_CONTRACT.reward, "rotation_distance_divisor", 5.0),
             "ee_frame_cfg": SceneEntityCfg("ee_frame"),
             "object_cfg": SceneEntityCfg("object"),
         },

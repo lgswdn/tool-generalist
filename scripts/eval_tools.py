@@ -17,11 +17,23 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import asdict
+from pathlib import Path
 
 import yaml
 from isaaclab.app import AppLauncher
 
+from scripts.train import build_rl_runtime_spec
+from utils.artifacts.manifest import manifest_is_complete
+from utils.artifacts.resolver import resolve_artifacts
+from utils.config.loader import load_exp_cfg
+from utils.config.paths import load_project_paths
+from utils.experiment.effective_paths import apply_experiment_path_overrides
 from utils.experiment.rl_runtime_spec import RUNTIME_SPEC_ENV_VAR, validate_runtime_spec
+from utils.experiment.runner import (
+    _resolve_initial_encoder_checkpoint,
+    _resolve_stage_encoder_checkpoint_from_manifest,
+)
 
 
 FFMPEG_PATH = "/usr/bin/ffmpeg"
@@ -94,15 +106,75 @@ def _backfill_runtime_spec_defaults(spec: dict) -> None:
     policy.setdefault("reuse_pretrain_pose_cross_attn", False)
 
 
+def _load_runtime_spec_from_file(path: str) -> dict:
+    runtime_spec_path = os.path.abspath(os.path.normpath(path))
+    with open(runtime_spec_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _build_runtime_spec_from_config(config: str) -> dict:
+    cfg = load_exp_cfg(config)
+    paths = apply_experiment_path_overrides(cfg, load_project_paths(cfg.paths_yaml))
+    resolved_encoder_checkpoint = _resolve_encoder_checkpoint_for_eval(cfg, config)
+    config_name = _safe_config_name(config)
+    artifact_dir = Path(tempfile.gettempdir()) / "tool_generalist_eval_tools" / "from_config" / config_name
+    spec = build_rl_runtime_spec(
+        cfg,
+        paths,
+        artifact_dir,
+        mode="eval",
+        encoder_checkpoint_override=resolved_encoder_checkpoint,
+    )
+    payload = asdict(spec)
+    payload["source_config"] = str(config)
+    return payload
+
+
+def _resolve_encoder_checkpoint_for_eval(cfg, config: str) -> str | None:
+    resolved = _resolve_initial_encoder_checkpoint(
+        cfg,
+        config_source=config,
+    )
+    if resolved:
+        return resolved
+
+    for ref in resolve_artifacts(cfg).stages:
+        if ref.stage != "pretrain":
+            continue
+        if manifest_is_complete(ref.manifest_path):
+            resolved = _resolve_stage_encoder_checkpoint_from_manifest(None, ref)
+            if resolved:
+                return resolved
+        best_checkpoint = ref.directory / "best.pt"
+        if best_checkpoint.exists():
+            return str(best_checkpoint)
+    return None
+
+
+def _safe_config_name(config: str) -> str:
+    path = Path(config)
+    if path.suffix == ".py":
+        value = path.stem
+    else:
+        value = str(config)
+    value = re.sub(r"[^A-Za-z0-9_.-]+", "_", value)
+    return value.strip("_") or "config"
+
+
 parser = argparse.ArgumentParser(description="Evaluate all tools in tools_selected.json with an RSL-RL checkpoint.")
-parser.add_argument(
+source_group = parser.add_mutually_exclusive_group(required=True)
+source_group.add_argument(
     "--runtime_spec",
     type=str,
-    required=True,
     help="Path to the rl_runtime_spec.json written with the checkpoint.",
 )
+source_group.add_argument(
+    "--config",
+    type=str,
+    help="Experiment config path/module exposing EXP_CFG. A temporary eval runtime spec is generated from it.",
+)
 parser.add_argument("--checkpoint", type=str, required=True, help="Path to the RSL-RL checkpoint to evaluate.")
-parser.add_argument("--task", type=str, default=None, help="Name of the task. Defaults to runtime_spec['task_id'].")
+parser.add_argument("--task", type=str, default=None, help="Name of the task. Defaults to the runtime spec task_id.")
 parser.add_argument("--num_envs", type=int, default=512, help="Number of environments to simulate per rank.")
 parser.add_argument("--num_episodes", type=int, default=10, help="Number of episodes to evaluate per tool.")
 parser.add_argument("--max_episode_steps", type=int, default=300, help="Safety cap on episode length (steps).")
@@ -125,9 +197,10 @@ parser.add_argument("--distributed", action="store_true", default=False, help="R
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 
-runtime_spec_path = os.path.abspath(os.path.normpath(args_cli.runtime_spec))
-with open(runtime_spec_path, "r", encoding="utf-8") as f:
-    runtime_spec = json.load(f)
+if args_cli.runtime_spec:
+    runtime_spec = _load_runtime_spec_from_file(args_cli.runtime_spec)
+else:
+    runtime_spec = _build_runtime_spec_from_config(args_cli.config)
 
 if args_cli.task is None:
     args_cli.task = runtime_spec.get("task_id")

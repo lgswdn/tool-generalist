@@ -132,6 +132,7 @@ def _build_policy_params(exp_cfg: ExpCfg, checkpoint: str | None) -> dict[str, A
         "encoder_checkpoint_adapter": pretrained.adapter,
         "freeze_encoder": rl.freeze_encoder,
         "freeze_point2vec": rl.freeze_encoder,
+        "separate_actor_critic_fusion": rl.separate_actor_critic_fusion,
         "sd_num_query": model.policy_fusion.sd_num_query,
         "sd_emb_dim": model.policy_fusion.query_dim,
         "relative_translation_query_tokens": model.policy_fusion.relative_translation_query_tokens,

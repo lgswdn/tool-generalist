@@ -9,7 +9,7 @@ EXP_CFG.general.name = "multitools_diff"
 EXP_CFG.paths_yaml = "paths_new.yaml"
 EXP_CFG.model.name = "multitool_diff_only"
 
-EXP_CFG.num_gpus = 8
+EXP_CFG.num_gpus = 4
 
 EXP_CFG.contact_gen.name = "contact_gen_multitool_new"
 EXP_CFG.contact_gen.enabled = True

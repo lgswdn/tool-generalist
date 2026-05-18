@@ -172,6 +172,7 @@ class RewardCfg:
     object_goal_std: float = 0.5
     object_goal_fine_std: float = 0.3
     contact_std: float = 0.15
+    rotation_distance_divisor: float = 5.0
 
 
 @dataclass
@@ -405,6 +406,7 @@ class RLCfg:
     launch: RLLaunchCfg = field(default_factory=RLLaunchCfg)
     encoder_checkpoint: Optional[str] = None
     freeze_encoder: bool = True
+    separate_actor_critic_fusion: bool = False
     domain_randomization: DomainRandomizationCfg = field(
         default_factory=DomainRandomizationCfg
     )

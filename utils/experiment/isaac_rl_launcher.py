@@ -8,9 +8,12 @@ environment variable has been set.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -140,6 +143,7 @@ def _run_rsl_rl_training(spec: Mapping[str, Any], app_launcher: Any) -> None:
     from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
     from rsl_rl.runners import OnPolicyRunner
     _log("after importing gymnasium/torch/IsaacLab/RSL-RL modules")
+    _install_isaac_startup_tracing()
 
     _set_asset_assignment_rank_env(spec, app_launcher)
 
@@ -198,7 +202,10 @@ def _run_rsl_rl_training(spec: Mapping[str, Any], app_launcher: Any) -> None:
             f"task={task_id} env_device={getattr(env_cfg.sim, 'device', None)} "
             f"agent_device={agent_cfg.device} num_envs={env_cfg.scene.num_envs}"
         )
-        env = gym.make(task_id, cfg=env_cfg, render_mode=None)
+        _summarize_env_cfg_startup(env_cfg)
+        _wrap_scene_spawn_functions(env_cfg.scene)
+        with _trace_block("gym.make"):
+            env = gym.make(task_id, cfg=env_cfg, render_mode=None)
         _log("after gym.make")
         if isinstance(env.unwrapped, DirectMARLEnv):
             _log("before multi_agent_to_single_agent")
@@ -246,6 +253,171 @@ def _run_rsl_rl_training(spec: Mapping[str, Any], app_launcher: Any) -> None:
 
 def _log(message: str) -> None:
     print(f"[rl_launcher] {message}", flush=True)
+
+
+def _trace_enabled() -> bool:
+    value = os.environ.get("TOOL_GENERALIST_TRACE_ISAAC_STARTUP", "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+@contextlib.contextmanager
+def _trace_block(label: str):
+    if not _trace_enabled():
+        yield
+        return
+
+    start = time.perf_counter()
+    stop_event = threading.Event()
+
+    def _heartbeat() -> None:
+        while not stop_event.wait(30.0):
+            elapsed = time.perf_counter() - start
+            _log(f"startup-trace still running {label} elapsed={elapsed:.1f}s")
+
+    heartbeat = threading.Thread(target=_heartbeat, name=f"tg-startup-trace:{label}", daemon=True)
+    _log(f"startup-trace start {label}")
+    heartbeat.start()
+    try:
+        yield
+    finally:
+        stop_event.set()
+        elapsed = time.perf_counter() - start
+        _log(f"startup-trace done {label} elapsed={elapsed:.1f}s")
+
+
+def _install_isaac_startup_tracing() -> None:
+    """Install lightweight timers around Isaac Lab startup internals."""
+
+    if not _trace_enabled() or getattr(_install_isaac_startup_tracing, "_installed", False):
+        return
+    try:
+        from isaaclab.assets.asset_base import AssetBase
+        from isaaclab.managers import EventManager
+        from isaaclab.scene import InteractiveScene
+        from isaaclab.sim import SimulationContext
+    except Exception as exc:  # pragma: no cover - depends on Isaac runtime imports.
+        _log(f"startup-trace unavailable type={type(exc).__name__} error={exc!r}")
+        return
+
+    _wrap_method(
+        InteractiveScene,
+        "_add_entities_from_cfg",
+        lambda self, _args, _kwargs: (
+            "InteractiveScene._add_entities_from_cfg "
+            f"num_envs={getattr(getattr(self, 'cfg', None), 'num_envs', '?')} "
+            f"replicate_physics={getattr(getattr(self, 'cfg', None), 'replicate_physics', '?')}"
+        ),
+    )
+    _wrap_method(
+        InteractiveScene,
+        "clone_environments",
+        lambda self, _args, _kwargs: (
+            "InteractiveScene.clone_environments "
+            f"num_envs={getattr(getattr(self, 'cfg', None), 'num_envs', '?')} "
+            f"replicate_physics={getattr(getattr(self, 'cfg', None), 'replicate_physics', '?')}"
+        ),
+    )
+    _wrap_method(
+        InteractiveScene,
+        "filter_collisions",
+        lambda self, _args, _kwargs: (
+            "InteractiveScene.filter_collisions "
+            f"num_envs={getattr(getattr(self, 'cfg', None), 'num_envs', '?')}"
+        ),
+    )
+    _wrap_method(
+        EventManager,
+        "__init__",
+        lambda _self, _args, _kwargs: "EventManager.__init__",
+    )
+    _wrap_method(
+        EventManager,
+        "apply",
+        lambda _self, args, kwargs: (
+            "EventManager.apply "
+            f"mode={kwargs.get('mode', args[0] if args else '?')}"
+        ),
+    )
+    _wrap_method(
+        SimulationContext,
+        "reset",
+        lambda self, _args, _kwargs: (
+            "SimulationContext.reset "
+            f"device={getattr(self, 'device', '?')}"
+        ),
+    )
+    _wrap_method(
+        AssetBase,
+        "_initialize_callback",
+        lambda self, _args, _kwargs: (
+            f"{type(self).__name__}._initialize_callback "
+            f"prim_path={getattr(getattr(self, 'cfg', None), 'prim_path', '?')}"
+        ),
+    )
+    setattr(_install_isaac_startup_tracing, "_installed", True)
+    _log("startup-trace installed")
+
+
+def _wrap_method(cls: type, method_name: str, label_fn: Any) -> None:
+    original = getattr(cls, method_name, None)
+    if original is None or getattr(original, "_tool_generalist_trace_wrapped", False):
+        return
+
+    def _wrapped(self, *args, **kwargs):
+        with _trace_block(str(label_fn(self, args, kwargs))):
+            return original(self, *args, **kwargs)
+
+    setattr(_wrapped, "_tool_generalist_trace_wrapped", True)
+    setattr(cls, method_name, _wrapped)
+
+
+def _summarize_env_cfg_startup(env_cfg: Any) -> None:
+    scene = getattr(env_cfg, "scene", None)
+    if scene is None:
+        return
+    _log(
+        "startup-trace env_cfg "
+        f"num_envs={getattr(scene, 'num_envs', None)} "
+        f"replicate_physics={getattr(scene, 'replicate_physics', None)} "
+        f"filter_collisions={getattr(scene, 'filter_collisions', None)} "
+        f"clone_in_fabric={getattr(scene, 'clone_in_fabric', None)}"
+    )
+    for asset_name, asset_cfg in getattr(scene, "__dict__", {}).items():
+        spawn = getattr(asset_cfg, "spawn", None)
+        if spawn is not None:
+            _log(f"startup-trace scene_asset name={asset_name} {_spawn_cfg_summary(spawn)}")
+
+
+def _wrap_scene_spawn_functions(scene_cfg: Any) -> None:
+    if not _trace_enabled():
+        return
+    for asset_name, asset_cfg in getattr(scene_cfg, "__dict__", {}).items():
+        spawn = getattr(asset_cfg, "spawn", None)
+        func = getattr(spawn, "func", None)
+        if func is None or getattr(func, "_tool_generalist_trace_wrapped", False):
+            continue
+
+        def _wrapped_spawn(prim_path, cfg, *args, _asset_name=asset_name, _func=func, **kwargs):
+            label = f"spawn scene.{_asset_name} prim_path={prim_path} {_spawn_cfg_summary(cfg)}"
+            with _trace_block(label):
+                return _func(prim_path, cfg, *args, **kwargs)
+
+        setattr(_wrapped_spawn, "_tool_generalist_trace_wrapped", True)
+        spawn.func = _wrapped_spawn
+
+
+def _spawn_cfg_summary(spawn_cfg: Any) -> str:
+    assets_cfg = getattr(spawn_cfg, "assets_cfg", None)
+    if assets_cfg is not None:
+        usd_paths = [str(getattr(asset_cfg, "usd_path", "")) for asset_cfg in assets_cfg]
+        unique_usd = len(set(usd_paths)) if usd_paths else 0
+        return f"type={type(spawn_cfg).__name__} assets={len(assets_cfg)} unique_usd={unique_usd}"
+    usd_path = getattr(spawn_cfg, "usd_path", None)
+    if isinstance(usd_path, (list, tuple)):
+        return f"type={type(spawn_cfg).__name__} usd_paths={len(usd_path)} unique_usd={len(set(map(str, usd_path)))}"
+    if usd_path is not None:
+        return f"type={type(spawn_cfg).__name__} usd_path={usd_path}"
+    return f"type={type(spawn_cfg).__name__}"
 
 
 def _ensure_gym_task_registered(gym_module: Any, task_id: str) -> None:

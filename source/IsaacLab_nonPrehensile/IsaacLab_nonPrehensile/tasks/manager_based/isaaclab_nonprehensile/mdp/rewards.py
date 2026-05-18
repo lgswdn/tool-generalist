@@ -43,6 +43,7 @@ def object_goal_distance_tanh(
     std: float,
     command_name: str,
     obj_ee_distance_threshold: float = 0.05,
+    rotation_distance_divisor: float = 5.0,
     ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
 ) -> torch.Tensor:
@@ -71,7 +72,7 @@ def object_goal_distance_tanh(
     dot_product = torch.clamp(torch.abs(dot_product), max=1.0)
     ang_distance = 2 * torch.acos(dot_product)
     ang_distance = torch.clamp(ang_distance, max=torch.pi)
-    pos_distance += ang_distance / 5
+    pos_distance += ang_distance / rotation_distance_divisor
 
     return obj_ee_dist_cond * (1 - torch.tanh(pos_distance / std))
 
