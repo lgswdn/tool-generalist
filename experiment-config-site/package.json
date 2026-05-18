@@ -1,0 +1,13 @@
+{
+  "name": "experiment-config-site",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local website for browsing experiment configs.",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

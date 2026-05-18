@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>实验配置浏览器</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">configs/experiments</p>
+        <h1>实验配置浏览器</h1>
+      </div>
+      <div class="toolbar">
+        <input id="searchInput" type="search" placeholder="搜索实验、模型、run name" />
+        <select id="stageFilter" aria-label="按过程过滤">
+          <option value="all">全部过程</option>
+          <option value="contact_gen">接触数据生成</option>
+          <option value="pretrain">预训练</option>
+          <option value="rl">强化学习</option>
+        </select>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="list-pane" aria-label="实验列表">
+        <div class="list-meta">
+          <span id="countLabel">加载中</span>
+          <button id="refreshButton" class="ghost-button" type="button">刷新</button>
+        </div>
+        <div id="cards" class="cards"></div>
+      </section>
+
+      <section id="detailPane" class="detail-pane" aria-live="polite">
+        <div class="empty-state">
+          <h2>选择一个实验</h2>
+          <p>点击左侧卡片查看完整配置、过程顺序和每个步骤的关键参数。</p>
+        </div>
+      </section>
+    </main>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
