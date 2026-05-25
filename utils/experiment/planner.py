@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from configs.config_exp import ExpCfg
+from configs.config_contact_gen import strip_contact_gen_hash_defaults
 from utils.artifacts import (
     ArtifactManifest,
     artifact_dir,
@@ -174,6 +175,8 @@ def _format_stage(stage: StagePlan) -> str:
 def _exp_hash_payload(cfg: ExpCfg) -> dict[str, Any]:
     payload = to_plain_data(cfg)
     payload.pop("pretrain_reuse", None)
+    if isinstance(payload.get("contact_gen"), dict):
+        payload["contact_gen"] = strip_contact_gen_hash_defaults(payload["contact_gen"])
     return payload
 
 

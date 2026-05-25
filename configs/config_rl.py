@@ -173,6 +173,12 @@ class RewardCfg:
     object_goal_fine_std: float = 0.3
     contact_std: float = 0.15
     rotation_distance_divisor: float = 5.0
+    stable_success_linear_velocity_threshold: float = 0.03
+    stable_success_angular_velocity_threshold: float = 0.15
+    stable_success_dwell_steps: int = 3
+    object_stillness_at_goal_term_weight: float = 2.0
+    object_stillness_linear_velocity_std: float = 0.03
+    object_stillness_angular_velocity_std: float = 0.15
 
 
 @dataclass
@@ -231,6 +237,15 @@ class ObjectPoseSamplingCfg:
 
 
 @dataclass
+class RLCurriculumCfg:
+    enabled: bool = False
+    start_step: int = 0
+    end_step: int = 100000
+    start_stable_pose_probability: float = 1.0
+    end_stable_pose_probability: float = 0.0
+
+
+@dataclass
 class PPOCfg:
     algorithm: str = "PPO"
     class_name: str = "PPO"
@@ -279,6 +294,7 @@ class ObservationCfg:
     robot_state_dim: int = 14
     previous_action_dim: Optional[int] = None
     relative_goal_dim: int = 9
+    object_velocity_dim: int = 0
     bbox_center_dim: int = 6
     include_object_cloud: bool = True
     include_tool_cloud: bool = True
@@ -311,27 +327,47 @@ class ObservationCfg:
 
     @property
     def cloud_dim(self) -> int:
-        cloud_count = int(self.include_object_cloud) + int(self.include_tool_cloud)
+        cloud_names = {
+            "object_cloud_flat": self.include_object_cloud,
+            "tool_cloud_flat": self.include_tool_cloud,
+            "tool1_cloud_flat": self.include_tool_cloud,
+            "tool2_cloud_flat": self.include_tool_cloud,
+        }
+        cloud_count = sum(1 for name, enabled in cloud_names.items() if enabled and name in self.layout)
         return cloud_count * self.num_points * self.point_dim
 
     def resolved_previous_action_dim(self, action_dim: int) -> int:
         return self.previous_action_dim if self.previous_action_dim is not None else action_dim
 
     def resolved_observation_dim(self, action_dim: int, physics_dim: int) -> int:
-        bbox_center_dim = self.bbox_center_dim if self.include_bbox_centers else 0
-        return (
-            self.cloud_dim
-            + bbox_center_dim
-            + self.hand_state_dim
-            + self.robot_state_dim
-            + self.resolved_previous_action_dim(action_dim)
-            + self.relative_goal_dim
-            + physics_dim
-        )
+        dims = {
+            "object_cloud_flat": self.num_points * self.point_dim if self.include_object_cloud else 0,
+            "tool_cloud_flat": self.num_points * self.point_dim if self.include_tool_cloud else 0,
+            "tool1_cloud_flat": self.num_points * self.point_dim if self.include_tool_cloud else 0,
+            "tool2_cloud_flat": self.num_points * self.point_dim if self.include_tool_cloud else 0,
+            "object_bbox_center": 3 if self.include_bbox_centers else 0,
+            "tool_bbox_center": 3 if self.include_bbox_centers else 0,
+            "tool1_bbox_center": 3 if self.include_bbox_centers else 0,
+            "tool2_bbox_center": 3 if self.include_bbox_centers else 0,
+            "hand_state": self.hand_state_dim,
+            "hand1_state": self.hand_state_dim // 2,
+            "hand2_state": self.hand_state_dim // 2,
+            "robot_state": self.robot_state_dim,
+            "robot1_state": self.robot_state_dim // 2,
+            "robot2_state": self.robot_state_dim // 2,
+            "previous_action": self.resolved_previous_action_dim(action_dim),
+            "relative_goal_pose": self.relative_goal_dim,
+            "object_velocity": self.object_velocity_dim,
+            "physics": physics_dim,
+        }
+        return sum(dims.get(name, 0) for name in self.layout)
 
 
 @dataclass
 class RLEnvCfg:
+    robot_mode: str = "tool"
+    """Robot embodiment for Isaac RL. Use ``bare_franka`` for legacy ICP RL."""
+
     # Per-GPU/per-rank environment count.  In distributed multi-GPU RL,
     # total envs = ExpCfg.num_gpus * RLCfg.env.num_envs.
     num_envs: int = 1024
@@ -413,6 +449,7 @@ class RLCfg:
     reward: RewardCfg = field(default_factory=RewardCfg)
     table: TableCfg = field(default_factory=TableCfg)
     object_pose_sampling: ObjectPoseSamplingCfg = field(default_factory=ObjectPoseSamplingCfg)
+    curriculum: RLCurriculumCfg = field(default_factory=RLCurriculumCfg)
 
     @property
     def effective_action_dim(self) -> int:
@@ -474,16 +511,17 @@ class RLCfg:
                         "object_restitution",
                     )
                 )
-            if dr.tool.mass.enabled:
-                fields.append("tool_mass")
-            if dr.tool.material.enabled:
-                fields.extend(
-                    (
-                        "tool_static_friction",
-                        "tool_dynamic_friction",
-                        "tool_restitution",
+            if self.env.robot_mode != "bare_franka":
+                if dr.tool.mass.enabled:
+                    fields.append("tool_mass")
+                if dr.tool.material.enabled:
+                    fields.extend(
+                        (
+                            "tool_static_friction",
+                            "tool_dynamic_friction",
+                            "tool_restitution",
+                        )
                     )
-                )
             if dr.ground.material.enabled and not self.table.enabled:
                 fields.extend(
                     (

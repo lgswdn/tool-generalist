@@ -1064,7 +1064,7 @@ def test_contact_generation_default_caps_to_one_worker(tmp_path, monkeypatch):
     monkeypatch.setattr(batch_generate, "read_json", lambda path: objects)
     monkeypatch.setattr(batch_generate, "load_selected_tool_ids", lambda path: tools)
     monkeypatch.setattr(batch_generate, "build_pairs", lambda *args, **kwargs: pairs)
-    monkeypatch.setattr(batch_generate, "visible_cuda_device_indices", lambda: [0, 1, 2, 3])
+    monkeypatch.setattr(batch_generate, "visible_cuda_device_indices", lambda **kwargs: [0, 1, 2, 3])
     def fake_pool(worker_args, *, worker_fn):
         calls.append((worker_args, worker_fn))
         return (len(worker_args[0][1]), 0, 0)
@@ -1084,6 +1084,195 @@ def test_contact_generation_default_caps_to_one_worker(tmp_path, monkeypatch):
     assert calls[2][0][0][0] == "postcontact"
     assert calls[0][0][0][5] == 0
     assert len(calls[0][0][0][1]) == 3
+
+
+def test_contact_generation_skips_worker_pools_when_final_outputs_exist(tmp_path, monkeypatch):
+    from contact_generation import batch_generate
+
+    cfg = _stage_test_cfg(tmp_path, contact_enabled=True, pretrain_enabled=False)
+    cfg.num_gpus = 4
+    cfg.contact_gen.num_pairs = 2
+    cfg.contact_gen.num_object_poses = 2
+    objects = ["object_a", "object_b"]
+    tools = ["tool_a"]
+    pairs = [
+        ("tool.obj", "object_a.obj", "tool_a", "object_a", None),
+        ("tool.obj", "object_b.obj", "tool_a", "object_b", None),
+    ]
+    out_dir = tmp_path / "artifacts" / "contact"
+    for _tool_path, _obj_path, tool_name, object_name, _asset in pairs:
+        for pose_idx in range(cfg.contact_gen.num_object_poses):
+            output = batch_generate.output_path(
+                out_dir,
+                tool_name,
+                object_name,
+                pose_idx,
+                cfg.contact_gen.num_object_poses,
+            )
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text("existing\n", encoding="utf-8")
+
+    monkeypatch.setattr(batch_generate, "read_json", lambda path: objects)
+    monkeypatch.setattr(batch_generate, "load_selected_tool_ids", lambda path: tools)
+    monkeypatch.setattr(batch_generate, "build_pairs", lambda *args, **kwargs: pairs)
+    captured_workers = []
+    original_count = batch_generate.count_existing_final_outputs
+    def count_wrapper(*args, max_workers=1, **kwargs):
+        captured_workers.append(max_workers)
+        return original_count(*args, max_workers=max_workers, **kwargs)
+
+    monkeypatch.setattr(batch_generate, "count_existing_final_outputs", count_wrapper)
+    monkeypatch.setattr(
+        batch_generate,
+        "_run_worker_pool",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("worker pool should not start when every final output exists")
+        ),
+    )
+
+    result = batch_generate.run_contact_generation(
+        cfg,
+        load_project_paths(cfg.paths_yaml),
+        out_dir,
+    )
+
+    assert result.ok == 0
+    assert result.fail == 0
+    assert result.skipped == 4
+    assert result.num_pairs == 2
+    assert result.num_poses == 2
+    assert captured_workers == [4]
+
+
+def test_existing_output_check_workers_env_override(tmp_path, monkeypatch):
+    from contact_generation import batch_generate
+
+    cfg = _stage_test_cfg(tmp_path, contact_enabled=True, pretrain_enabled=False)
+    cfg.num_gpus = 8
+    monkeypatch.setenv("CONTACT_EXISTING_OUTPUT_CHECK_WORKERS", "3")
+
+    assert batch_generate.existing_output_check_workers(cfg) == 3
+
+
+def test_worker_pool_terminates_after_stall_with_partial_results(monkeypatch):
+    from contact_generation import batch_generate
+
+    class FakeAsyncResult:
+        def __init__(self, ready, value):
+            self._ready = ready
+            self._value = value
+
+        def ready(self):
+            return self._ready
+
+        def get(self):
+            return self._value
+
+    class FakePool:
+        def __init__(self, _size):
+            self.results = [
+                FakeAsyncResult(True, (2, 1, 3)),
+                FakeAsyncResult(False, (0, 0, 0)),
+            ]
+            self.index = 0
+            self._pool = []
+            pools.append(self)
+
+        def apply_async(self, _worker_fn, _args):
+            result = self.results[self.index]
+            self.index += 1
+            return result
+
+    pools = []
+    hard_terminations = []
+    worker_args = [
+        ("postcontact", [("tool.obj", "object.obj", "tool_a", "object_a", None)], None, None, None, 0, None, True, 1),
+        ("postcontact", [("tool.obj", "object.obj", "tool_b", "object_b", None)] * 4, None, None, None, 1, None, True, 2),
+    ]
+    times = iter([0.0, 0.0, 31.0])
+    monkeypatch.setenv("CONTACT_WORKER_STALL_TIMEOUT_SECONDS", "30")
+    monkeypatch.setattr(batch_generate.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(
+        batch_generate.mp,
+        "get_context",
+        lambda _name: SimpleNamespace(Pool=FakePool),
+    )
+    monkeypatch.setattr(
+        batch_generate,
+        "_hard_terminate_worker_pool",
+        lambda _pool, *, reason: hard_terminations.append(reason),
+    )
+
+    result = batch_generate._run_worker_pool(worker_args, worker_fn=lambda *args: None)
+
+    assert result == (2, 9, 3)
+    assert pools
+    assert hard_terminations == ["stalled"]
+
+
+def test_phase_worker_does_not_start_physics_runner_for_all_final_skips(tmp_path, monkeypatch):
+    from contact_generation import batch_generate
+
+    contact_cfg = ContactGenCfg()
+    output = batch_generate.output_path(tmp_path, "tool_a", "object_a", 0, 1)
+    output.parent.mkdir(parents=True)
+    output.write_text("existing\n", encoding="utf-8")
+    monkeypatch.setattr(
+        batch_generate,
+        "_load_physics_runner",
+        lambda name: (_ for _ in ()).throw(
+            AssertionError("physics runner should not start for all-skip stabilize phase")
+        ),
+    )
+
+    result = batch_generate.phase_worker(
+        "stabilize",
+        [("tool.obj", "object.obj", "tool_a", "object_a", None)],
+        tmp_path,
+        tmp_path / "tools_adjusted.json",
+        (0.1, 0.1, 0.1),
+        0,
+        contact_cfg,
+        True,
+        1,
+        physics_options={},
+        seed=1,
+    )
+
+    assert result == (0, 0, 1)
+
+
+def test_phase_worker_does_not_block_on_physics_close_by_default(tmp_path, monkeypatch):
+    from contact_generation import batch_generate
+
+    class FakeRunner:
+        def close(self):
+            raise AssertionError("phase worker should leave runner for pool termination")
+
+    contact_cfg = ContactGenCfg()
+    pt = batch_generate.output_path(tmp_path, "tool_a", "object_a", 0, 1)
+    candidate = batch_generate.candidate_artifact_path(pt)
+    candidate.parent.mkdir(parents=True)
+    candidate.write_text("candidate\n", encoding="utf-8")
+
+    monkeypatch.setattr(batch_generate, "_load_physics_runner", lambda name: FakeRunner())
+    monkeypatch.setattr(batch_generate, "run_pair", lambda *args, **kwargs: True)
+
+    result = batch_generate.phase_worker(
+        "stabilize",
+        [("tool.obj", "object.obj", "tool_a", "object_a", None)],
+        tmp_path,
+        tmp_path / "tools_adjusted.json",
+        (0.1, 0.1, 0.1),
+        0,
+        contact_cfg,
+        True,
+        1,
+        physics_options={},
+        seed=1,
+    )
+
+    assert result == (1, 0, 0)
 
 
 def test_contact_worker_closes_runner_on_keyboard_interrupt(tmp_path, monkeypatch):

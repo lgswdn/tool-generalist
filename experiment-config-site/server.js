@@ -9,17 +9,18 @@ const SITE_ROOT = __dirname;
 const REPO_ROOT = path.resolve(SITE_ROOT, "..");
 const PUBLIC_ROOT = path.join(SITE_ROOT, "public");
 const READER = path.join(SITE_ROOT, "src", "read_experiments.py");
+const CONTACT_VIZ_ROOT = path.join(REPO_ROOT, "tool_contact_viz");
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".js": "application/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
+  ".png": "image/png",
   ".svg": "image/svg+xml",
 };
 
 let cache = null;
-const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 5000);
 
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload, null, 2);
@@ -48,9 +49,9 @@ function getConfigMtime() {
   }
 }
 
-function loadExperiments() {
+function loadExperiments({ force = false } = {}) {
   const mtime = getConfigMtime();
-  if (cache && cache.mtime === mtime && Date.now() - cache.loadedAt < CACHE_TTL_MS) {
+  if (!force && cache && cache.mtime === mtime) {
     return cache.payload;
   }
 
@@ -79,6 +80,71 @@ function getExperimentIdFromPath(pathname) {
     return null;
   }
   return decodeURIComponent(pathname.slice(prefix.length));
+}
+
+function displayNameFromSlug(slug) {
+  return slug
+    .split("_")
+    .filter(Boolean)
+    .map((part) => (part.length === 1 ? part.toUpperCase() : part[0].toUpperCase() + part.slice(1)))
+    .join(" ");
+}
+
+function loadContactVizGroups() {
+  const files = fs
+    .readdirSync(CONTACT_VIZ_ROOT)
+    .filter((name) => name.endsWith(".png"))
+    .sort();
+  const groups = new Map();
+
+  for (const file of files) {
+    const match = file.match(/^(\d{3})_(.+)_end_effector_(pre|post)\.png$/);
+    if (!match) {
+      continue;
+    }
+    const [, indexText, slug, kind] = match;
+    const id = `${indexText}_${slug}`;
+    const group =
+      groups.get(id) ||
+      {
+        id,
+        index: Number(indexText),
+        slug,
+        label: `${indexText} ${displayNameFromSlug(slug)}`,
+      };
+    group[kind] = {
+      file,
+      url: `/tool-contact-viz/${encodeURIComponent(file)}`,
+    };
+    groups.set(id, group);
+  }
+
+  return Array.from(groups.values())
+    .filter((group) => group.pre && group.post)
+    .sort((a, b) => a.index - b.index);
+}
+
+function serveContactVizImage(res, pathname) {
+  const prefix = "/tool-contact-viz/";
+  const filename = decodeURIComponent(pathname.slice(prefix.length));
+  const absolute = path.join(CONTACT_VIZ_ROOT, filename);
+
+  if (!absolute.startsWith(CONTACT_VIZ_ROOT) || path.basename(filename) !== filename) {
+    sendText(res, 403, "Forbidden");
+    return;
+  }
+
+  fs.readFile(absolute, (error, content) => {
+    if (error) {
+      sendText(res, 404, "Not found");
+      return;
+    }
+    res.writeHead(200, {
+      "content-type": MIME_TYPES[path.extname(absolute)] || "application/octet-stream",
+      "cache-control": "public, max-age=3600",
+    });
+    res.end(content);
+  });
 }
 
 function serveStatic(res, pathname) {
@@ -121,17 +187,31 @@ const server = http.createServer((req, res) => {
     }
 
     if (pathname === "/api/experiments") {
-      const payload = loadExperiments();
+      const payload = loadExperiments({ force: url.searchParams.get("refresh") === "1" });
       sendJson(res, 200, {
         generatedAt: payload.generatedAt,
         count: payload.experiments.length,
         experiments: payload.experiments.map(
-          ({ fullConfig, sourceText, stages, assignments, artifacts, ...summary }) => summary,
+          ({ fullConfig, sourceText, assignments, artifacts, ...summary }) => summary,
         ),
         artifactRoot: payload.artifactRoot,
         artifactCount: payload.artifactCount,
         errors: payload.errors,
       });
+      return;
+    }
+
+    if (pathname === "/api/contact-viz") {
+      const groups = loadContactVizGroups();
+      sendJson(res, 200, {
+        count: groups.length,
+        groups,
+      });
+      return;
+    }
+
+    if (pathname.startsWith("/tool-contact-viz/")) {
+      serveContactVizImage(res, pathname);
       return;
     }
 

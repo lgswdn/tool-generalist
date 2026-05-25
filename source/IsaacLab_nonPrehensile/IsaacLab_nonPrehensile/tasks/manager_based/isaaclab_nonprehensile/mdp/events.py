@@ -340,7 +340,7 @@ def randomize_tool_mass(
     """
     robot = env.scene[robot_cfg.name]
     # Resolve tool body index
-    tool_body_cfg = SceneEntityCfg("robot", body_names=["link_coacd_convex_piece_0"])
+    tool_body_cfg = SceneEntityCfg(robot_cfg.name, body_names=["link_coacd_convex_piece_0"])
     tool_body_cfg.resolve(env.scene)
     tool_idx = tool_body_cfg.body_ids[0]
 
@@ -379,7 +379,7 @@ def randomize_tool_friction(
     """
     robot = env.scene[robot_cfg.name]
     # Resolve tool body index
-    tool_body_cfg = SceneEntityCfg("robot", body_names=["link_coacd_convex_piece_0"])
+    tool_body_cfg = SceneEntityCfg(robot_cfg.name, body_names=["link_coacd_convex_piece_0"])
     tool_body_cfg.resolve(env.scene)
     tool_idx = tool_body_cfg.body_ids[0]
 

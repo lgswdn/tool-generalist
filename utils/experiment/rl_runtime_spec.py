@@ -11,7 +11,7 @@ from typing import Any, Mapping
 
 RUNTIME_SPEC_ENV_VAR = "TOOL_GENERALIST_RL_RUNTIME_SPEC"
 RUNTIME_SPEC_FILENAME = "rl_runtime_spec.json"
-SUPPORTED_POLICY_CLASSES = {"ActorCriticTG", "ActorCriticPoint2Vec"}
+SUPPORTED_POLICY_CLASSES = {"ActorCriticTG", "ActorCriticTGBimanual", "ActorCriticPoint2Vec", "ActorCriticICP"}
 
 
 def load_runtime_spec_from_env() -> dict[str, Any]:
@@ -101,6 +101,12 @@ def validate_runtime_spec(spec: Mapping[str, Any], path: str | Path = "<runtime-
             "RL runtime spec physics_dim must match len(physics_observation_fields)"
         )
     table = _require_mapping(spec, "table_params", path)
+    env_params = _require_mapping(spec, "env_params", path)
+    robot_mode = str(env_params.get("robot_mode", "tool"))
+    if robot_mode not in {"tool", "bare_franka"}:
+        raise RuntimeError("RL runtime spec env_params.robot_mode must be tool or bare_franka")
+    if spec["actor_critic_class"] == "ActorCriticICP" and robot_mode != "bare_franka":
+        raise RuntimeError("ActorCriticICP requires env_params.robot_mode=bare_franka")
     pose_sampling = _require_mapping(spec, "object_pose_sampling_params", path)
     for key in ("initial_position_range", "xy_offset_range"):
         if key not in pose_sampling:
@@ -111,6 +117,28 @@ def validate_runtime_spec(spec: Mapping[str, Any], path: str | Path = "<runtime-
             raise RuntimeError(f"RL runtime spec object_pose_sampling_params.{key} must be a number") from exc
         if value < 0.0:
             raise RuntimeError(f"RL runtime spec object_pose_sampling_params.{key} must be >= 0")
+
+    curriculum = spec.get("curriculum_params")
+    if curriculum is not None:
+        curriculum = _require_mapping(spec, "curriculum_params", path)
+        if not isinstance(curriculum.get("enabled", False), bool):
+            raise RuntimeError("RL runtime spec curriculum_params.enabled must be a bool")
+        for key in ("start_step", "end_step"):
+            try:
+                value = int(curriculum.get(key, 0))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(f"RL runtime spec curriculum_params.{key} must be an integer") from exc
+            if value < 0:
+                raise RuntimeError(f"RL runtime spec curriculum_params.{key} must be >= 0")
+        if int(curriculum.get("end_step", 0)) < int(curriculum.get("start_step", 0)):
+            raise RuntimeError("RL runtime spec curriculum_params.end_step must be >= start_step")
+        for key in ("start_stable_pose_probability", "end_stable_pose_probability"):
+            try:
+                value = float(curriculum.get(key, 0.0))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(f"RL runtime spec curriculum_params.{key} must be a number") from exc
+            if value < 0.0 or value > 1.0:
+                raise RuntimeError(f"RL runtime spec curriculum_params.{key} must be in [0, 1]")
 
     asset_assignment = _require_mapping(spec, "asset_assignment_params", path)
     seed = asset_assignment.get("seed")
@@ -123,6 +151,8 @@ def validate_runtime_spec(spec: Mapping[str, Any], path: str | Path = "<runtime-
             raise RuntimeError(f"RL runtime spec asset_assignment_params.{key} must be a bool")
 
     physics_fields = tuple(str(item) for item in spec["physics_observation_fields"])
+    if robot_mode == "bare_franka" and any(field.startswith("tool_") for field in physics_fields):
+        raise RuntimeError("RL runtime spec cannot request tool_* physics fields when robot_mode=bare_franka")
     if bool(table.get("enabled", False)) and any(
         field.startswith("ground_") for field in physics_fields
     ):
@@ -132,35 +162,55 @@ def validate_runtime_spec(spec: Mapping[str, Any], path: str | Path = "<runtime-
         )
 
     policy = _require_mapping(spec, "policy_params", path)
+    observation = _require_mapping(spec, "observation_params", path)
+    if robot_mode == "bare_franka" and bool(observation.get("include_tool_cloud", False)):
+        raise RuntimeError("RL runtime spec cannot include tool cloud when robot_mode=bare_franka")
     if policy.get("class_name") != spec["actor_critic_class"]:
         raise RuntimeError("RL runtime spec policy_params.class_name must match actor_critic_class")
 
-    required_policy = {
-        "num_points",
-        "point_dim",
-        "encoder_weights_path",
-        "sd_num_query",
-        "sd_emb_dim",
-        "relative_translation_query_tokens",
-        "reuse_pretrain_pose_cross_attn",
-        "cross_attn_heads",
-        "cross_attn_layers",
-        "sd_cat_query",
-        "sd_cat_ctx",
-        "fusion_hidden_dims",
-        "actor_hidden_dims",
-        "critic_hidden_dims",
-        "hand_state_dim",
-        "robot_state_dim",
-        "previous_action_dim",
-        "relative_goal_dim",
-        "physics_dim",
-        "model_input_centering",
-        "activation",
-        "init_noise_std",
-        "noise_std_type",
-    }
-    if spec["actor_critic_class"] == "ActorCriticTG":
+    if spec["actor_critic_class"] == "ActorCriticICP":
+        required_policy = {
+            "icp_weights_path",
+            "icp_point_dim",
+            "icp_num_points",
+            "freeze_icp",
+            "fusion_hidden_dims",
+            "actor_hidden_dims",
+            "critic_hidden_dims",
+            "activation",
+            "init_noise_std",
+            "noise_std_type",
+        }
+        if policy.get("icp_weights_path") != spec["encoder_checkpoint"]:
+            raise RuntimeError("policy_params.icp_weights_path must match encoder_checkpoint")
+    else:
+        required_policy = {
+            "num_points",
+            "point_dim",
+            "encoder_weights_path",
+            "sd_num_query",
+            "sd_emb_dim",
+            "relative_translation_query_tokens",
+            "reuse_pretrain_pose_cross_attn",
+            "cross_attn_heads",
+            "cross_attn_layers",
+            "sd_cat_query",
+            "sd_cat_ctx",
+            "fusion_hidden_dims",
+            "actor_hidden_dims",
+            "critic_hidden_dims",
+            "hand_state_dim",
+            "robot_state_dim",
+            "previous_action_dim",
+            "relative_goal_dim",
+            "physics_dim",
+            "model_input_centering",
+            "activation",
+            "init_noise_std",
+            "noise_std_type",
+        }
+
+    if spec["actor_critic_class"] in {"ActorCriticTG", "ActorCriticTGBimanual"}:
         required_policy.update(
             {
                 "patch_size",
@@ -182,7 +232,10 @@ def validate_runtime_spec(spec: Mapping[str, Any], path: str | Path = "<runtime-
                 "val_transformations",
             }
         )
-    if policy.get("encoder_weights_path") != spec["encoder_checkpoint"]:
+    if (
+        spec["actor_critic_class"] != "ActorCriticICP"
+        and policy.get("encoder_weights_path") != spec["encoder_checkpoint"]
+    ):
         raise RuntimeError("policy_params.encoder_weights_path must match encoder_checkpoint")
     if (
         spec["actor_critic_class"] == "ActorCriticPoint2Vec"
@@ -216,7 +269,6 @@ def validate_runtime_spec(spec: Mapping[str, Any], path: str | Path = "<runtime-
     for key in (
         "action_params",
         "observation_params",
-        "env_params",
         "reward_params",
         "domain_randomization_params",
     ):
@@ -233,6 +285,16 @@ def runtime_spec_contract(spec: Mapping[str, Any]) -> SimpleNamespace:
             "launch": spec["launch_params"],
             "table": spec["table_params"],
             "object_pose_sampling": spec["object_pose_sampling_params"],
+            "curriculum": spec.get(
+                "curriculum_params",
+                {
+                    "enabled": False,
+                    "start_step": 0,
+                    "end_step": 100000,
+                    "start_stable_pose_probability": 1.0,
+                    "end_stable_pose_probability": 0.0,
+                },
+            ),
             "asset_assignment": spec["asset_assignment_params"],
             "env": spec["env_params"],
             "reward": spec["reward_params"],

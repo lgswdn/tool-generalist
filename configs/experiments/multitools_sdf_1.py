@@ -10,7 +10,7 @@ EXP_CFG.name = "multitools_sdf_1"
 EXP_CFG.general.name = "multitools_sdf"
 EXP_CFG.pretrain_reuse = "multitools_sdf.py"
 
-EXP_CFG.num_gpus = 4
+EXP_CFG.num_gpus = 8
 EXP_CFG.rl.name = "multitools_sdf_1"
 EXP_CFG.rl.encoder_checkpoint = _BASE_EXP_CFG.pretrain.checkpoint_policy.resume_checkpoint
 EXP_CFG.rl.launch.distributed = True

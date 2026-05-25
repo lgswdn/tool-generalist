@@ -105,3 +105,8 @@ RobotSmith/meshes/
 RobotSmith/tools/
 
 .codex
+
+video/
+videos/
+
+tool_contact_viz/

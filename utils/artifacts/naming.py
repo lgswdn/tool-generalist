@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from configs.config_contact_gen import strip_contact_gen_hash_defaults
 from configs.config_exp import ExpCfg
 from utils.config.serialization import config_hash
 from utils.io import to_plain_data
@@ -55,7 +56,8 @@ def encoder_artifact_name(cfg: ExpCfg) -> str:
 
 
 def rl_artifact_name(cfg: ExpCfg, timestamp: str) -> str:
-    encoder_name = sanitize_name(cfg.model.tce.name or cfg.model.tce.encoder_type)
+    encoder = cfg.model.encoder
+    encoder_name = sanitize_name(encoder.name or encoder.encoder_type)
     contact_name = sanitize_name(cfg.contact_gen.name) if cfg.contact_gen.enabled else "no-contact"
     return "/".join(
         (
@@ -104,6 +106,7 @@ def _location_stable_exp_payload(cfg: ExpCfg) -> dict:
         payload["pretrain"] = _strip_pretrain_logging_fields(payload["pretrain"])
     if isinstance(payload.get("contact_gen"), dict):
         payload["contact_gen"]["enabled"] = True
+        payload["contact_gen"] = strip_contact_gen_hash_defaults(payload["contact_gen"])
     return payload
 
 
@@ -114,16 +117,29 @@ def _pretrain_stable_payload(cfg: ExpCfg) -> dict:
 def _contact_hash_payload(contact_cfg) -> dict:
     payload = to_plain_data(contact_cfg)
     payload["enabled"] = True
-    return payload
+    return strip_contact_gen_hash_defaults(payload)
 
 
 def _pretrain_model_hash_payload(cfg: ExpCfg) -> dict:
     model = to_plain_data(cfg.model)
+    _strip_inactive_encoder_backend_defaults(model)
     policy_fusion = dict(model.get("policy_fusion") or {})
     if policy_fusion:
         policy_fusion["query_dim"] = 128
         model["policy_fusion"] = policy_fusion
     return model
+
+
+def _strip_inactive_encoder_backend_defaults(model: dict) -> None:
+    backend = str(model.get("encoder_backend", "tce")).strip().lower()
+    if backend in {"tg"}:
+        backend = "tce"
+    if backend in {"p2v"}:
+        backend = "point2vec"
+    if backend in {"corn"}:
+        backend = "icp"
+    if backend != "icp":
+        model.pop("icp", None)
 
 
 def _strip_pretrain_logging_fields(payload: dict) -> dict:

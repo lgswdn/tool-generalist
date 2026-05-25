@@ -6,6 +6,35 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
+ROTATION_SELECTION_MOST_DOWNWARD = "most_downward_legal_tool_z_axis"
+ROTATION_SELECTION_RANDOM_LEGAL = "random_legal"
+TOOL_SOURCE_SELECTED_TOOLS = "selected_tools"
+TOOL_SOURCE_OBJECTS = "objects"
+
+CONTACT_GEN_HASH_COMPAT_DEFAULTS = {
+    "rotation_selection": ROTATION_SELECTION_MOST_DOWNWARD,
+    "tool_source": TOOL_SOURCE_SELECTED_TOOLS,
+    "object_tool_manifest": None,
+    "allow_self_object_tool_pairs": False,
+}
+CONTACT_GEN_HASH_RUNTIME_FIELDS = {
+    "shard_count",
+    "shard_index",
+}
+
+
+def strip_contact_gen_hash_defaults(payload: dict) -> dict:
+    """Drop newly added default fields so old experiment hashes stay stable."""
+
+    cleaned = dict(payload)
+    for key in CONTACT_GEN_HASH_RUNTIME_FIELDS:
+        cleaned.pop(key, None)
+    for key, default in CONTACT_GEN_HASH_COMPAT_DEFAULTS.items():
+        if cleaned.get(key) == default:
+            cleaned.pop(key, None)
+    return cleaned
+
+
 @dataclass
 class ContactPhysicsCfg:
     runner: str = "isaac"
@@ -70,6 +99,12 @@ class ContactGenCfg:
     epsilon: float = 2e-3
     floor_eps: float = 0.0
     upright_threshold: float = 0.0
+    rotation_selection: str = ROTATION_SELECTION_MOST_DOWNWARD
+    tool_source: str = TOOL_SOURCE_SELECTED_TOOLS
+    object_tool_manifest: Optional[str] = None
+    allow_self_object_tool_pairs: bool = False
+    shard_count: int = 1
+    shard_index: int = 0
     max_contacts_per_pair: int = 1
     penetration_eps: float = 5e-4
     rotation_orth_eps: float = 1e-4

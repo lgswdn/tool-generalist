@@ -143,6 +143,52 @@ def run_experiment(cfg: ExpCfg, *, config_source: str | None = None) -> Experime
             entrypoint = _load_entrypoint(ref.entrypoint)
             result = _call_stage(entrypoint, cfg, run.paths, ref.directory, kwargs=kwargs)
             _validate_stage_result(ref, result)
+            if _contact_result_is_partial_shard(ref, result):
+                _log_event("PARTIAL", f"stage={ref.stage} {_stage_result_summary(ref, result)}")
+                stage_results[ref.stage] = _stage_record(
+                    ref,
+                    status="partial",
+                    action="run",
+                    executed=True,
+                    result=result,
+                )
+                manifests.append(
+                    _write_stage_manifest(
+                        cfg,
+                        ref,
+                        config_source,
+                        run.paths,
+                        mode="run",
+                        status="partial",
+                        action="run",
+                        executed=True,
+                        result=result,
+                        resolved_encoder_checkpoint=resolved_encoder_checkpoint,
+                    )
+                )
+                manifests.append(
+                    _write_stage_manifest(
+                        cfg,
+                        run.artifacts.experiment,
+                        config_source,
+                        run.paths,
+                        mode="run",
+                        status="partial",
+                        action="run",
+                        executed=True,
+                        result={"stages": stage_results},
+                        resolved_encoder_checkpoint=resolved_encoder_checkpoint,
+                    )
+                )
+                return ExperimentRun(
+                    cfg=run.cfg,
+                    paths=run.paths,
+                    artifacts=run.artifacts,
+                    manifests=tuple(manifests),
+                    mode="run",
+                    stage_results=stage_results,
+                    resolved_encoder_checkpoint=resolved_encoder_checkpoint,
+                )
         except Exception as exc:
             _log_event("FAIL", f"stage={ref.stage} error={repr(exc)}")
             stage_results[ref.stage] = _stage_record(
@@ -362,7 +408,7 @@ def _stage_action(cfg: ExpCfg, ref: ArtifactRef) -> str:
 
 def _stage_forces_run(cfg: ExpCfg, ref: ArtifactRef) -> bool:
     if ref.stage == "contact_gen":
-        return bool(cfg.contact_gen.regenerate)
+        return bool(cfg.contact_gen.regenerate or cfg.contact_gen.shard_count > 1)
     if ref.stage == "pretrain":
         return bool(cfg.pretrain.retrain)
     return False
@@ -370,9 +416,13 @@ def _stage_forces_run(cfg: ExpCfg, ref: ArtifactRef) -> bool:
 
 def _stage_is_reusable(ref: ArtifactRef) -> bool:
     if manifest_is_complete(ref.manifest_path):
+        if ref.stage == "contact_gen":
+            return _contact_manifest_result_is_complete(ref.manifest_path)
         return True
+    if ref.manifest_path.exists():
+        return False
     if ref.stage == "contact_gen":
-        return _contact_artifact_has_outputs(ref.directory)
+        return False
     return False
 
 
@@ -382,13 +432,44 @@ def _contact_artifact_has_outputs(directory: Path) -> bool:
     return any(directory.rglob("*.pt.manifest.json"))
 
 
+def _contact_manifest_result_is_complete(manifest_path: Path) -> bool:
+    try:
+        payload = read_manifest(manifest_path)
+    except Exception:
+        return False
+    metrics = payload.get("metrics")
+    if not isinstance(metrics, dict):
+        return False
+    result = metrics.get("result")
+    if not isinstance(result, dict):
+        return False
+    fail = _result_count(result, "fail")
+    if fail is None:
+        return False
+    if fail > 0:
+        return False
+    ok = _result_count(result, "ok") or 0
+    skipped = _result_count(result, "skipped") or 0
+    return ok + skipped > 0
+
+
 def _validate_stage_result(ref: ArtifactRef, result: Any) -> None:
+    if _contact_result_is_partial_shard(ref, result):
+        return
     if ref.stage == "contact_gen" and _empty_failed_contact_result(result):
         ok = _result_count(result, "ok")
         skipped = _result_count(result, "skipped")
         fail = _result_count(result, "fail")
         raise RuntimeError(
             "Contact generation produced no usable outputs "
+            f"(ok={ok}, skipped={skipped}, fail={fail}); refusing to mark artifact complete"
+        )
+    if ref.stage == "contact_gen" and _failed_contact_result(result):
+        ok = _result_count(result, "ok")
+        skipped = _result_count(result, "skipped")
+        fail = _result_count(result, "fail")
+        raise RuntimeError(
+            "Contact generation finished with failed outputs "
             f"(ok={ok}, skipped={skipped}, fail={fail}); refusing to mark artifact complete"
         )
 
@@ -398,6 +479,18 @@ def _empty_failed_contact_result(result: Any) -> bool:
     skipped = _result_count(result, "skipped")
     fail = _result_count(result, "fail")
     return ok == 0 and skipped == 0
+
+
+def _failed_contact_result(result: Any) -> bool:
+    fail = _result_count(result, "fail")
+    return fail is not None and fail > 0
+
+
+def _contact_result_is_partial_shard(ref: ArtifactRef, result: Any) -> bool:
+    if ref.stage != "contact_gen":
+        return False
+    shard_count = _result_count(result, "shard_count")
+    return shard_count is not None and shard_count > 1
 
 
 def _result_count(result: Any, key: str) -> int | None:
@@ -458,7 +551,17 @@ def _log_timestamp() -> str:
 
 def _stage_result_summary(ref: ArtifactRef, result: Any) -> str:
     if ref.stage == "contact_gen":
-        keys = ("num_pairs", "num_poses", "ok", "fail", "skipped", "artifact_dir")
+        keys = (
+            "num_pairs",
+            "global_num_pairs",
+            "num_poses",
+            "ok",
+            "fail",
+            "skipped",
+            "shard_index",
+            "shard_count",
+            "artifact_dir",
+        )
         return _format_result_fields(result, keys)
     if isinstance(result, dict):
         keys = (

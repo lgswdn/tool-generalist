@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import copy
+
 import torch
 import torch.nn as nn
 from torch.distributions import Normal
@@ -45,6 +47,7 @@ class ActorCriticICP(nn.Module):
         actor_output_activation=False,  # Whether to use activation function on actor output (tanh)
         critic_use_norm=False,  # Whether to use normalization in critic MLP
         critic_norm_type=None,  # Normalization type for critic: "layer", "batch", or None
+        separate_actor_critic_fusion: bool = False,
         # StateDependentCrossFeatNet settings
         use_sd_cross: bool = True,  # default True; no need to change in most cases
         sd_num_query: int = 16,
@@ -67,6 +70,7 @@ class ActorCriticICP(nn.Module):
         # Save configuration
         self.icp_point_dim = icp_point_dim
         self.icp_num_points = icp_num_points
+        self.separate_actor_critic_fusion = bool(separate_actor_critic_fusion)
 
         # Calculate dimensions
         # The rest obs (non-pointcloud, excluding hand_state which goes to context)
@@ -260,6 +264,12 @@ class ActorCriticICP(nn.Module):
             use_norm=fusion_use_norm,
             norm_type=fusion_norm_type,
         )
+        self.critic_feature_fusion = None
+        self.critic_state_cross = None
+        if self.separate_actor_critic_fusion:
+            self.critic_feature_fusion = copy.deepcopy(self.feature_fusion)
+            if self.use_sd_cross:
+                self.critic_state_cross = copy.deepcopy(self.state_cross)
 
         mlp_input_dim_a = fusion_hidden_dims[-1]
         mlp_input_dim_c = fusion_hidden_dims[-1]
@@ -290,6 +300,7 @@ class ActorCriticICP(nn.Module):
         print(f"Feature Fusion MLP: {self.feature_fusion}")
         if self.use_sd_cross:
             print(f"StateDependentCrossFeatNet: {self.state_cross}")
+        print(f"Separate actor/critic fusion: {self.separate_actor_critic_fusion}")
         print(f"Actor MLP: {self.actor}")
         print(f"Critic MLP: {self.critic}")
         print(f"ICP feature dim: {icp_feature_dim}")
@@ -478,7 +489,7 @@ class ActorCriticICP(nn.Module):
 
         return point_cloud, context, regular_obs
 
-    def _get_fused_features(self, observations):
+    def _get_fused_features(self, observations, *, branch: str = "actor"):
         """
         Get fused features for both actor and critic network
 
@@ -497,6 +508,10 @@ class ActorCriticICP(nn.Module):
         with torch.no_grad() if not self.icp_encoder.training else torch.enable_grad():
             icp_output, icp_features = self.icp_encoder(point_cloud, context)
 
+        critic_branch = branch == "critic" and self.separate_actor_critic_fusion
+        feature_fusion = self.critic_feature_fusion if critic_branch else self.feature_fusion
+        state_cross = self.critic_state_cross if critic_branch else getattr(self, "state_cross", None)
+
         if self.use_sd_cross:
             # Fuse with StateDependentCrossFeatNet first
             # If icp_features is [B, D], upcast to [B, 1, D]
@@ -510,8 +525,8 @@ class ActorCriticICP(nn.Module):
                 "rest": regular_obs,
             }
 
-            base_features = self.state_cross(x, ctx=sd_ctx)
-            fused_features = self.feature_fusion(base_features)
+            base_features = state_cross(x, ctx=sd_ctx)
+            fused_features = feature_fusion(base_features)
             return fused_features
         else:
             # Classic MLP fusion: if icp_features is a sequence, flatten instead of mean pooling
@@ -539,17 +554,17 @@ class ActorCriticICP(nn.Module):
                 if icp_features.shape[-1] > 0:
                     zeros = torch.zeros(
                         batch_size,
-                        self.feature_fusion[0].in_features - icp_features.shape[-1],
+                        feature_fusion[0].in_features - icp_features.shape[-1],
                         device=device,
                     )
                     raw_features = torch.cat([zeros, icp_features], dim=-1)
                 else:
                     raw_features = torch.zeros(
-                        batch_size, self.feature_fusion[0].in_features, device=device
+                        batch_size, feature_fusion[0].in_features, device=device
                     )
 
             # Apply feature fusion
-            fused_features = self.feature_fusion(raw_features)
+            fused_features = feature_fusion(raw_features)
             return fused_features
 
     def _get_actor_features(self, observations):
@@ -562,7 +577,7 @@ class ActorCriticICP(nn.Module):
         Returns:
             features: Fused feature tensor (batch, feature_dim)
         """
-        return self._get_fused_features(observations)
+        return self._get_fused_features(observations, branch="actor")
 
     @staticmethod
     # not used at the moment
@@ -653,7 +668,7 @@ class ActorCriticICP(nn.Module):
         Returns:
             actions_mean: Action mean
         """
-        fused_features = self._get_fused_features(observations)
+        fused_features = self._get_fused_features(observations, branch="actor")
         actions_mean = self.actor(fused_features)
         return actions_mean
 
@@ -668,7 +683,7 @@ class ActorCriticICP(nn.Module):
             value: State value
         """
         # Use fused features for critic as well
-        fused_features = self._get_fused_features(critic_observations)
+        fused_features = self._get_fused_features(critic_observations, branch="critic")
         value = self.critic(fused_features)
         return value
 

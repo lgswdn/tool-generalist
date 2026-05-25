@@ -33,6 +33,11 @@ def test_contact_generation_business_config_lives_in_exp_config():
         "epsilon",
         "floor_eps",
         "upright_threshold",
+        "rotation_selection",
+        "tool_source",
+        "object_tool_manifest",
+        "shard_count",
+        "shard_index",
         "penetration_eps",
         "skip_existing",
         "physics",
@@ -130,8 +135,10 @@ def test_contact_generation_algorithm_contract_is_static_and_explicit():
     assert "sample_upright_rotations(cb * M" not in gen_contact
     assert 'torch.einsum("mij,bkj->bmki"' in gen_contact
     assert "contact_" + "ok" not in gen_contact
-    assert "valid = floor_ok & pen_ok" in gen_contact
-    assert "penetration_depth <= float(cfg.epsilon)" in gen_contact
+    assert "valid = floor_ok & penetration_ok" in gen_contact
+    assert "penetration_depth <= float(cfg.penetration_eps)" in gen_contact
+    assert "ROTATION_SELECTION_RANDOM_LEGAL" in gen_contact
+    assert "use_tool_head_area" in gen_contact
     assert "candidate_" + "contact_" + "distance" not in gen_contact
     assert "contact_" + "distance" not in gen_contact
     assert "centralize_points_by_bbox" in gen_contact

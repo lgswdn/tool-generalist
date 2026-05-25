@@ -17,6 +17,8 @@ EXP_CFG.pretrain_reuse = "multitools_new.py"
 EXP_CFG.rl.launch.wandb_project = "panda_hand"
 EXP_CFG.rl.launch.run_name = "from_multitool_sdf"
 
-# EXP_CFG.num_gpus = 1
-# EXP_CFG.rl.launch.distributed = False
-# EXP_CFG.rl.env.num_envs = 1024
+EXP_CFG.num_gpus = 4
+EXP_CFG.rl.launch.distributed = True
+EXP_CFG.rl.env.num_envs = 1024
+
+EXP_CFG.rl.separate_actor_critic_fusion = True

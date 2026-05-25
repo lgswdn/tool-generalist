@@ -27,6 +27,8 @@ from utils.experiment.rl_runtime_spec import RUNTIME_SPEC_ENV_VAR, validate_runt
 
 
 FFMPEG_PATH = "/usr/bin/ffmpeg"
+BARE_FRANKA_LABEL = "bare_franka"
+BARE_FRANKA_TOOL_ALIASES = {BARE_FRANKA_LABEL, "bare-franka", "__bare_franka__"}
 
 
 def _distributed_rank_info(distributed: bool) -> tuple[int, int]:
@@ -69,13 +71,15 @@ def _get_candidates_json(paths_cfg: dict) -> str:
     raise ValueError("paths_yaml must define dgn.candidates_json or objects.candidates_json")
 
 
-def _ensure_legacy_aliases(paths_cfg: dict) -> None:
+def _ensure_legacy_aliases(paths_cfg: dict, *, require_tools: bool = True) -> None:
     if "dgn" not in paths_cfg and isinstance(paths_cfg.get("objects"), dict):
         paths_cfg["dgn"] = copy.deepcopy(paths_cfg["objects"])
     if isinstance(paths_cfg.get("objects"), dict) and isinstance(paths_cfg.get("dgn"), dict):
         paths_cfg["objects"]["candidates_json"] = paths_cfg["dgn"].get("candidates_json")
 
     tools_cfg = paths_cfg.get("tools")
+    if not require_tools and tools_cfg is None:
+        return
     if not isinstance(tools_cfg, dict):
         raise ValueError("paths_yaml must contain a tools mapping")
     if "robots_usd_dir" not in tools_cfg and tools_cfg.get("robots_usd_root"):
@@ -86,25 +90,31 @@ def _ensure_legacy_aliases(paths_cfg: dict) -> None:
 
 def _prepare_paths_yaml_for_rank(
     paths_yaml: str,
-    selected_tool: str,
+    selected_tool: str | None,
     rank: int,
     world_size: int,
+    *,
+    bare_franka: bool,
+    eval_label: str,
 ) -> tuple[str, list[str], list[str]]:
     source_yaml = Path(paths_yaml).expanduser().resolve()
     with source_yaml.open("r", encoding="utf-8") as f:
         paths_cfg = yaml.safe_load(f)
     if not isinstance(paths_cfg, dict):
         raise ValueError(f"Expected paths yaml to contain a mapping: {source_yaml}")
-    _ensure_legacy_aliases(paths_cfg)
+    _ensure_legacy_aliases(paths_cfg, require_tools=not bare_franka)
 
     base_dir = source_yaml.parent
-    tools_cfg = paths_cfg["tools"]
-    selected_json = _resolve_path(str(tools_cfg["tools_selected_json"]), base_dir)
-    selected_tool_names = load_selected_tool_ids(selected_json)
-    if selected_tool not in selected_tool_names:
-        raise ValueError(
-            f"Tool {selected_tool!r} is not listed in effective tools_selected_json: {selected_json}"
-        )
+    if not bare_franka:
+        if selected_tool is None:
+            raise ValueError("--tool is required when robot_mode is not bare_franka")
+        tools_cfg = paths_cfg["tools"]
+        selected_json = _resolve_path(str(tools_cfg["tools_selected_json"]), base_dir)
+        selected_tool_names = load_selected_tool_ids(selected_json)
+        if selected_tool not in selected_tool_names:
+            raise ValueError(
+                f"Tool {selected_tool!r} is not listed in effective tools_selected_json: {selected_json}"
+            )
 
     candidates_json = _resolve_path(_get_candidates_json(paths_cfg), base_dir)
     all_candidates = _load_json_list(candidates_json, "candidates_json")
@@ -117,19 +127,21 @@ def _prepare_paths_yaml_for_rank(
 
     temp_root = os.path.join(tempfile.gettempdir(), "tool_generalist_eval_single_tool")
     os.makedirs(temp_root, exist_ok=True)
-    safe_tool = _safe_filename(selected_tool)
+    safe_tool = _safe_filename(eval_label)
     rank_selected_json = os.path.join(temp_root, f"tools_selected_{safe_tool}_rank_{rank}_of_{world_size}.json")
     rank_candidates_json = os.path.join(temp_root, f"candidates_{safe_tool}_rank_{rank}_of_{world_size}.json")
     rank_paths_yaml = os.path.join(temp_root, f"paths_{safe_tool}_rank_{rank}_of_{world_size}.yaml")
 
-    with open(rank_selected_json, "w", encoding="utf-8") as f:
-        json.dump([selected_tool], f, ensure_ascii=False, indent=2)
+    if not bare_franka:
+        with open(rank_selected_json, "w", encoding="utf-8") as f:
+            json.dump([selected_tool], f, ensure_ascii=False, indent=2)
     with open(rank_candidates_json, "w", encoding="utf-8") as f:
         json.dump(rank_candidates, f, ensure_ascii=False, indent=2)
 
     rank_paths_cfg = copy.deepcopy(paths_cfg)
-    _ensure_legacy_aliases(rank_paths_cfg)
-    rank_paths_cfg["tools"]["tools_selected_json"] = rank_selected_json
+    _ensure_legacy_aliases(rank_paths_cfg, require_tools=not bare_franka)
+    if not bare_franka:
+        rank_paths_cfg["tools"]["tools_selected_json"] = rank_selected_json
     rank_paths_cfg["dgn"]["candidates_json"] = rank_candidates_json
     if isinstance(rank_paths_cfg.get("objects"), dict):
         rank_paths_cfg["objects"]["candidates_json"] = rank_candidates_json
@@ -176,7 +188,15 @@ parser.add_argument(
     ),
 )
 parser.add_argument("--checkpoint", type=str, required=True, help="Path to the RSL-RL checkpoint to evaluate.")
-parser.add_argument("--tool", type=str, required=True, help="Tool name from the effective paths_yaml tools_selected.json.")
+parser.add_argument(
+    "--tool",
+    type=str,
+    default=None,
+    help=(
+        "Tool name from the effective paths_yaml tools_selected.json. Omit for "
+        "robot_mode=bare_franka, or pass 'bare_franka' explicitly."
+    ),
+)
 parser.add_argument("--task", type=str, default=None, help="Name of the task. Defaults to runtime_spec['task_id'].")
 parser.add_argument("--num_envs", type=int, default=512, help="Number of environments to simulate per rank.")
 parser.add_argument("--num_episodes", type=int, default=10, help="Number of episodes to evaluate per object.")
@@ -219,6 +239,23 @@ runtime_spec_path = os.path.abspath(os.path.normpath(args_cli.runtime_spec))
 with open(runtime_spec_path, "r", encoding="utf-8") as f:
     runtime_spec = json.load(f)
 
+runtime_robot_mode = str(runtime_spec.get("env_params", {}).get("robot_mode", "tool"))
+if runtime_robot_mode not in {"tool", "bare_franka"}:
+    parser.error("runtime_spec env_params.robot_mode must be 'tool' or 'bare_franka'")
+is_bare_franka_eval = runtime_robot_mode == "bare_franka"
+if is_bare_franka_eval:
+    if args_cli.tool is None:
+        args_cli.tool = BARE_FRANKA_LABEL
+    elif args_cli.tool in BARE_FRANKA_TOOL_ALIASES:
+        args_cli.tool = BARE_FRANKA_LABEL
+    else:
+        parser.error("--tool must be omitted or set to 'bare_franka' when runtime_spec robot_mode=bare_franka")
+else:
+    if args_cli.tool is None:
+        parser.error("--tool is required when runtime_spec robot_mode is not bare_franka")
+    if args_cli.tool in BARE_FRANKA_TOOL_ALIASES:
+        parser.error("'bare_franka' is only valid when runtime_spec env_params.robot_mode=bare_franka")
+
 if args_cli.task is None:
     args_cli.task = runtime_spec.get("task_id")
 if not args_cli.task:
@@ -243,12 +280,21 @@ rank_paths_yaml, all_candidate_entries, rank_candidate_entries = _prepare_paths_
     args_cli.tool,
     rank,
     world_size,
+    bare_franka=is_bare_franka_eval,
+    eval_label=args_cli.tool,
 )
-print(
-    f"[INFO][rank {rank}]: Evaluating tool {args_cli.tool!r} on "
-    f"{len(rank_candidate_entries)}/{len(all_candidate_entries)} object candidates for this rank.",
-    flush=True,
-)
+if is_bare_franka_eval:
+    print(
+        f"[INFO][rank {rank}]: Evaluating bare_franka on "
+        f"{len(rank_candidate_entries)}/{len(all_candidate_entries)} object candidates for this rank.",
+        flush=True,
+    )
+else:
+    print(
+        f"[INFO][rank {rank}]: Evaluating tool {args_cli.tool!r} on "
+        f"{len(rank_candidate_entries)}/{len(all_candidate_entries)} object candidates for this rank.",
+        flush=True,
+    )
 if args_cli.paths_yaml is not None:
     print(
         f"[INFO][rank {rank}]: Overriding runtime spec paths_yaml: "
@@ -318,6 +364,10 @@ from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool 
 
 
 def _tool_names_from_loaded_data() -> list[str]:
+    if is_bare_franka_eval:
+        if len(TOOL_DATA) != 0:
+            raise ValueError(f"Expected no loaded tools for bare_franka eval, got {len(TOOL_DATA)}: {TOOL_DATA}")
+        return [BARE_FRANKA_LABEL]
     tool_names = [tool_data["name"] for tool_data in TOOL_DATA]
     if len(tool_names) != 1:
         raise ValueError(f"Expected exactly one loaded tool, got {len(tool_names)}: {tool_names}")
@@ -463,6 +513,7 @@ def _init_video_state(video_dir: str) -> dict:
     return {
         "video_dir": video_dir,
         "active": {},
+        "waiting": {},
         "next_id": 0,
         "next_env_cursor": 0,
         "success_saved": 0,
@@ -478,6 +529,10 @@ def _video_quota_remaining(video_state: dict) -> bool:
     )
 
 
+def _video_slots_used(video_state: dict) -> int:
+    return len(video_state["active"]) + len(video_state["waiting"])
+
+
 def _eligible_video_envs(env_to_object_idx: torch.Tensor, object_rows: list[dict]) -> list[int]:
     env_ids = []
     for env_id, object_idx in enumerate(env_to_object_idx.tolist()):
@@ -487,21 +542,52 @@ def _eligible_video_envs(env_to_object_idx: torch.Tensor, object_rows: list[dict
     return env_ids
 
 
-def _start_episode_video(video_state: dict, env_id: int, object_name: str) -> None:
+def _make_episode_video_record(video_state: dict, env_id: int, object_name: str) -> dict:
     record_id = int(video_state["next_id"])
     video_state["next_id"] = record_id + 1
     tmp_path = os.path.join(
         video_state["video_dir"],
         f"rank_{rank:03d}_pending_{record_id:06d}_{_safe_filename(object_name)}.tmp.mp4",
     )
-    video_state["active"][int(env_id)] = {
+    return {
         "record_id": record_id,
         "env_id": int(env_id),
         "object_name": object_name,
         "tmp_path": tmp_path,
-        "writer": _start_ffmpeg_writer(tmp_path),
+        "writer": None,
         "frames": 0,
     }
+
+
+def _start_episode_video(video_state: dict, env_id: int, object_name: str) -> None:
+    record = _make_episode_video_record(video_state, env_id, object_name)
+    record["writer"] = _start_ffmpeg_writer(record["tmp_path"])
+    video_state["active"][int(env_id)] = record
+
+
+def _queue_episode_video(video_state: dict, env_id: int, object_name: str) -> None:
+    video_state["waiting"][int(env_id)] = _make_episode_video_record(video_state, env_id, object_name)
+
+
+def _start_waiting_videos_on_episode_start(
+    video_state: dict,
+    episode_start_env_ids: set[int],
+    env_to_object_idx: torch.Tensor,
+    object_rows: list[dict],
+) -> None:
+    for env_id in sorted(episode_start_env_ids):
+        record = video_state["waiting"].pop(int(env_id), None)
+        if record is None:
+            continue
+        if not _video_quota_remaining(video_state):
+            continue
+        object_idx = int(env_to_object_idx[env_id].item())
+        row = object_rows[object_idx]
+        if int(row["episodes"]) >= args_cli.num_episodes:
+            continue
+        record["writer"] = _start_ffmpeg_writer(record["tmp_path"])
+        record["frames"] = 0
+        video_state["active"][int(env_id)] = record
 
 
 def _activate_video_slots(
@@ -509,6 +595,7 @@ def _activate_video_slots(
     env_to_object_idx: torch.Tensor,
     object_names: list[str],
     object_rows: list[dict],
+    episode_start_env_ids: set[int],
 ) -> None:
     if not _video_quota_remaining(video_state):
         return
@@ -518,17 +605,20 @@ def _activate_video_slots(
     cursor = int(video_state["next_env_cursor"])
     attempts = 0
     while (
-        len(video_state["active"]) < args_cli.video_max_active_episodes
+        _video_slots_used(video_state) < args_cli.video_max_active_episodes
         and _video_quota_remaining(video_state)
         and attempts < len(env_ids)
     ):
         env_id = env_ids[cursor % len(env_ids)]
         cursor += 1
         attempts += 1
-        if env_id in video_state["active"]:
+        if env_id in video_state["active"] or env_id in video_state["waiting"]:
             continue
         object_idx = int(env_to_object_idx[env_id].item())
-        _start_episode_video(video_state, env_id, object_names[object_idx])
+        if env_id in episode_start_env_ids:
+            _start_episode_video(video_state, env_id, object_names[object_idx])
+        else:
+            _queue_episode_video(video_state, env_id, object_names[object_idx])
     video_state["next_env_cursor"] = cursor
 
 
@@ -608,6 +698,7 @@ def _close_video_state(video_state: dict) -> None:
             _close_ffmpeg_writer(writer)
         _discard_video_tmp(record["tmp_path"])
     video_state["active"].clear()
+    video_state["waiting"].clear()
 
 
 def _write_summary(log_dir: str, resume_path: str, tool_name: str, rows: list[dict]) -> None:
@@ -625,6 +716,7 @@ def _write_summary(log_dir: str, resume_path: str, tool_name: str, rows: list[di
         "effective_source_paths_yaml": paths_yaml,
         "paths_yaml_override": args_cli.paths_yaml,
         "rank_paths_yaml": rank_paths_yaml,
+        "robot_mode": runtime_robot_mode,
         "tool": tool_name,
         "world_size": world_size,
         "num_envs_per_rank": args_cli.num_envs,
@@ -728,7 +820,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     video_state = None
     if want_videos:
         video_state = _init_video_state(video_dir)
-        _activate_video_slots(video_state, env_to_object_idx, object_names, object_rows)
+        _activate_video_slots(
+            video_state,
+            env_to_object_idx,
+            object_names,
+            object_rows,
+            set(range(num_envs)),
+        )
         print(f"[INFO][rank {rank}]: Recording success/failure videos to: {video_dir}")
 
     while (not _all_objects_finished(object_rows, args_cli.num_episodes)) and simulation_app.is_running():
@@ -743,6 +841,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         ended = dones.bool()
         if torch.any(ended):
             ended_ids = torch.where(ended)[0]
+            ended_env_ids = set(int(env_id) for env_id in ended_ids.tolist())
             for env_id in ended_ids.tolist():
                 object_idx = int(env_to_object_idx[env_id].item())
                 row = object_rows[object_idx]
@@ -761,7 +860,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         _discard_video_on_done(video_state, env_id)
 
             if video_state is not None:
-                _activate_video_slots(video_state, env_to_object_idx, object_names, object_rows)
+                _start_waiting_videos_on_episode_start(
+                    video_state,
+                    ended_env_ids,
+                    env_to_object_idx,
+                    object_rows,
+                )
+                _activate_video_slots(
+                    video_state,
+                    env_to_object_idx,
+                    object_names,
+                    object_rows,
+                    ended_env_ids,
+                )
 
         elapsed = time.time() - start_time
         step_count += 1

@@ -36,6 +36,7 @@ class ObservationLayout:
     robot_state: SliceSpec
     previous_action: SliceSpec
     relative_goal_pose: SliceSpec
+    object_velocity: SliceSpec
     physics: SliceSpec
     total_dim: int
 
@@ -49,6 +50,7 @@ class ObservationLayout:
         robot_state_dim: int,
         previous_action_dim: int,
         relative_goal_dim: int,
+        object_velocity_dim: int,
         physics_dim: int,
     ) -> "ObservationLayout":
         offset = 0
@@ -67,6 +69,7 @@ class ObservationLayout:
         robot_state = take("robot_state", robot_state_dim, (robot_state_dim,))
         previous_action = take("previous_action", previous_action_dim, (previous_action_dim,))
         relative_goal_pose = take("relative_goal_pose", relative_goal_dim, (relative_goal_dim,))
+        object_velocity = take("object_velocity", object_velocity_dim, (object_velocity_dim,))
         physics = take("physics", physics_dim, (physics_dim,))
         return cls(
             object_cloud=object_cloud,
@@ -77,6 +80,7 @@ class ObservationLayout:
             robot_state=robot_state,
             previous_action=previous_action,
             relative_goal_pose=relative_goal_pose,
+            object_velocity=object_velocity,
             physics=physics,
             total_dim=offset,
         )
@@ -85,6 +89,8 @@ class ObservationLayout:
 def split_observations(obs: torch.Tensor, layout: ObservationLayout) -> dict[str, torch.Tensor]:
     def take(spec: SliceSpec) -> torch.Tensor:
         value = obs[:, spec.start:spec.stop]
+        if spec.stop == spec.start:
+            return value.new_zeros((obs.shape[0], 0))
         if len(spec.shape) == 2:
             return value.view(-1, spec.shape[0], spec.shape[1])
         return value.view(-1, spec.shape[0])
@@ -98,6 +104,7 @@ def split_observations(obs: torch.Tensor, layout: ObservationLayout) -> dict[str
         "robot_state": take(layout.robot_state),
         "previous_action": take(layout.previous_action),
         "relative_goal_pose": take(layout.relative_goal_pose),
+        "object_velocity": take(layout.object_velocity),
         "physics": take(layout.physics),
     }
 
@@ -121,6 +128,7 @@ def context_dim(
     robot_state_dim: int,
     previous_action_dim: int,
     relative_goal_dim: int,
+    object_velocity_dim: int,
     physics_dim: int,
 ) -> int:
     return (
@@ -130,6 +138,7 @@ def context_dim(
         + robot_state_dim
         + previous_action_dim
         + relative_goal_dim
+        + object_velocity_dim
         + physics_dim
     )
 
@@ -147,6 +156,7 @@ def build_context_vector(parts: Mapping[str, torch.Tensor]) -> torch.Tensor:
             parts["robot_state"],
             parts["previous_action"],
             parts["relative_goal_pose"],
+            parts["object_velocity"],
             parts["physics"],
         ],
         dim=-1,

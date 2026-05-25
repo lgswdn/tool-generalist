@@ -90,6 +90,7 @@ class TGActorCriticCfg:
     robot_state_dim: int = int(_policy("robot_state_dim"))
     previous_action_dim: int = int(_policy("previous_action_dim"))
     relative_goal_dim: int = int(_policy("relative_goal_dim"))
+    object_velocity_dim: int = int(_policy("object_velocity_dim", 0))
     physics_dim: int = int(_policy("physics_dim"))
     model_input_centering: str = str(_policy("model_input_centering", "bbox_center"))
 
@@ -100,6 +101,13 @@ class TGActorCriticCfg:
     activation: str = str(_policy("activation", "elu"))
     init_noise_std: float = float(_policy("init_noise_std", 1.0))
     noise_std_type: str = str(_policy("noise_std_type", "scalar"))
+
+
+@configclass
+class TGBimanualActorCriticCfg(TGActorCriticCfg):
+    """Bimanual TCE policy config sourced from rl_runtime_spec.json."""
+
+    class_name: str = "ActorCriticTGBimanual"
 
 
 @configclass
@@ -143,6 +151,7 @@ class Point2VecActorCriticCfg:
     robot_state_dim: int = int(_policy("robot_state_dim"))
     previous_action_dim: int = int(_policy("previous_action_dim"))
     relative_goal_dim: int = int(_policy("relative_goal_dim"))
+    object_velocity_dim: int = int(_policy("object_velocity_dim", 0))
     physics_dim: int = int(_policy("physics_dim"))
 
     fusion_hidden_dims: list[int] = list(_policy("fusion_hidden_dims"))
@@ -154,11 +163,36 @@ class Point2VecActorCriticCfg:
     noise_std_type: str = str(_policy("noise_std_type", "scalar"))
 
 
+@configclass
+class ICPActorCriticCfg:
+    """Legacy ICP policy config sourced from rl_runtime_spec.json."""
+
+    class_name: str = "ActorCriticICP"
+
+    icp_weights_path: str | None = _policy("icp_weights_path")
+    freeze_icp: bool = bool(_policy("freeze_icp", True))
+    icp_point_dim: int = int(_policy("icp_point_dim", 3))
+    icp_num_points: int = int(_policy("icp_num_points", 512))
+    separate_actor_critic_fusion: bool = bool(_policy("separate_actor_critic_fusion", False))
+
+    fusion_hidden_dims: list[int] = list(_policy("fusion_hidden_dims", [512, 256, 128]))
+    actor_hidden_dims: list[int] = list(_policy("actor_hidden_dims", [64]))
+    critic_hidden_dims: list[int] = list(_policy("critic_hidden_dims", [64]))
+
+    activation: str = str(_policy("activation", "elu"))
+    init_noise_std: float = float(_policy("init_noise_std", 1.0))
+    noise_std_type: str = str(_policy("noise_std_type", "scalar"))
+
+
 def _policy_cfg():
     if _POLICY_CLASS_NAME == "ActorCriticTG":
         return TGActorCriticCfg()
+    if _POLICY_CLASS_NAME == "ActorCriticTGBimanual":
+        return TGBimanualActorCriticCfg()
     if _POLICY_CLASS_NAME == "ActorCriticPoint2Vec":
         return Point2VecActorCriticCfg()
+    if _POLICY_CLASS_NAME == "ActorCriticICP":
+        return ICPActorCriticCfg()
     raise RuntimeError(f"Unsupported actor_critic_class in runtime spec: {_POLICY_CLASS_NAME!r}")
 
 

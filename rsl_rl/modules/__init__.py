@@ -30,7 +30,9 @@ def _try_import(module_attr, from_module, names):
 
 _optional = {}
 _optional.update(_try_import(globals(), "actor_critic_tg", ["ActorCriticTG"]))
+_optional.update(_try_import(globals(), "actor_critic_tg_bimanual", ["ActorCriticTGBimanual"]))
 _optional.update(_try_import(globals(), "actor_critic_point2vec", ["ActorCriticPoint2Vec"]))
+_optional.update(_try_import(globals(), "actor_critic_icp", ["ActorCriticICP"]))
 _optional.update(_try_import(globals(), "rnd", ["RandomNetworkDistillation"]))
 
 # Inject into module namespace for existing import consumers.
@@ -38,12 +40,16 @@ globals().update({k: v for k, v in _optional.items() if v is not None})
 
 # Convenience aliases
 ActorCriticTG = _optional.get("ActorCriticTG")
+ActorCriticTGBimanual = _optional.get("ActorCriticTGBimanual")
 ActorCriticPoint2Vec = _optional.get("ActorCriticPoint2Vec")
+ActorCriticICP = _optional.get("ActorCriticICP")
 RandomNetworkDistillation = _optional.get("RandomNetworkDistillation")
 
 POLICY_REGISTRY = {
     "ActorCriticTG": ActorCriticTG,
+    "ActorCriticTGBimanual": ActorCriticTGBimanual,
     "ActorCriticPoint2Vec": ActorCriticPoint2Vec,
+    "ActorCriticICP": ActorCriticICP,
 }
 
 
@@ -66,9 +72,11 @@ def resolve_policy_class(class_name: str):
 __all__ = [
     "ActorCritic",
     "ActorCriticPoint2Vec",
+    "ActorCriticICP",
     "ActorCriticRecurrent",
     "ActorCriticToolUnicorn",
     "ActorCriticTG",
+    "ActorCriticTGBimanual",
     "EmpiricalNormalization",
     "RandomNetworkDistillation",
     "POLICY_REGISTRY",

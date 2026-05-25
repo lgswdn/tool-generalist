@@ -85,6 +85,7 @@ class ActorCriticPoint2Vec(nn.Module):
         robot_state_dim: int = 14,
         previous_action_dim: Optional[int] = None,
         relative_goal_dim: int = 9,
+        object_velocity_dim: int = 0,
         physics_dim: int = 7,
         activation: str = "elu",
         init_noise_std: float = 1.0,
@@ -119,6 +120,7 @@ class ActorCriticPoint2Vec(nn.Module):
         self.freeze_point2vec = bool(freeze_encoder if freeze_point2vec is None else freeze_point2vec)
         self.separate_actor_critic_fusion = bool(separate_actor_critic_fusion)
         self.previous_action_dim = int(previous_action_dim) if previous_action_dim is not None else int(num_actions)
+        self.object_velocity_dim = int(object_velocity_dim)
         self.physics_dim = int(physics_dim)
         self.sd_cat_ctx = bool(sd_cat_ctx)
         self.total_num_tokens = 2 * int(tokenizer_num_groups)
@@ -135,6 +137,7 @@ class ActorCriticPoint2Vec(nn.Module):
             robot_state_dim=robot_state_dim,
             previous_action_dim=self.previous_action_dim,
             relative_goal_dim=relative_goal_dim,
+            object_velocity_dim=self.object_velocity_dim,
             physics_dim=self.physics_dim,
         )
         if num_actor_obs != self.obs_layout.total_dim:
@@ -207,6 +210,7 @@ class ActorCriticPoint2Vec(nn.Module):
             robot_state_dim=robot_state_dim,
             previous_action_dim=self.previous_action_dim,
             relative_goal_dim=relative_goal_dim,
+            object_velocity_dim=self.object_velocity_dim,
             physics_dim=self.physics_dim,
         )
         self.context_dim = ctx_dim

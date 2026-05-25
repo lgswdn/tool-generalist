@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping
 
+from configs.config_contact_gen import TOOL_SOURCE_OBJECTS, TOOL_SOURCE_SELECTED_TOOLS
 from configs.config_exp import ConfigValidationError, ExpCfg
 from utils.config.paths import PathsConfigError, ProjectPaths, require_path
 from utils.experiment.effective_paths import apply_experiment_path_overrides
@@ -125,14 +126,17 @@ def validate_required_path_keys_for_plan(cfg: ExpCfg, paths: ProjectPaths) -> li
 def _required_plan_path_keys(cfg: ExpCfg) -> tuple[str, ...]:
     keys: list[str] = []
     if contact_stage_required(cfg) or cfg.rl.enabled:
-        keys.extend(
-            [
-                "objects.candidates_json",
-                "tools.tools_selected_json",
-                "tools.tools_adjusted_json",
-                "tools.meshdata_adjusted_root",
-            ]
-        )
+        keys.append("objects.candidates_json")
+        if cfg.contact_gen.tool_source == TOOL_SOURCE_OBJECTS:
+            keys.append("objects.obj_dir")
+        if cfg.rl.enabled or cfg.contact_gen.tool_source == TOOL_SOURCE_SELECTED_TOOLS:
+            keys.extend(
+                [
+                    "tools.tools_selected_json",
+                    "tools.tools_adjusted_json",
+                    "tools.meshdata_adjusted_root",
+                ]
+            )
     return tuple(dict.fromkeys(keys))
 
 
@@ -156,16 +160,30 @@ def validate_object_tool_manifests_non_empty(
     strict_paths: bool = True,
 ) -> list[str]:
     errors: list[str] = []
+    require_selected_tools = (
+        cfg.rl.enabled
+        or (contact_stage_required(cfg) and cfg.contact_gen.tool_source == TOOL_SOURCE_SELECTED_TOOLS)
+    )
     if contact_stage_required(cfg) or cfg.rl.enabled:
         _require_json_non_empty(errors, paths, "objects.candidates_json", strict_paths)
+    if require_selected_tools:
         _require_json_non_empty(errors, paths, "tools.tools_selected_json", strict_paths)
         _require_json_non_empty(errors, paths, "tools.tools_adjusted_json", strict_paths)
         _require_path(errors, paths, "tools.meshdata_adjusted_root", strict_paths)
+    if contact_stage_required(cfg) and cfg.contact_gen.tool_source == TOOL_SOURCE_OBJECTS:
+        _require_path(errors, paths, "objects.obj_dir", strict_paths)
     if cfg.general.objects_manifest:
         _require_existing_json_non_empty(
             errors,
             Path(cfg.general.objects_manifest),
             "GeneralCfg.objects_manifest",
+            strict_paths,
+        )
+    if cfg.contact_gen.object_tool_manifest:
+        _require_existing_json_non_empty(
+            errors,
+            _resolve_config_path(cfg.contact_gen.object_tool_manifest, paths.source_yaml.parent),
+            "ContactGenCfg.object_tool_manifest",
             strict_paths,
         )
     if cfg.general.tools_selected_json:
@@ -214,6 +232,7 @@ def validate_encoder_checkpoint_path_and_declared_dims(
         ("ModelCfg.encoder.checkpoint_path", active_encoder_checkpoint),
         ("ModelCfg.tce.checkpoint_path", cfg.model.tce.checkpoint_path),
         ("ModelCfg.p2v.checkpoint_path", cfg.model.p2v.checkpoint_path),
+        ("ModelCfg.icp.checkpoint_path", cfg.model.icp.checkpoint_path),
         (
             "ModelCfg.pretrained_encoder.checkpoint_path",
             cfg.model.pretrained_encoder.checkpoint_path,
@@ -255,6 +274,8 @@ def _should_validate_tce_manifest(cfg: ExpCfg, field_name: str) -> bool:
     if field_name == "ModelCfg.tce.checkpoint_path":
         return True
     if field_name == "ModelCfg.p2v.checkpoint_path":
+        return False
+    if field_name == "ModelCfg.icp.checkpoint_path":
         return False
     if field_name == "ModelCfg.pretrained_encoder.checkpoint_path":
         return cfg.model.pretrained_encoder.adapter == "tce_strict"
@@ -445,3 +466,8 @@ def _require_path(
     except PathsConfigError as exc:
         errors.append(str(exc))
         return None
+
+
+def _resolve_config_path(value: str, base_dir: Path) -> Path:
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else (base_dir / path).resolve()

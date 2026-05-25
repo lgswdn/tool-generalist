@@ -83,8 +83,13 @@ _PHYSICS_OBSERVATION_FIELDS = tuple(_RL_RUNTIME_SPEC["physics_observation_fields
 _ACTION_DIM = int(_RL_RUNTIME_SPEC["action_dim"])
 _OBSERVATION_DIM = int(_RL_RUNTIME_SPEC["observation_dim"])
 _PHYSICS_DIM = int(_RL_RUNTIME_SPEC["physics_dim"])
+_ROBOT_MODE = str(_RL_RUNTIME_SPEC.get("env_params", {}).get("robot_mode", "tool"))
+if _ROBOT_MODE not in {"tool", "bare_franka"}:
+    raise ValueError(f"Unsupported robot_mode: {_ROBOT_MODE!r}")
+_USE_BARE_FRANKA = _ROBOT_MODE == "bare_franka"
 _ASSET_ASSIGNMENT = _RL_RUNTIME_SPEC["asset_assignment_params"]
 _ASSET_ASSIGNMENT_SEED = int(_ASSET_ASSIGNMENT["seed"])
+_OBJECT_ASSIGNMENT_SEED = int(os.environ.get("TOOL_GENERALIST_OBJECT_ASSIGNMENT_SEED", _ASSET_ASSIGNMENT_SEED))
 _RANDOMIZE_TOOL_ASSIGNMENT = bool(_ASSET_ASSIGNMENT["randomize_tool_assignment"])
 _RANDOMIZE_OBJECT_ASSIGNMENT = bool(_ASSET_ASSIGNMENT["randomize_object_assignment"])
 # Per-rank env count from the runtime spec; the helper derives global ids as
@@ -96,6 +101,8 @@ _WORLD_SIZE = int(os.environ.get("TOOL_GENERALIST_WORLD_SIZE", "1"))
 
 if _NUM_ENVS_PER_RANK <= 0:
     raise ValueError("RL runtime spec num_envs must be > 0")
+if _OBJECT_ASSIGNMENT_SEED < 0:
+    raise ValueError("TOOL_GENERALIST_OBJECT_ASSIGNMENT_SEED must be >= 0")
 if _GLOBAL_RANK < 0:
     raise ValueError("TOOL_GENERALIST_GLOBAL_RANK must be >= 0")
 if _LOCAL_RANK < 0:
@@ -106,6 +113,10 @@ if _WORLD_SIZE <= 0:
 
 def _dr_event_enabled(term_cfg) -> bool:
     return bool(_RL_CONTRACT.domain_randomization.enabled and getattr(term_cfg, "enabled", False))
+
+
+def _tool_dr_event_enabled(term_cfg) -> bool:
+    return (not _USE_BARE_FRANKA) and _dr_event_enabled(term_cfg)
 
 
 def _unsupported_event(enabled: bool, name: str):
@@ -215,78 +226,86 @@ def get_cached_cloud(obj_path):
 # ---------------------------------------------------------------------------
 TOOL_SCALE: float = float(_PATHS.get("tools", _PATHS.get("tool_mesh", {})).get("scale", 0.1))
 
-_TOOLS_CFG = _PATHS["tools"]
-_TOOL_MESH_ROOT = _TOOLS_CFG.get("meshdata_adjusted_root")
-if not _TOOL_MESH_ROOT:
-    raise ValueError("paths.yaml must define tools.meshdata_adjusted_root for adjusted tool meshes")
-_TOOLS_ADJUSTED_JSON = _TOOLS_CFG.get("tools_adjusted_json", _TOOLS_CFG.get("tools_json"))
-
-# Load the tool selection manifest: a list of tool names to include
-_selected_tool_names: list[str] = load_selected_tool_ids(_TOOLS_CFG["tools_selected_json"])
-
-# Build per-tool metadata + USD paths, filtered by the manifest
 TOOL_USD_PATHS: list[str] = []
 TOOL_DATA: list[dict] = []
-for _tool_name in _selected_tool_names:
-    _usd_path = os.path.join(_TOOLS_CFG["robots_usd_dir"], f"panda_instanceable_{_tool_name}.usd")
-    _obj_path = str(resolve_tool_mesh_path(_TOOL_MESH_ROOT, _tool_name))
+TOOL_ASSET_INDICES_BY_ENV: list[int] = []
+TOOL_USD_PATHS_BY_ENV: list[str] = []
+TOOL_SPAWN_ASSET_INDICES: list[int] = []
+TOOL_USD_PATHS_FOR_SPAWN: list[str] = []
 
-    if not os.path.isfile(_usd_path):
-        print(f"[WARNING] Robot USD not found for tool '{_tool_name}': {_usd_path}, skipping")
-        continue
+if _USE_BARE_FRANKA:
+    print("[INFO] robot_mode=bare_franka: skipping tool USD/mesh loading")
+else:
+    _TOOLS_CFG = _PATHS["tools"]
+    _TOOL_MESH_ROOT = _TOOLS_CFG.get("meshdata_adjusted_root")
+    if not _TOOL_MESH_ROOT:
+        raise ValueError("paths.yaml must define tools.meshdata_adjusted_root for adjusted tool meshes")
+    _TOOLS_ADJUSTED_JSON = _TOOLS_CFG.get("tools_adjusted_json", _TOOLS_CFG.get("tools_json"))
 
-    try:
-        _adjusted_entry = load_tool_adjusted_entry(_TOOLS_ADJUSTED_JSON, _tool_name)
-        _head_area = load_tool_head_area(_TOOLS_ADJUSTED_JSON, _obj_path, _tool_name)
-    except ToolAssetContractError as exc:
-        print(f"[WARNING] Tool '{_tool_name}' violates adjusted asset contract, skipping: {exc}")
-        continue
-    _base_center = _adjusted_entry.get("base_center")
-    if _head_area is None:
-        print(f"[WARNING] head_area not found for tool '{_tool_name}' in {_TOOLS_ADJUSTED_JSON}")
-    if not os.path.isfile(_obj_path):
-        print(f"[WARNING] adjusted decomposed mesh not found for tool '{_tool_name}': {_obj_path}")
+    # Load the tool selection manifest: a list of tool names to include
+    _selected_tool_names: list[str] = load_selected_tool_ids(_TOOLS_CFG["tools_selected_json"])
 
-    TOOL_USD_PATHS.append(_usd_path)
-    TOOL_DATA.append({
-        "name": _tool_name,
-        "obj_path": _obj_path,
-        "mesh_source": "adjusted_decomposed_mesh",
-        "head_area": _head_area,
-        "base_center": _base_center,
-    })
+    # Build per-tool metadata + USD paths, filtered by the manifest
+    for _tool_name in _selected_tool_names:
+        _usd_path = os.path.join(_TOOLS_CFG["robots_usd_dir"], f"panda_instanceable_{_tool_name}.usd")
+        _obj_path = str(resolve_tool_mesh_path(_TOOL_MESH_ROOT, _tool_name))
 
-print(f"[INFO] Loaded {len(TOOL_DATA)} tool variants from {_TOOLS_CFG['robots_usd_dir']}")
-if not TOOL_DATA:
-    raise RuntimeError(
-        "No valid tool variants remain after filtering tools_selected.json. "
-        "Check tools.tools_adjusted_json head_area entries and robot USD paths."
+        if not os.path.isfile(_usd_path):
+            print(f"[WARNING] Robot USD not found for tool '{_tool_name}': {_usd_path}, skipping")
+            continue
+
+        try:
+            _adjusted_entry = load_tool_adjusted_entry(_TOOLS_ADJUSTED_JSON, _tool_name)
+            _head_area = load_tool_head_area(_TOOLS_ADJUSTED_JSON, _obj_path, _tool_name)
+        except ToolAssetContractError as exc:
+            print(f"[WARNING] Tool '{_tool_name}' violates adjusted asset contract, skipping: {exc}")
+            continue
+        _base_center = _adjusted_entry.get("base_center")
+        if _head_area is None:
+            print(f"[WARNING] head_area not found for tool '{_tool_name}' in {_TOOLS_ADJUSTED_JSON}")
+        if not os.path.isfile(_obj_path):
+            print(f"[WARNING] adjusted decomposed mesh not found for tool '{_tool_name}': {_obj_path}")
+
+        TOOL_USD_PATHS.append(_usd_path)
+        TOOL_DATA.append({
+            "name": _tool_name,
+            "obj_path": _obj_path,
+            "mesh_source": "adjusted_decomposed_mesh",
+            "head_area": _head_area,
+            "base_center": _base_center,
+        })
+
+    print(f"[INFO] Loaded {len(TOOL_DATA)} tool variants from {_TOOLS_CFG['robots_usd_dir']}")
+    if not TOOL_DATA:
+        raise RuntimeError(
+            "No valid tool variants remain after filtering tools_selected.json. "
+            "Check tools.tools_adjusted_json head_area entries and robot USD paths."
+        )
+    TOOL_ASSET_INDICES_BY_ENV = asset_indices_for_rank(
+        _NUM_ENVS_PER_RANK,
+        _GLOBAL_RANK,
+        len(TOOL_DATA),
+        randomize=_RANDOMIZE_TOOL_ASSIGNMENT,
+        seed=_ASSET_ASSIGNMENT_SEED,
+        salt=TOOL_ASSIGNMENT_SALT,
     )
-TOOL_ASSET_INDICES_BY_ENV: list[int] = asset_indices_for_rank(
-    _NUM_ENVS_PER_RANK,
-    _GLOBAL_RANK,
-    len(TOOL_DATA),
-    randomize=_RANDOMIZE_TOOL_ASSIGNMENT,
-    seed=_ASSET_ASSIGNMENT_SEED,
-    salt=TOOL_ASSIGNMENT_SALT,
-)
-TOOL_USD_PATHS_BY_ENV: list[str] = [TOOL_USD_PATHS[index] for index in TOOL_ASSET_INDICES_BY_ENV]
-TOOL_SPAWN_ASSET_INDICES: list[int] = (
-    TOOL_ASSET_INDICES_BY_ENV
-    if _RANDOMIZE_TOOL_ASSIGNMENT
-    else sequential_spawn_indices_for_rank(_NUM_ENVS_PER_RANK, _GLOBAL_RANK, len(TOOL_DATA))
-)
-TOOL_USD_PATHS_FOR_SPAWN: list[str] = [TOOL_USD_PATHS[index] for index in TOOL_SPAWN_ASSET_INDICES]
-print(
-    f"[INFO] Tool assignment rank={_GLOBAL_RANK}/{_WORLD_SIZE} "
-    f"local_rank={_LOCAL_RANK} envs={_NUM_ENVS_PER_RANK} "
-    f"randomize={_RANDOMIZE_TOOL_ASSIGNMENT}"
-)
-print(
-    f"[INFO] Tool spawn prototypes envs={_NUM_ENVS_PER_RANK} "
-    f"spawn_assets={len(TOOL_USD_PATHS_FOR_SPAWN)} "
-    f"total_assets={len(TOOL_USD_PATHS)}"
-)
+    TOOL_USD_PATHS_BY_ENV = [TOOL_USD_PATHS[index] for index in TOOL_ASSET_INDICES_BY_ENV]
+    TOOL_SPAWN_ASSET_INDICES = (
+        TOOL_ASSET_INDICES_BY_ENV
+        if _RANDOMIZE_TOOL_ASSIGNMENT
+        else sequential_spawn_indices_for_rank(_NUM_ENVS_PER_RANK, _GLOBAL_RANK, len(TOOL_DATA))
+    )
+    TOOL_USD_PATHS_FOR_SPAWN = [TOOL_USD_PATHS[index] for index in TOOL_SPAWN_ASSET_INDICES]
+    print(
+        f"[INFO] Tool assignment rank={_GLOBAL_RANK}/{_WORLD_SIZE} "
+        f"local_rank={_LOCAL_RANK} envs={_NUM_ENVS_PER_RANK} "
+        f"randomize={_RANDOMIZE_TOOL_ASSIGNMENT}"
+    )
+    print(
+        f"[INFO] Tool spawn prototypes envs={_NUM_ENVS_PER_RANK} "
+        f"spawn_assets={len(TOOL_USD_PATHS_FOR_SPAWN)} "
+        f"total_assets={len(TOOL_USD_PATHS)}"
+    )
 
 # Legacy single-tool aliases (index 0) for backward-compatible imports
 TOOL_OBJ_PATH: str = TOOL_DATA[0]["obj_path"] if TOOL_DATA else ""
@@ -327,7 +346,7 @@ OBJECT_ASSET_INDICES_BY_ENV: list[int] = asset_indices_for_rank(
     _GLOBAL_RANK,
     len(OBJECT_ASSET_CFGS),
     randomize=_RANDOMIZE_OBJECT_ASSIGNMENT,
-    seed=_ASSET_ASSIGNMENT_SEED,
+    seed=_OBJECT_ASSIGNMENT_SEED,
     salt=OBJECT_ASSIGNMENT_SALT,
 )
 OBJECT_ASSET_CFGS_BY_ENV: list[sim_utils.UsdFileCfg] = [
@@ -344,7 +363,7 @@ OBJECT_ASSET_CFGS_FOR_SPAWN: list[sim_utils.UsdFileCfg] = [
 print(
     f"[INFO] Object assignment rank={_GLOBAL_RANK}/{_WORLD_SIZE} "
     f"local_rank={_LOCAL_RANK} envs={_NUM_ENVS_PER_RANK} "
-    f"randomize={_RANDOMIZE_OBJECT_ASSIGNMENT}"
+    f"randomize={_RANDOMIZE_OBJECT_ASSIGNMENT} seed={_OBJECT_ASSIGNMENT_SEED}"
 )
 print(
     f"[INFO] Object spawn prototypes envs={_NUM_ENVS_PER_RANK} "
@@ -382,11 +401,39 @@ custom_joint_init = {
     "panda_joint7": _joint_init_mid[6],
 }
 bare_franka_path = os.path.abspath(_PATHS["robot"]["franka_usd"])
+if _USE_BARE_FRANKA and not os.path.isfile(bare_franka_path):
+    print(
+        f"[WARNING] Bare Franka USD not found at {bare_franka_path}; "
+        "using Isaac Lab's default FRANKA_PANDA_HIGH_PD_CFG USD"
+    )
 arm_only_actuators = {
     actuator_name: actuator_config 
     for actuator_name, actuator_config in FRANKA_PANDA_HIGH_PD_CFG.actuators.items() 
     if "hand" not in actuator_name and "finger" not in actuator_name
 }
+
+EE_TARGET_PRIM_PATH = (
+    "{ENV_REGEX_NS}/Robot/panda_hand"
+    if _USE_BARE_FRANKA
+    else "{ENV_REGEX_NS}/Robot/tool_mount/link_coacd_convex_piece_0"
+)
+EE_TARGET_NAME = "ee_hand" if _USE_BARE_FRANKA else "ee_tool"
+
+
+def make_robot_cfg() -> ArticulationCfg:
+    if _USE_BARE_FRANKA:
+        robot_cfg = FRANKA_PANDA_HIGH_PD_CFG.copy()
+        if os.path.isfile(bare_franka_path):
+            robot_cfg.spawn.usd_path = bare_franka_path
+        robot_cfg.spawn.rigid_props.disable_gravity = True
+    else:
+        robot_cfg = build_multi_tool_robot_cfg(TOOL_USD_PATHS_FOR_SPAWN, random_choice=False)
+
+    return robot_cfg.replace(
+        prim_path="{ENV_REGEX_NS}/Robot",
+        init_state=ArticulationCfg.InitialStateCfg(joint_pos=custom_joint_init),
+    )
+
 
 @configclass
 class NonPrehensileSceneCfg(InteractiveSceneCfg):
@@ -469,23 +516,17 @@ class NonPrehensileSceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    # Multi-tool robot: each env gets a different tool USD via MultiUsdFileCfg
-    robot = build_multi_tool_robot_cfg(TOOL_USD_PATHS_FOR_SPAWN, random_choice=False).replace(
-        prim_path="{ENV_REGEX_NS}/Robot",
-        init_state=ArticulationCfg.InitialStateCfg(
-            joint_pos=custom_joint_init
-        ),
-    )
+    robot = make_robot_cfg()
 
-    # FrameTransformer anchored to link_coacd_convex_piece_0 (the tool body, welded to panda_link7 via fixed joint)
+    # FrameTransformer anchored to the active end-effector body.
     ee_frame = FrameTransformerCfg(
         prim_path="{ENV_REGEX_NS}/Robot/panda_link0",
         debug_vis=False,
         visualizer_cfg=FRAME_MARKER_SMALL_CFG.replace(prim_path="/Visuals/EndEffectorFrameTransformer"),
         target_frames=[
             FrameTransformerCfg.FrameCfg(
-                prim_path="{ENV_REGEX_NS}/Robot/tool_mount/link_coacd_convex_piece_0",
-                name="ee_tool",
+                prim_path=EE_TARGET_PRIM_PATH,
+                name=EE_TARGET_NAME,
                 offset=OffsetCfg(
                     pos=(0.0, 0.0, 0.0),  # Offset is applied in get_head_area_pos_w via _head_area_offsets
                 ),
@@ -531,19 +572,27 @@ class ObservationsCfg:
         object_cloud = ObsTerm(
             func=mdp.get_object_pointcloud_in_env_frame,
             noise=GaussianNoiseCfg(mean=0.0, std=0.005, operation="add"),
-        )
+        ) if _RL_CONTRACT.observation.include_object_cloud else None
 
         # Tool Cloud (512*3=1536D: tool point cloud xyz in env frame)
         tool_cloud = ObsTerm(
             func=mdp.get_tool_pointcloud_in_env_frame,
             noise=GaussianNoiseCfg(mean=0.0, std=0.002, operation="add"),
-        )
+        ) if (_RL_CONTRACT.observation.include_tool_cloud and not _USE_BARE_FRANKA) else None
 
         # Object bbox center (3D): MUST come AFTER object_cloud so the cache is populated.
-        object_bbox_center = ObsTerm(func=mdp.get_obj_bbox_center)
+        object_bbox_center = ObsTerm(
+            func=mdp.get_obj_bbox_center
+        ) if _RL_CONTRACT.observation.include_bbox_centers else None
 
         # Tool bbox center (3D): MUST come AFTER tool_cloud so the cache is populated.
-        tool_bbox_center = ObsTerm(func=mdp.get_tool_bbox_center)
+        tool_bbox_center = ObsTerm(
+            func=mdp.get_tool_bbox_center
+        ) if (
+            _RL_CONTRACT.observation.include_bbox_centers
+            and _RL_CONTRACT.observation.include_tool_cloud
+            and not _USE_BARE_FRANKA
+        ) else None
 
         # Hand State (9D: hand position[3] + rotation_matrix[6])
         hand_state = ObsTerm(
@@ -612,7 +661,7 @@ class EventCfg:
         params={
             "mass_range": _RL_CONTRACT.domain_randomization.tool.mass.range,
         },
-    ) if _dr_event_enabled(_RL_CONTRACT.domain_randomization.tool.mass) else None
+    ) if _tool_dr_event_enabled(_RL_CONTRACT.domain_randomization.tool.mass) else None
 
     # Tool friction randomization: randomize friction of the tool body's collision shapes
     randomize_tool_friction = EventTerm(
@@ -623,7 +672,7 @@ class EventCfg:
             "dynamic_friction_range": _RL_CONTRACT.domain_randomization.tool.material.dynamic_friction_range,
             "restitution_range": _RL_CONTRACT.domain_randomization.tool.material.restitution_range,
         },
-    ) if _dr_event_enabled(_RL_CONTRACT.domain_randomization.tool.material) else None
+    ) if _tool_dr_event_enabled(_RL_CONTRACT.domain_randomization.tool.material) else None
 
     # Physical parameter randomization events
     randomize_object_mass = EventTerm(
@@ -774,6 +823,7 @@ class NonPrehensileEnvCfg(ManagerBasedRLEnvCfg):
     action_dim: int = _ACTION_DIM
     observation_dim: int = _OBSERVATION_DIM
     physics_dim: int = _PHYSICS_DIM
+    robot_mode: str = _ROBOT_MODE
     physics_observation_fields: tuple[str, ...] = _PHYSICS_OBSERVATION_FIELDS
     table_enabled: bool = _RL_CONTRACT.table.enabled
     table_size_xyz: tuple[float, float, float] = tuple(_RL_CONTRACT.table.size_xyz)
@@ -785,7 +835,7 @@ class NonPrehensileEnvCfg(ManagerBasedRLEnvCfg):
     # Visualization settings
     visualize_current_object_pose: bool = True  # Enable current object pose visualization
     visualize_object_pointcloud: bool = False  # Enable object point cloud visualization for debug in first env
-    visualize_tool_pointcloud: bool = True # Enable tool point cloud visualization (blue spheres) in first env
+    visualize_tool_pointcloud: bool = False if _USE_BARE_FRANKA else True
     visualize_eef_position: bool = False  # Enable eef tool position visualization
     visualize_object_velocity_mass: bool = False  # Enable 7D object velocity & mass visualization
     visualize_tool_velocity_mass: bool = False  # Enable 7D tool velocity & mass visualization
@@ -940,4 +990,7 @@ class NonPrehensileEnv(ManagerBasedRLEnv):
 
         # Compute per-env head area offsets from the fixed fork OBJ + head_area_norm.
         # Each offset is in the tool's local frame (relative to link_coacd_convex_piece_0 origin).
-        self._head_area_offsets = mdp.compute_head_area_offsets_from_usd(self)
+        if _USE_BARE_FRANKA:
+            self._head_area_offsets = torch.zeros(self.num_envs, 3, device=self.device)
+        else:
+            self._head_area_offsets = mdp.compute_head_area_offsets_from_usd(self)

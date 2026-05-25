@@ -13,6 +13,7 @@
         <h1>实验配置浏览器</h1>
       </div>
       <div class="toolbar">
+        <a class="nav-link" href="/contact-viz.html">Contact Viz</a>
         <input id="searchInput" type="search" placeholder="搜索实验、模型、run name" />
         <select id="stageFilter" aria-label="按过程过滤">
           <option value="all">全部过程</option>
@@ -27,7 +28,13 @@
       <section class="list-pane" aria-label="实验列表">
         <div class="list-meta">
           <span id="countLabel">加载中</span>
-          <button id="refreshButton" class="ghost-button" type="button">刷新</button>
+          <div class="list-actions">
+            <label class="list-toggle">
+              <input id="showAllConfigs" type="checkbox" />
+              <span>显示全部配置</span>
+            </label>
+            <button id="refreshButton" class="ghost-button" type="button">刷新</button>
+          </div>
         </div>
         <div id="cards" class="cards"></div>
       </section>

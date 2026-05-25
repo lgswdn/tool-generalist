@@ -29,6 +29,7 @@ def launch_from_runtime_spec(spec_path: str | Path) -> dict[str, Any]:
     path = Path(spec_path).expanduser().resolve()
     if not path.exists():
         raise FileNotFoundError(f"RL runtime spec does not exist: {path}")
+    os.environ.setdefault("HYDRA_FULL_ERROR", "1")
     os.environ[RUNTIME_SPEC_ENV_VAR] = str(path)
     spec = load_runtime_spec_from_env()
     os.environ["TOOL_GENERALIST_PATHS_YAML"] = str(Path(_require_string(spec, "paths_yaml")).expanduser())
@@ -93,6 +94,7 @@ def _spawn_distributed_workers(spec_path: Path, spec: Mapping[str, Any]) -> dict
     num_gpus = int(spec["num_gpus"])
     env = os.environ.copy()
     env[RUNTIME_SPEC_ENV_VAR] = str(spec_path)
+    env.setdefault("HYDRA_FULL_ERROR", "1")
     env["TOOL_GENERALIST_PATHS_YAML"] = str(Path(_require_string(spec, "paths_yaml")).expanduser())
     cmd = [
         sys.executable,
@@ -204,8 +206,11 @@ def _run_rsl_rl_training(spec: Mapping[str, Any], app_launcher: Any) -> None:
         )
         _summarize_env_cfg_startup(env_cfg)
         _wrap_scene_spawn_functions(env_cfg.scene)
-        with _trace_block("gym.make"):
-            env = gym.make(task_id, cfg=env_cfg, render_mode=None)
+        try:
+            with _trace_block("gym.make"):
+                env = gym.make(task_id, cfg=env_cfg, render_mode=None)
+        except TypeError as exc:
+            raise _concise_gym_make_error(task_id, exc) from (exc.__context__ or exc)
         _log("after gym.make")
         if isinstance(env.unwrapped, DirectMARLEnv):
             _log("before multi_agent_to_single_agent")
@@ -253,6 +258,25 @@ def _run_rsl_rl_training(spec: Mapping[str, Any], app_launcher: Any) -> None:
 
 def _log(message: str) -> None:
     print(f"[rl_launcher] {message}", flush=True)
+
+
+def _concise_gym_make_error(task_id: str, exc: TypeError) -> RuntimeError:
+    """Convert Gymnasium's huge env_creator kwargs dump into the root error."""
+
+    root = exc.__context__ or exc.__cause__
+    if root is not None:
+        message = f"{type(root).__name__}: {_truncate_exception_message(root)}"
+    else:
+        message = f"{type(exc).__name__}: {_truncate_exception_message(exc)}"
+    _log(f"gym.make failed task={task_id} root={message}")
+    return RuntimeError(f"gym.make failed for task {task_id}: {message}")
+
+
+def _truncate_exception_message(exc: BaseException, *, limit: int = 1200) -> str:
+    text = str(exc)
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + " ... [truncated]"
 
 
 def _trace_enabled() -> bool:

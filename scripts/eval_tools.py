@@ -179,6 +179,18 @@ parser.add_argument("--num_envs", type=int, default=512, help="Number of environ
 parser.add_argument("--num_episodes", type=int, default=10, help="Number of episodes to evaluate per tool.")
 parser.add_argument("--max_episode_steps", type=int, default=300, help="Safety cap on episode length (steps).")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment.")
+parser.add_argument(
+    "--randomize_objects",
+    action="store_true",
+    default=False,
+    help="Override the runtime spec and randomly assign object assets to envs during evaluation.",
+)
+parser.add_argument(
+    "--object_random_seed",
+    type=int,
+    default=None,
+    help="Seed for --randomize_objects object assignment.",
+)
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during evaluation.")
 parser.add_argument("--video_length", type=int, default=400, help="Length of the recorded video in steps.")
 parser.add_argument("--video_interval", type=int, default=1_000_000, help="Interval between videos.")
@@ -196,6 +208,11 @@ parser.add_argument("--real_time", action="store_true", default=False, help="Run
 parser.add_argument("--distributed", action="store_true", default=False, help="Run evaluation across multiple GPUs.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
+
+if args_cli.randomize_objects and args_cli.object_random_seed is None:
+    parser.error("--object_random_seed is required when --randomize_objects is set")
+if args_cli.object_random_seed is not None and args_cli.object_random_seed < 0:
+    parser.error("--object_random_seed must be >= 0")
 
 if args_cli.runtime_spec:
     runtime_spec = _load_runtime_spec_from_file(args_cli.runtime_spec)
@@ -224,6 +241,12 @@ eval_runtime_spec["num_envs"] = args_cli.num_envs
 if isinstance(eval_runtime_spec.get("env_params"), dict):
     eval_runtime_spec["env_params"]["num_envs"] = args_cli.num_envs
 eval_runtime_spec["paths_yaml"] = rank_paths_yaml
+if args_cli.randomize_objects:
+    asset_assignment = eval_runtime_spec.get("asset_assignment_params")
+    if not isinstance(asset_assignment, dict):
+        parser.error("runtime_spec must contain asset_assignment_params to use --randomize_objects")
+    asset_assignment["randomize_object_assignment"] = True
+    os.environ["TOOL_GENERALIST_OBJECT_ASSIGNMENT_SEED"] = str(int(args_cli.object_random_seed))
 _backfill_runtime_spec_defaults(eval_runtime_spec)
 eval_runtime_spec_path = os.path.join(
     tempfile.gettempdir(),
@@ -531,6 +554,8 @@ def _write_summary(log_dir: str, resume_path: str, rows: list[dict]) -> None:
         "world_size": world_size,
         "num_envs_per_rank": args_cli.num_envs,
         "episodes_per_tool": args_cli.num_episodes,
+        "randomize_objects": bool(args_cli.randomize_objects),
+        "object_random_seed": args_cli.object_random_seed,
         "tools": len(rows),
         "episodes": total_episodes,
         "successes": total_successes,

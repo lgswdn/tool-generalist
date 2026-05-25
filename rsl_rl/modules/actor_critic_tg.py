@@ -272,6 +272,7 @@ class ActorCriticTG(nn.Module):
         robot_state_dim: int = 14,
         previous_action_dim: Optional[int] = None,
         relative_goal_dim: int = 9,
+        object_velocity_dim: int = 0,
         physics_dim: int = 7,
         model_input_centering: str = "bbox_center",
         # Activation / noise
@@ -300,6 +301,7 @@ class ActorCriticTG(nn.Module):
                 f"'object_center', got {self.model_input_centering!r}"
             )
         self.previous_action_dim = int(previous_action_dim) if previous_action_dim is not None else int(num_actions)
+        self.object_velocity_dim = int(object_velocity_dim)
         self.physics_dim = int(physics_dim)
 
         self.obs_layout = TGObservationLayout.build(
@@ -309,6 +311,7 @@ class ActorCriticTG(nn.Module):
             robot_state_dim=robot_state_dim,
             previous_action_dim=self.previous_action_dim,
             relative_goal_dim=relative_goal_dim,
+            object_velocity_dim=self.object_velocity_dim,
             physics_dim=self.physics_dim,
         )
         if num_actor_obs != self.obs_layout.total_dim:
@@ -384,6 +387,7 @@ class ActorCriticTG(nn.Module):
             robot_state_dim=robot_state_dim,
             previous_action_dim=self.previous_action_dim,
             relative_goal_dim=relative_goal_dim,
+            object_velocity_dim=self.object_velocity_dim,
             physics_dim=self.physics_dim,
         )
         self.context_dim = sd_ctx_dim

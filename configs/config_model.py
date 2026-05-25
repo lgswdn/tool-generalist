@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
-PRETRAINED_ENCODER_ADAPTERS = ("tce_strict", "point2vec_native")
+PRETRAINED_ENCODER_ADAPTERS = ("tce_strict", "point2vec_native", "icp_legacy")
 
 
 @dataclass
@@ -53,6 +53,15 @@ class P2VCfg(EncoderCfg):
 
 
 @dataclass
+class ICPCfg(EncoderCfg):
+    name: str = "ICP"
+    encoder_type: str = "ICP"
+    output_dim: int = 128
+    num_points: int = 512
+    checkpoint_path: Optional[str] = None
+
+
+@dataclass
 class ConcertoCfg(EncoderCfg):
     name: str = "Concerto"
     encoder_type: str = "Concerto"
@@ -90,6 +99,7 @@ class ModelCfg:
     encoder_backend: str = "tce"
     tce: TCECfg = field(default_factory=TCECfg)
     p2v: P2VCfg = field(default_factory=P2VCfg)
+    icp: ICPCfg = field(default_factory=ICPCfg)
     pretrained_encoder: PretrainedEncoderCfg = field(default_factory=PretrainedEncoderCfg)
     policy_fusion: PolicyFusionCfg = field(default_factory=PolicyFusionCfg)
 
@@ -140,6 +150,8 @@ class ModelCfg:
             return self.tce
         if backend == "point2vec":
             return self.p2v
+        if backend == "icp":
+            return self.icp
         raise ValueError(f"Unsupported ModelCfg.encoder_backend: {self.encoder_backend!r}")
 
     @encoder.setter
@@ -152,7 +164,11 @@ class ModelCfg:
             self.p2v = value
             self.encoder_backend = "point2vec"
             return
-        raise ValueError("ModelCfg.encoder must be a TCECfg or P2VCfg")
+        if isinstance(value, ICPCfg):
+            self.icp = value
+            self.encoder_backend = "icp"
+            return
+        raise ValueError("ModelCfg.encoder must be a TCECfg, P2VCfg, or ICPCfg")
 
     @property
     def concerto(self) -> ConcertoCfg:
@@ -162,6 +178,8 @@ class ModelCfg:
     def actor_critic_class(self) -> str:
         if self._normalized_encoder_backend() == "point2vec":
             return "ActorCriticPoint2Vec"
+        if self._normalized_encoder_backend() == "icp":
+            return "ActorCriticICP"
         return "ActorCriticTG"
 
     def _normalized_encoder_backend(self) -> str:
@@ -170,6 +188,8 @@ class ModelCfg:
             return "tce"
         if value in {"point2vec", "p2v"}:
             return "point2vec"
+        if value in {"icp", "corn"}:
+            return "icp"
         return value
 
     @property

@@ -25,6 +25,7 @@ except ImportError:
     HAS_WANDB = False
 
 from configs.config_exp import ExpCfg
+from configs.config_contact_gen import strip_contact_gen_hash_defaults
 from utils.config.paths import ProjectPaths
 from utils.artifacts.resolver import resolve_artifacts
 from utils.experiment.runtime import git_metadata, runtime_metadata
@@ -533,6 +534,9 @@ def build_runtime_config(
 def _strip_pretrain_logging_from_exp_payload(payload: dict[str, Any]) -> dict[str, Any]:
     cleaned = dict(payload)
     cleaned.pop("pretrain_reuse", None)
+    contact_gen = dict(cleaned.get("contact_gen") or {})
+    if contact_gen:
+        cleaned["contact_gen"] = strip_contact_gen_hash_defaults(contact_gen)
     pretrain = dict(cleaned.get("pretrain") or {})
     if isinstance(pretrain.get("loss"), dict):
         pretrain["loss"] = dict(pretrain["loss"])

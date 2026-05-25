@@ -13,7 +13,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from configs.config_contact_gen import ContactGenCfg
+from configs.config_contact_gen import (
+    ROTATION_SELECTION_MOST_DOWNWARD,
+    ROTATION_SELECTION_RANDOM_LEGAL,
+    TOOL_SOURCE_OBJECTS,
+    ContactGenCfg,
+)
 from utils.assets import (
     ToolAssetContractError,
     assert_adjusted_decomposed_mesh_path,
@@ -84,6 +89,9 @@ class GeometryContactConfig:
     object_scale_range: tuple[float, float]
     contact_mode_prob: Mapping[str, float] = field(default_factory=lambda: {"head": 0.7, "body": 0.3})
     upright_threshold: float = 0.0
+    rotation_selection: str = ROTATION_SELECTION_MOST_DOWNWARD
+    tool_mesh_contract: str = "adjusted_decomposed_mesh"
+    use_tool_head_area: bool = True
     epsilon: float = 2e-3
     floor_eps: float = 0.0
     penetration_eps: float = 5e-4
@@ -127,6 +135,13 @@ class GeometryContactConfig:
             object_scale_range=tuple(contact_cfg.object_scale_range),
             contact_mode_prob=dict(contact_cfg.contact_mode_prob),
             upright_threshold=contact_cfg.upright_threshold,
+            rotation_selection=contact_cfg.rotation_selection,
+            tool_mesh_contract=(
+                "object_mesh"
+                if contact_cfg.tool_source == TOOL_SOURCE_OBJECTS
+                else "adjusted_decomposed_mesh"
+            ),
+            use_tool_head_area=contact_cfg.tool_source != TOOL_SOURCE_OBJECTS,
             epsilon=contact_cfg.epsilon,
             floor_eps=contact_cfg.floor_eps,
             penetration_eps=contact_cfg.penetration_eps,
@@ -291,14 +306,13 @@ def rejection_sample_candidates(
     P_head=None,
     P_body=None,
 ):
-    """Return one most-downward legal candidate per accepted anchor pair.
+    """Return one legal candidate per accepted anchor pair.
 
     Each chunk samples ``M`` random rotations once, then broadcasts those
     rotations across all anchor pairs in that chunk.  A candidate is accepted
     only when it stays above the floor and does not penetrate the object beyond
-    ``cfg.penetration_eps``.  For each anchor pair, all legal rotations are
-    scored by the world-Z component of the tool-frame +Z axis, and the smallest
-    score is selected as the most downward rotation.
+    ``cfg.penetration_eps``.  Rotation selection is controlled by
+    ``cfg.rotation_selection``.
     """
 
     torch = _torch()
@@ -337,7 +351,16 @@ def rejection_sample_candidates(
         valid = floor_ok & penetration_ok
         chunk_min_z = points_E[..., 2].amin(dim=(-1, -2))
         downward_score = rotations[:, 2, 2].unsqueeze(0).expand(cb, -1).clone()
-        score = downward_score.clone()
+        if cfg.rotation_selection == ROTATION_SELECTION_MOST_DOWNWARD:
+            score = downward_score.clone()
+        elif cfg.rotation_selection == ROTATION_SELECTION_RANDOM_LEGAL:
+            score = torch.rand(cb, M, device=device)
+        else:
+            raise ValueError(
+                "Unsupported rotation_selection "
+                f"'{cfg.rotation_selection}'. Expected "
+                f"'{ROTATION_SELECTION_MOST_DOWNWARD}' or '{ROTATION_SELECTION_RANDOM_LEGAL}'."
+            )
         score[~valid] = float("inf")
         best_m = score.argmin(dim=-1)
         pair_valid = valid[torch.arange(cb, device=device), best_m]
@@ -446,10 +469,19 @@ def generate_contact_candidates(cfg: GeometryContactConfig) -> GeometryCandidate
         sample_surface_points_torch,
     ) = _geometry()
     torch.manual_seed(int(cfg.seed))
-    tool_id = cfg.tool_id or assert_adjusted_decomposed_mesh_path(cfg.tool_mesh_path)
-    assert_adjusted_decomposed_mesh_path(cfg.tool_mesh_path, tool_id)
-    if not cfg.tools_json_path or not Path(cfg.tools_json_path).exists():
-        raise ToolAssetContractError(f"tools_adjusted.json is required: {cfg.tools_json_path}")
+    tool_id = cfg.tool_id or Path(cfg.tool_mesh_path).stem
+    if cfg.tool_mesh_contract == "adjusted_decomposed_mesh":
+        tool_id = cfg.tool_id or assert_adjusted_decomposed_mesh_path(cfg.tool_mesh_path)
+        assert_adjusted_decomposed_mesh_path(cfg.tool_mesh_path, tool_id)
+        if cfg.use_tool_head_area and (
+            not cfg.tools_json_path or not Path(cfg.tools_json_path).exists()
+        ):
+            raise ToolAssetContractError(f"tools_adjusted.json is required: {cfg.tools_json_path}")
+    elif cfg.tool_mesh_contract != "object_mesh":
+        raise ValueError(
+            "GeometryContactConfig.tool_mesh_contract must be "
+            "adjusted_decomposed_mesh or object_mesh"
+        )
 
     _log(
         "[GEOMETRY] loading meshes "
@@ -508,14 +540,22 @@ def generate_contact_candidates(cfg: GeometryContactConfig) -> GeometryCandidate
     _log(f"[GEOMETRY] sampling object surface anchors count={max(cfg.B * 4, 16384)}")
     object_surface_E = sample_surface_points_torch(object_verts_E, obj_faces, max(cfg.B * 4, 16384))
 
-    _log("[GEOMETRY] loading tool head area and splitting head/body points")
-    head_area = load_tool_head_area(cfg.tools_json_path, cfg.tool_mesh_path, tool_id=tool_id)
-    head_area_tensor = torch.tensor(
-        head_area if head_area is not None else ([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]),
-        dtype=torch.float32,
-    )
-    head_bounds = compute_head_bounds(tool_verts_T, head_area)
-    P_head, P_body = split_head_body(tool_points_T, head_bounds)
+    if cfg.use_tool_head_area:
+        _log("[GEOMETRY] loading tool head area and splitting head/body points")
+        head_area = load_tool_head_area(cfg.tools_json_path, cfg.tool_mesh_path, tool_id=tool_id)
+        head_area_tensor = torch.tensor(
+            head_area if head_area is not None else ([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]),
+            dtype=torch.float32,
+        )
+        head_bounds = compute_head_bounds(tool_verts_T, head_area)
+        P_head, P_body = split_head_body(tool_points_T, head_bounds)
+    else:
+        _log("[GEOMETRY] tool head area disabled; using full tool surface for anchors")
+        head_area_tensor = torch.tensor(
+            ([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]),
+            dtype=torch.float32,
+        )
+        P_head = P_body = None
 
     _log(
         "[GEOMETRY] rejection sampling candidates "
@@ -576,8 +616,10 @@ def generate_contact_candidates(cfg: GeometryContactConfig) -> GeometryCandidate
         "initial_penetration_depth_max": initial_penetration_depth_max,
         "candidate_count_after_geometry_filter": n,
         "source_candidate_index": geometry["source_candidate_index"].detach().cpu().tolist(),
-            "geometry_filter": "penetration_floor_upright",
-            "rotation_selection": "most_downward_legal_tool_z_axis",
+        "geometry_filter": "penetration_floor_upright",
+        "rotation_selection": cfg.rotation_selection,
+        "tool_mesh_contract": cfg.tool_mesh_contract,
+        "use_tool_head_area": bool(cfg.use_tool_head_area),
     }
     if cfg.visualization_enabled:
         geometry_diagnostics["chunks"] = geometry.get("geometry_diagnostics", {}).get("chunks", [])
@@ -609,12 +651,13 @@ def generate_contact_candidates(cfg: GeometryContactConfig) -> GeometryCandidate
         source_candidate_index=geometry["source_candidate_index"].detach().cpu(),
         debug_metrics={
             "algorithm": "bbox_centered_anchor_pair_rejection",
-            "rotation_selection": "most_downward_legal_tool_z_axis",
+            "rotation_selection": cfg.rotation_selection,
             "num_anchor_pairs": int(cfg.B),
             "rotations_per_pair": int(cfg.M),
             "penetration_eps": float(cfg.penetration_eps),
             "head_contact_probability": head_contact_probability(cfg.contact_mode_prob),
-            "tool_mesh_contract": "adjusted_decomposed_mesh",
+            "tool_mesh_contract": cfg.tool_mesh_contract,
+            "use_tool_head_area": bool(cfg.use_tool_head_area),
             "geometry_diagnostics": geometry_diagnostics,
         },
     )

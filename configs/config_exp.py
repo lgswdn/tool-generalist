@@ -10,7 +10,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from .config_contact_gen import ContactGenCfg
+from .config_contact_gen import (
+    ROTATION_SELECTION_MOST_DOWNWARD,
+    ROTATION_SELECTION_RANDOM_LEGAL,
+    TOOL_SOURCE_OBJECTS,
+    TOOL_SOURCE_SELECTED_TOOLS,
+    ContactGenCfg,
+)
 from .config_general import GeneralCfg
 from .config_model import ModelCfg
 from .config_pretrain import PretrainCfg
@@ -91,6 +97,35 @@ class ExpCfg:
             "ContactGenCfg.max_contacts_per_pair",
             self.contact_gen.max_contacts_per_pair,
         )
+        if self.contact_gen.rotation_selection not in {
+            ROTATION_SELECTION_MOST_DOWNWARD,
+            ROTATION_SELECTION_RANDOM_LEGAL,
+        }:
+            errors.append(
+                "ContactGenCfg.rotation_selection must be "
+                f"{ROTATION_SELECTION_MOST_DOWNWARD} or {ROTATION_SELECTION_RANDOM_LEGAL}"
+            )
+        if self.contact_gen.tool_source not in {TOOL_SOURCE_SELECTED_TOOLS, TOOL_SOURCE_OBJECTS}:
+            errors.append(
+                "ContactGenCfg.tool_source must be "
+                f"{TOOL_SOURCE_SELECTED_TOOLS} or {TOOL_SOURCE_OBJECTS}"
+            )
+        if self.contact_gen.object_tool_manifest is not None and (
+            not isinstance(self.contact_gen.object_tool_manifest, str)
+            or not self.contact_gen.object_tool_manifest.strip()
+        ):
+            errors.append("ContactGenCfg.object_tool_manifest must be a non-empty string or None")
+        if not isinstance(self.contact_gen.allow_self_object_tool_pairs, bool):
+            errors.append("ContactGenCfg.allow_self_object_tool_pairs must be a bool")
+        _require_positive_int(errors, "ContactGenCfg.shard_count", self.contact_gen.shard_count)
+        _require_positive_int(
+            errors,
+            "ContactGenCfg.shard_index",
+            self.contact_gen.shard_index,
+            allow_zero=True,
+        )
+        if self.contact_gen.shard_index >= self.contact_gen.shard_count:
+            errors.append("ContactGenCfg.shard_index must be < ContactGenCfg.shard_count")
         _require_positive_int(errors, "PretrainBatchCfg.batch_size", self.pretrain.batch.batch_size)
         _require_positive_int(
             errors,
@@ -150,6 +185,8 @@ class ExpCfg:
             errors.append("RLEnvCfg.sim_dt must be > 0")
         if self.rl.env.episode_length_s <= 0:
             errors.append("RLEnvCfg.episode_length_s must be > 0")
+        if self.rl.env.robot_mode not in {"tool", "bare_franka"}:
+            errors.append("RLEnvCfg.robot_mode must be tool or bare_franka")
         if not isinstance(self.rl.separate_actor_critic_fusion, bool):
             errors.append("RLCfg.separate_actor_critic_fusion must be a bool")
         if self.rl.reward.rotation_distance_divisor <= 0:
@@ -242,6 +279,41 @@ class ExpCfg:
             errors.append("ObjectPoseSamplingCfg.initial_position_range must be >= 0")
         if self.rl.object_pose_sampling.xy_offset_range < 0:
             errors.append("ObjectPoseSamplingCfg.xy_offset_range must be >= 0")
+        if not isinstance(self.rl.curriculum.enabled, bool):
+            errors.append("RLCurriculumCfg.enabled must be a bool")
+        _require_positive_int(
+            errors,
+            "RLCurriculumCfg.start_step",
+            self.rl.curriculum.start_step,
+            allow_zero=True,
+        )
+        _require_positive_int(
+            errors,
+            "RLCurriculumCfg.end_step",
+            self.rl.curriculum.end_step,
+            allow_zero=True,
+        )
+        if self.rl.curriculum.end_step < self.rl.curriculum.start_step:
+            errors.append("RLCurriculumCfg.end_step must be >= start_step")
+        for field_name in (
+            "start_stable_pose_probability",
+            "end_stable_pose_probability",
+        ):
+            value = getattr(self.rl.curriculum, field_name)
+            if value < 0.0 or value > 1.0:
+                errors.append(f"RLCurriculumCfg.{field_name} must be in [0, 1]")
+        if self.rl.observation.object_velocity_dim < 0:
+            errors.append("ObservationCfg.object_velocity_dim must be >= 0")
+        if self.rl.reward.stable_success_linear_velocity_threshold <= 0:
+            errors.append("RewardCfg.stable_success_linear_velocity_threshold must be > 0")
+        if self.rl.reward.stable_success_angular_velocity_threshold <= 0:
+            errors.append("RewardCfg.stable_success_angular_velocity_threshold must be > 0")
+        if self.rl.reward.stable_success_dwell_steps < 1:
+            errors.append("RewardCfg.stable_success_dwell_steps must be >= 1")
+        if self.rl.reward.object_stillness_linear_velocity_std <= 0:
+            errors.append("RewardCfg.object_stillness_linear_velocity_std must be > 0")
+        if self.rl.reward.object_stillness_angular_velocity_std <= 0:
+            errors.append("RewardCfg.object_stillness_angular_velocity_std must be > 0")
         _require_range(errors, "ActionCfg.clip", self.rl.action.clip)
         if self.rl.action.clip[0] < -1.0 or self.rl.action.clip[1] > 1.0:
             errors.append("ActionCfg.clip must stay within [-1, 1]")
@@ -265,23 +337,28 @@ class ExpCfg:
             encoder_backend = "tce"
         if encoder_backend in {"p2v"}:
             encoder_backend = "point2vec"
-        if encoder_backend not in {"tce", "point2vec"}:
-            errors.append("ModelCfg.encoder_backend must be tce or point2vec")
-        allowed_adapters = {"tce_strict", "point2vec_native"}
+        if encoder_backend in {"corn"}:
+            encoder_backend = "icp"
+        if encoder_backend not in {"tce", "point2vec", "icp"}:
+            errors.append("ModelCfg.encoder_backend must be tce, point2vec, or icp")
+        allowed_adapters = {"tce_strict", "point2vec_native", "icp_legacy"}
         if self.model.pretrained_encoder.adapter not in allowed_adapters:
             errors.append(
                 "ModelCfg.pretrained_encoder.adapter must be one of "
                 f"{sorted(allowed_adapters)}"
             )
-        allowed_actors = {"ActorCriticTG", "ActorCriticPoint2Vec"}
+        allowed_actors = {"ActorCriticTG", "ActorCriticTGBimanual", "ActorCriticPoint2Vec", "ActorCriticICP"}
         if self.rl.actor_critic_class not in allowed_actors:
             errors.append(
                 "RLCfg.actor_critic_class must be one of "
                 f"{sorted(allowed_actors)}"
             )
         if encoder_backend == "tce":
-            if self.rl.actor_critic_class != "ActorCriticTG":
-                errors.append("encoder_backend=tce requires RLCfg.actor_critic_class=ActorCriticTG")
+            if self.rl.actor_critic_class not in {"ActorCriticTG", "ActorCriticTGBimanual"}:
+                errors.append(
+                    "encoder_backend=tce requires RLCfg.actor_critic_class=ActorCriticTG "
+                    "or ActorCriticTGBimanual"
+                )
             if self.model.pretrained_encoder.adapter != "tce_strict":
                 errors.append("encoder_backend=tce requires pretrained_encoder.adapter=tce_strict")
         if encoder_backend == "point2vec":
@@ -295,10 +372,33 @@ class ExpCfg:
                     "encoder_backend=point2vec requires "
                     "pretrained_encoder.adapter=point2vec_native"
                 )
+        if encoder_backend == "icp":
+            if self.rl.actor_critic_class != "ActorCriticICP":
+                errors.append("encoder_backend=icp requires RLCfg.actor_critic_class=ActorCriticICP")
+            if self.model.pretrained_encoder.adapter != "icp_legacy":
+                errors.append("encoder_backend=icp requires pretrained_encoder.adapter=icp_legacy")
+            if self.rl.env.robot_mode != "bare_franka":
+                errors.append("ActorCriticICP requires RLEnvCfg.robot_mode=bare_franka")
+            expected_layout = [
+                "object_cloud_flat",
+                "hand_state",
+                "robot_state",
+                "previous_action",
+                "relative_goal_pose",
+                "physics",
+            ]
+            if self.rl.observation.layout != expected_layout:
+                errors.append(f"ActorCriticICP requires ObservationCfg.layout={expected_layout!r}")
+            if not self.rl.observation.include_object_cloud:
+                errors.append("ActorCriticICP requires ObservationCfg.include_object_cloud=True")
+            if self.rl.observation.include_tool_cloud:
+                errors.append("ActorCriticICP requires ObservationCfg.include_tool_cloud=False")
+            if self.rl.observation.include_bbox_centers:
+                errors.append("ActorCriticICP requires ObservationCfg.include_bbox_centers=False")
         if self.pretrain.enabled and (
-            encoder_backend != "tce" or self.rl.actor_critic_class != "ActorCriticTG"
+            encoder_backend != "tce" or self.rl.actor_critic_class not in {"ActorCriticTG", "ActorCriticTGBimanual"}
         ):
-            errors.append("PretrainCfg.enabled currently supports only TCE with ActorCriticTG")
+            errors.append("PretrainCfg.enabled currently supports only TCE with ActorCriticTG/ActorCriticTGBimanual")
         if self.rl.algorithm_class != "PPO":
             errors.append("RLCfg.algorithm_class must be PPO")
         if self.rl.ppo.class_name != "PPO":

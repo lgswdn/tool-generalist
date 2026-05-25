@@ -4,6 +4,7 @@ from copy import deepcopy
 
 from configs.config_exp import ExpCfg
 from utils.artifacts.manifest import ArtifactManifest, write_manifest
+from utils.artifacts.naming import _pretrain_model_hash_payload
 from utils.config.hash import config_hash
 from utils.artifacts.resolver import resolve_artifacts
 from utils.experiment.runner import _stage_action
@@ -42,6 +43,20 @@ def test_pretrain_reuse_is_not_part_of_artifact_hash():
         (s.stage, s.config_hash, s.directory) for s in artifacts_b.stages
     ]
     assert config_hash(cfg_a) == config_hash(cfg_b)
+
+
+def test_inactive_icp_backend_does_not_change_tce_pretrain_hash():
+    cfg = ExpCfg(name="inactive_backend_hash_unit")
+    cfg.model.encoder_backend = "tce"
+
+    payload = _pretrain_model_hash_payload(cfg)
+
+    assert "icp" not in payload
+    assert "tce" in payload
+    assert "p2v" in payload
+
+    cfg.model.encoder_backend = "icp"
+    assert "icp" in _pretrain_model_hash_payload(cfg)
 
 
 def test_contact_stage_reuses_existing_outputs_when_top_manifest_is_incomplete(tmp_path):

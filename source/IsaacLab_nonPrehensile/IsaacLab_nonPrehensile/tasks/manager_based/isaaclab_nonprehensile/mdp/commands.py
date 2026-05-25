@@ -246,14 +246,52 @@ class StablePoseCommand(CommandTerm):
         if self.num_envs <= 0:
             return
 
-        ee_frame = self._env.scene["ee_frame"]
-        hand_pos_local = mdp.get_head_area_pos_w(self._env) - self._env.scene.env_origins
-        hand_quat_w = ee_frame.data.target_quat_w[..., 0, :]
         env_i = 0
 
         def _vals(tensor: torch.Tensor) -> list[float]:
             return [round(float(v), 6) for v in tensor.detach().cpu().tolist()]
 
+        if getattr(self._env.cfg, "bimanual", False):
+            ee_frame_1 = self._env.scene["ee_frame_1"]
+            ee_frame_2 = self._env.scene["ee_frame_2"]
+            hand1_pos_local = (
+                mdp.get_head_area_pos_w_for_slot(
+                    self._env,
+                    ee_frame_name="ee_frame_1",
+                    offsets_attr="_head_area_offsets_1",
+                )
+                - self._env.scene.env_origins
+            )
+            hand2_pos_local = (
+                mdp.get_head_area_pos_w_for_slot(
+                    self._env,
+                    ee_frame_name="ee_frame_2",
+                    offsets_attr="_head_area_offsets_2",
+                )
+                - self._env.scene.env_origins
+            )
+            hand1_quat_w = ee_frame_1.data.target_quat_w[..., 0, :]
+            hand2_quat_w = ee_frame_2.data.target_quat_w[..., 0, :]
+            print(
+                "[rl_pose_debug] "
+                f"step={count} env={env_i} "
+                f"hand1_pos_E={_vals(hand1_pos_local[env_i])} "
+                f"hand1_quat_wxyz={_vals(hand1_quat_w[env_i])} "
+                f"hand2_pos_E={_vals(hand2_pos_local[env_i])} "
+                f"hand2_quat_wxyz={_vals(hand2_quat_w[env_i])} "
+                f"object_pos_E={_vals(object_pos_local[env_i])} "
+                f"object_quat_wxyz={_vals(object_quat_w[env_i])} "
+                f"target_pos_E={_vals(target_pos_local[env_i])} "
+                f"target_quat_wxyz={_vals(target_quat[env_i])} "
+                f"distance_to_goal={float(self.metrics['distance_to_goal'][env_i].detach().cpu()):.6f} "
+                f"rot_to_goal={float(self.metrics['rot_to_goal'][env_i].detach().cpu()):.6f}",
+                flush=True,
+            )
+            return
+
+        ee_frame = self._env.scene["ee_frame"]
+        hand_pos_local = mdp.get_head_area_pos_w(self._env) - self._env.scene.env_origins
+        hand_quat_w = ee_frame.data.target_quat_w[..., 0, :]
         print(
             "[rl_pose_debug] "
             f"step={count} env={env_i} "
@@ -279,6 +317,98 @@ class StablePoseCommand(CommandTerm):
         self._command = value.clone()
 
 
+class RandomPoseCommand(StablePoseCommand):
+    """Command generator for arbitrary object orientations placed on the support surface."""
+
+    @profile_cmd
+    def _resample_command(self, env_ids: torch.Tensor):
+        """Resample random object target poses for given environment indices."""
+        stable_pose_probability = float(
+            getattr(self, "stable_pose_probability", getattr(self.cfg, "stable_pose_probability", 0.0))
+        )
+        stable_pose_probability = max(0.0, min(1.0, stable_pose_probability))
+        if stable_pose_probability >= 1.0:
+            StablePoseCommand._resample_command(self, env_ids)
+            return
+        if stable_pose_probability > 0.0:
+            stable_mask = torch.rand(env_ids.shape[0], device=self.device) < stable_pose_probability
+            if bool(stable_mask.any()):
+                StablePoseCommand._resample_command(self, env_ids[stable_mask])
+            if bool(stable_mask.all()):
+                return
+            env_ids = env_ids[~stable_mask]
+
+        from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
+            get_cached_cloud,
+            get_object_asset_cfg_for_env,
+            get_object_index_for_env,
+        )
+
+        scales = mdp.get_rigid_body_scale(self._env, SceneEntityCfg("object"), env_ids)
+        group = {}
+        for i, env_id in enumerate(env_ids):
+            env_id_int = int(env_id.item())
+            asset_idx = get_object_index_for_env(env_id_int)
+            group.setdefault(asset_idx, {"env_ids": [], "indices": []})
+            group[asset_idx]["env_ids"].append(env_id_int)
+            group[asset_idx]["indices"].append(i)
+
+        out = torch.zeros((env_ids.shape[0], 7), dtype=torch.float32, device=self.device)
+        placement_cfg = table_contract_from_env(self._env)
+        table_surface_z = (
+            table_top_z_from_contract(placement_cfg, self.device)
+            if bool(placement_cfg.enabled)
+            else torch.as_tensor(0.0, dtype=torch.float32, device=self.device)
+        )
+
+        for asset_idx, g in group.items():
+            obj_path = get_object_asset_cfg_for_env(g["env_ids"][0]).obj_path
+            sel = torch.tensor(g["indices"], device=self.device, dtype=torch.long)
+            scales_sub = scales.index_select(0, sel)
+            group_size = int(sel.numel())
+
+            object_cloud = get_cached_cloud(obj_path)
+            object_vertices = object_cloud._get_vertices_torch(self.device).float()
+            points_local = object_vertices.unsqueeze(0) * scales_sub[:, None, :].float()
+
+            quat = _sample_uniform_quat_wxyz(group_size, self.device)
+
+            r = self.xy_offset_range
+            sign_x = torch.where(torch.rand(group_size, device=self.device) < 0.5, -1.0, 1.0)
+            sign_y = torch.where(torch.rand(group_size, device=self.device) < 0.5, -1.0, 1.0)
+            mag_x = (0.5 + torch.rand(group_size, device=self.device) * 0.5) * r
+            mag_y = (0.5 + torch.rand(group_size, device=self.device) * 0.5) * r
+            pos = torch.zeros((group_size, 3), dtype=torch.float32, device=self.device)
+            pos[:, 0] = 0.5 + sign_x * mag_x
+            pos[:, 1] = 2.0 * (sign_y * mag_y)
+            pos[:, 2] = surface_z_for_points(points_local, quat, table_surface_z)
+
+            out.index_copy_(0, sel, torch.cat([pos, quat], dim=1))
+
+        for i, env_id in enumerate(env_ids):
+            self.command[int(env_id.item())] = out[i]
+
+        if self.cfg.debug_vis and self._target_visualizer is not None:
+            self._update_visualization()
+
+
+def _sample_uniform_quat_wxyz(num: int, device: torch.device) -> torch.Tensor:
+    """Sample uniformly from SO(3), returned in Isaac's wxyz convention."""
+
+    u1 = torch.rand(num, device=device)
+    u2 = torch.rand(num, device=device)
+    u3 = torch.rand(num, device=device)
+    r1 = torch.sqrt(1.0 - u1)
+    r2 = torch.sqrt(u1)
+    theta1 = 2.0 * torch.pi * u2
+    theta2 = 2.0 * torch.pi * u3
+    qx = r1 * torch.sin(theta1)
+    qy = r1 * torch.cos(theta1)
+    qz = r2 * torch.sin(theta2)
+    qw = r2 * torch.cos(theta2)
+    return torch.stack((qw, qx, qy, qz), dim=1)
+
+
 @configclass
 class StablePoseCommandCfg(CommandTermCfg):
     """Configuration for stable pose command generator."""
@@ -295,3 +425,13 @@ class StablePoseCommandCfg(CommandTermCfg):
     # Visualization
     debug_vis: bool = False
     """Whether to visualize the target poses."""
+
+
+@configclass
+class RandomPoseCommandCfg(StablePoseCommandCfg):
+    """Configuration for random pose command generator."""
+
+    class_type: type = RandomPoseCommand
+
+    stable_pose_probability: float = 0.0
+    """Probability of sampling a stable target pose instead of an arbitrary target pose."""

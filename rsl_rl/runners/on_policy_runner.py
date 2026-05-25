@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import os
-import statistics
 import time
 import torch
 from collections import deque
@@ -16,6 +15,7 @@ from rsl_rl.algorithms import PPO, Distillation, resolve_algorithm_class
 from rsl_rl.env import VecEnv
 from rsl_rl.modules import (
     ActorCritic,
+    ActorCriticICP,
     ActorCriticRecurrent,
     ActorCriticTG,
     EmpiricalNormalization,
@@ -73,6 +73,7 @@ class OnPolicyRunner:
         policy_class = resolve_policy_class(self.policy_cfg.pop("class_name"))
         policy: (
             ActorCritic
+            | ActorCriticICP
             | ActorCriticRecurrent
             | ActorCriticTG
             | StudentTeacher
@@ -287,12 +288,12 @@ class OnPolicyRunner:
                 if encoder_call_summary is not None:
                     print(encoder_call_summary)
             self.current_learning_iteration = it
-            # log info
-            if self.log_dir is not None and not self.disable_logs:
-                # Log information
+            # log info. In distributed runs every rank enters log() so metrics can
+            # be aggregated before rank 0 writes them.
+            if self.log_dir is not None:
                 self.log(locals())
                 # Save model
-                if it % self.save_interval == 0:
+                if it % self.save_interval == 0 and not self.disable_logs:
                     self.save(os.path.join(self.log_dir, f"model_{it}.pt"))
 
             # Clear episode infos
@@ -317,35 +318,30 @@ class OnPolicyRunner:
         self.tot_timesteps += collection_size
         self.tot_time += locs["collection_time"] + locs["learn_time"]
         iteration_time = locs["collection_time"] + locs["learn_time"]
+        loss_stats = self._distributed_average_stats(
+            {key: (float(value), 1) for key, value in locs["loss_dict"].items()}
+        )
+        episode_stats = self._distributed_average_stats(self._episode_info_stats(locs["ep_infos"]))
+        train_stats = self._distributed_average_stats(self._train_buffer_stats(locs))
+
+        if self.disable_logs:
+            return
 
         # -- Episode info
         ep_string = ""
-        if locs["ep_infos"]:
-            for key in locs["ep_infos"][0]:
-                infotensor = torch.tensor([], device=self.device)
-                for ep_info in locs["ep_infos"]:
-                    # handle scalar and zero dimensional tensor infos
-                    if key not in ep_info:
-                        continue
-                    if not isinstance(ep_info[key], torch.Tensor):
-                        ep_info[key] = torch.Tensor([ep_info[key]])
-                    if len(ep_info[key].shape) == 0:
-                        ep_info[key] = ep_info[key].unsqueeze(0)
-                    infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
-                value = torch.mean(infotensor)
-                # log to logger and terminal
-                if "/" in key:
-                    self.writer.add_scalar(key, value, locs["it"])
-                    ep_string += f"""{f'{key}:':>{pad}} {value:.4f}\n"""
-                else:
-                    self.writer.add_scalar("Episode/" + key, value, locs["it"])
-                    ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
+        for key, value in sorted(episode_stats.items()):
+            if "/" in key:
+                self.writer.add_scalar(key, value, locs["it"])
+                ep_string += f"""{f'{key}:':>{pad}} {value:.4f}\n"""
+            else:
+                self.writer.add_scalar("Episode/" + key, value, locs["it"])
+                ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
 
         mean_std = self.alg.policy.action_std.mean()
         fps = int(collection_size / (locs["collection_time"] + locs["learn_time"]))
 
         # -- Losses
-        for key, value in locs["loss_dict"].items():
+        for key, value in loss_stats.items():
             self.writer.add_scalar(f"Loss/{key}", value, locs["it"])
         self.writer.add_scalar("Loss/learning_rate", self.alg.learning_rate, locs["it"])
 
@@ -358,24 +354,24 @@ class OnPolicyRunner:
         self.writer.add_scalar("Perf/learning_time", locs["learn_time"], locs["it"])
 
         # -- Training
-        if len(locs["rewbuffer"]) > 0:
+        if "mean_reward" in train_stats:
             # separate logging for intrinsic and extrinsic rewards
             if self.alg.rnd:
-                self.writer.add_scalar("Rnd/mean_extrinsic_reward", statistics.mean(locs["erewbuffer"]), locs["it"])
-                self.writer.add_scalar("Rnd/mean_intrinsic_reward", statistics.mean(locs["irewbuffer"]), locs["it"])
+                self.writer.add_scalar("Rnd/mean_extrinsic_reward", train_stats["mean_extrinsic_reward"], locs["it"])
+                self.writer.add_scalar("Rnd/mean_intrinsic_reward", train_stats["mean_intrinsic_reward"], locs["it"])
                 self.writer.add_scalar("Rnd/weight", self.alg.rnd.weight, locs["it"])
             # everything else
-            self.writer.add_scalar("Train/mean_reward", statistics.mean(locs["rewbuffer"]), locs["it"])
-            self.writer.add_scalar("Train/mean_episode_length", statistics.mean(locs["lenbuffer"]), locs["it"])
+            self.writer.add_scalar("Train/mean_reward", train_stats["mean_reward"], locs["it"])
+            self.writer.add_scalar("Train/mean_episode_length", train_stats["mean_episode_length"], locs["it"])
             if self.logger_type != "wandb":  # wandb does not support non-integer x-axis logging
-                self.writer.add_scalar("Train/mean_reward/time", statistics.mean(locs["rewbuffer"]), self.tot_time)
+                self.writer.add_scalar("Train/mean_reward/time", train_stats["mean_reward"], self.tot_time)
                 self.writer.add_scalar(
-                    "Train/mean_episode_length/time", statistics.mean(locs["lenbuffer"]), self.tot_time
+                    "Train/mean_episode_length/time", train_stats["mean_episode_length"], self.tot_time
                 )
 
         str = f" \033[1m Learning iteration {locs['it']}/{locs['tot_iter']} \033[0m "
 
-        if len(locs["rewbuffer"]) > 0:
+        if "mean_reward" in train_stats:
             log_string = (
                 f"""{'#' * width}\n"""
                 f"""{str.center(width, ' ')}\n\n"""
@@ -384,17 +380,17 @@ class OnPolicyRunner:
                 f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
             )
             # -- Losses
-            for key, value in locs["loss_dict"].items():
+            for key, value in loss_stats.items():
                 log_string += f"""{f'Mean {key} loss:':>{pad}} {value:.4f}\n"""
             # -- Rewards
             if self.alg.rnd:
                 log_string += (
-                    f"""{'Mean extrinsic reward:':>{pad}} {statistics.mean(locs['erewbuffer']):.2f}\n"""
-                    f"""{'Mean intrinsic reward:':>{pad}} {statistics.mean(locs['irewbuffer']):.2f}\n"""
+                    f"""{'Mean extrinsic reward:':>{pad}} {train_stats['mean_extrinsic_reward']:.2f}\n"""
+                    f"""{'Mean intrinsic reward:':>{pad}} {train_stats['mean_intrinsic_reward']:.2f}\n"""
                 )
-            log_string += f"""{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
+            log_string += f"""{'Mean reward:':>{pad}} {train_stats['mean_reward']:.2f}\n"""
             # -- episode info
-            log_string += f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n"""
+            log_string += f"""{'Mean episode length:':>{pad}} {train_stats['mean_episode_length']:.2f}\n"""
         else:
             log_string = (
                 f"""{'#' * width}\n"""
@@ -403,7 +399,7 @@ class OnPolicyRunner:
                     'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
                 f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
             )
-            for key, value in locs["loss_dict"].items():
+            for key, value in loss_stats.items():
                 log_string += f"""{f'{key}:':>{pad}} {value:.4f}\n"""
 
         log_string += ep_string
@@ -421,6 +417,63 @@ class OnPolicyRunner:
             )}\n"""
         )
         print(log_string)
+
+    def _episode_info_stats(self, ep_infos: list[dict]) -> dict[str, tuple[float, int]]:
+        stats: dict[str, tuple[float, int]] = {}
+        for ep_info in ep_infos:
+            for key, value in ep_info.items():
+                try:
+                    tensor = value if isinstance(value, torch.Tensor) else torch.as_tensor(value)
+                    tensor = tensor.detach().float().reshape(-1)
+                except Exception:
+                    continue
+                if tensor.numel() == 0:
+                    continue
+                current_sum, current_count = stats.get(key, (0.0, 0))
+                stats[key] = (
+                    current_sum + float(tensor.sum().item()),
+                    current_count + int(tensor.numel()),
+                )
+        return stats
+
+    def _train_buffer_stats(self, locs: dict) -> dict[str, tuple[float, int]]:
+        stats: dict[str, tuple[float, int]] = {}
+        if len(locs["rewbuffer"]) > 0:
+            stats["mean_reward"] = self._sum_count(locs["rewbuffer"])
+            stats["mean_episode_length"] = self._sum_count(locs["lenbuffer"])
+            if self.alg.rnd:
+                stats["mean_extrinsic_reward"] = self._sum_count(locs["erewbuffer"])
+                stats["mean_intrinsic_reward"] = self._sum_count(locs["irewbuffer"])
+        return stats
+
+    def _distributed_average_stats(self, local_stats: dict[str, tuple[float, int]]) -> dict[str, float]:
+        if self.is_distributed:
+            gathered: list[dict[str, tuple[float, int]] | None] = [None for _ in range(self.gpu_world_size)]
+            torch.distributed.all_gather_object(gathered, local_stats)
+        else:
+            gathered = [local_stats]
+
+        totals: dict[str, list[float]] = {}
+        for stats in gathered:
+            if not stats:
+                continue
+            for key, (value_sum, count) in stats.items():
+                if count <= 0:
+                    continue
+                if key not in totals:
+                    totals[key] = [0.0, 0.0]
+                totals[key][0] += float(value_sum)
+                totals[key][1] += float(count)
+        return {
+            key: value_sum / count
+            for key, (value_sum, count) in totals.items()
+            if count > 0
+        }
+
+    @staticmethod
+    def _sum_count(values) -> tuple[float, int]:
+        values = list(values)
+        return (float(sum(values)), len(values))
 
     def save(self, path: str, infos=None):
         # -- Save model

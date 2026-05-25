@@ -45,6 +45,7 @@ class RLRuntimeSpec:
     launch_params: dict[str, Any]
     table_params: dict[str, Any]
     object_pose_sampling_params: dict[str, Any]
+    curriculum_params: dict[str, Any]
     asset_assignment_params: dict[str, Any]
     env_params: dict[str, Any]
     reward_params: dict[str, Any]
@@ -100,6 +101,7 @@ def build_rl_runtime_spec(
         launch_params=asdict(rl.launch),
         table_params=asdict(rl.table),
         object_pose_sampling_params=asdict(rl.object_pose_sampling),
+        curriculum_params=asdict(rl.curriculum),
         asset_assignment_params={
             "seed": exp_cfg.general.seed,
             "randomize_tool_assignment": exp_cfg.general.randomize_tool_assignment,
@@ -121,6 +123,47 @@ def _build_policy_params(exp_cfg: ExpCfg, checkpoint: str | None) -> dict[str, A
     rl = exp_cfg.rl
     model = exp_cfg.model
     pretrained = model.pretrained_encoder
+    if rl.actor_critic_class == "ActorCriticICP":
+        return {
+            "class_name": "ActorCriticICP",
+            "num_points": rl.observation.num_points,
+            "point_dim": rl.observation.point_dim,
+            "encoder_weights_path": checkpoint,
+            "encoder_checkpoint_name": pretrained.name,
+            "encoder_checkpoint_schema": pretrained.schema,
+            "encoder_checkpoint_adapter": pretrained.adapter,
+            "icp_weights_path": checkpoint,
+            "icp_point_dim": rl.observation.point_dim,
+            "icp_num_points": rl.observation.num_points,
+            "freeze_icp": rl.freeze_encoder,
+            "freeze_encoder": rl.freeze_encoder,
+            "separate_actor_critic_fusion": rl.separate_actor_critic_fusion,
+            "sd_num_query": model.policy_fusion.sd_num_query,
+            "sd_emb_dim": model.policy_fusion.query_dim,
+            "relative_translation_query_tokens": model.policy_fusion.relative_translation_query_tokens,
+            "reuse_pretrain_pose_cross_attn": model.policy_fusion.reuse_pretrain_pose_cross_attn,
+            "sd_query_keys": ("context",),
+            "cross_attn_heads": model.policy_fusion.cross_attn_heads,
+            "cross_attn_layers": model.policy_fusion.cross_attn_layers,
+            "cross_attn_ff_dim": None,
+            "cross_attn_dropout": 0.0,
+            "sd_cat_query": False,
+            "sd_cat_ctx": True,
+            "hand_state_dim": rl.observation.hand_state_dim,
+            "robot_state_dim": rl.observation.robot_state_dim,
+            "previous_action_dim": rl.effective_action_dim,
+            "relative_goal_dim": rl.observation.relative_goal_dim,
+            "object_velocity_dim": rl.observation.object_velocity_dim,
+            "physics_dim": rl.effective_physics_dim,
+            "model_input_centering": rl.observation.model_input_centering,
+            "fusion_hidden_dims": list(model.policy_fusion.fusion_hidden_dims),
+            "actor_hidden_dims": list(model.policy_fusion.actor_hidden_dims),
+            "critic_hidden_dims": list(model.policy_fusion.critic_hidden_dims),
+            "activation": "elu",
+            "init_noise_std": 1.0,
+            "noise_std_type": "scalar",
+        }
+
     encoder = model.encoder
     common = {
         "class_name": rl.actor_critic_class,
@@ -151,13 +194,14 @@ def _build_policy_params(exp_cfg: ExpCfg, checkpoint: str | None) -> dict[str, A
         "robot_state_dim": rl.observation.robot_state_dim,
         "previous_action_dim": rl.effective_action_dim,
         "relative_goal_dim": rl.observation.relative_goal_dim,
+        "object_velocity_dim": rl.observation.object_velocity_dim,
         "physics_dim": rl.effective_physics_dim,
         "model_input_centering": rl.observation.model_input_centering,
         "activation": "elu",
         "init_noise_std": 1.0,
         "noise_std_type": "scalar",
     }
-    if rl.actor_critic_class == "ActorCriticTG":
+    if rl.actor_critic_class in {"ActorCriticTG", "ActorCriticTGBimanual"}:
         tce = model.tce
         common.update(
             {
@@ -198,6 +242,13 @@ def resolve_encoder_checkpoint(
     encoder_checkpoint_override: str | None = None,
 ) -> str | None:
     model = exp_cfg.model
+    if exp_cfg.rl.actor_critic_class == "ActorCriticICP":
+        return (
+            encoder_checkpoint_override
+            or exp_cfg.rl.encoder_checkpoint
+            or model.icp.checkpoint_path
+            or model.pretrained_encoder.checkpoint_path
+        )
     return (
         encoder_checkpoint_override
         or model.pretrained_encoder.checkpoint_path

@@ -228,6 +228,27 @@ def robot_state(
 
 
 @profile_obs
+def object_root_velocity(
+    env: ManagerBasedRLEnv,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+) -> torch.Tensor:
+    """Object root linear and angular velocity: [vx, vy, vz, wx, wy, wz]."""
+
+    object: RigidObject = env.scene[object_cfg.name]
+    return _dbg(
+        env,
+        "object_root_velocity",
+        torch.cat(
+            [
+                object.data.root_lin_vel_w[:, :3],
+                object.data.root_ang_vel_w[:, :3],
+            ],
+            dim=1,
+        ),
+    )
+
+
+@profile_obs
 def abs_pose_goal(
     env: ManagerBasedRLEnv,
     command_name: str = "target_object_pose",
@@ -349,28 +370,31 @@ def phys_params(
     object_dynamic_friction = object_material_props[:, :, 1].mean(dim=1)
     object_restitution = object_material_props[:, :, 2].mean(dim=1)
 
-    # 3. Get tool mass and friction from robot articulation
-    # Resolve tool body index (link_coacd_convex_piece_0)
-    if not hasattr(env, "_tool_body_idx"):
-        tool_body_cfg = SceneEntityCfg("robot", body_names=["link_coacd_convex_piece_0"])
-        tool_body_cfg.resolve(env.scene)
-        env._tool_body_idx = tool_body_cfg.body_ids[0]
+    # 3. Get tool mass and friction only when the runtime spec requests them.
+    tool_fields_requested = any(name.startswith("tool_") for name in field_names)
+    if tool_fields_requested:
+        if getattr(env.cfg, "robot_mode", "tool") == "bare_franka":
+            raise ValueError("phys_params requested tool_* fields, but robot_mode=bare_franka")
+        if not hasattr(env, "_tool_body_idx"):
+            tool_body_cfg = SceneEntityCfg(hand_cfg.name, body_names=["link_coacd_convex_piece_0"])
+            tool_body_cfg.resolve(env.scene)
+            env._tool_body_idx = tool_body_cfg.body_ids[0]
 
-    tool_idx = env._tool_body_idx
-    robot_masses = hand.root_physx_view.get_masses()  # (num_envs, num_bodies)
-    tool_mass = robot_masses[:, tool_idx]  # (num_envs,)
+        tool_idx = env._tool_body_idx
+        robot_masses = hand.root_physx_view.get_masses()  # (num_envs, num_bodies)
+        tool_mass = robot_masses[:, tool_idx]  # (num_envs,)
 
-    # Tool friction from robot's material properties
-    robot_material_props = hand.root_physx_view.get_material_properties()  # (num_envs, num_shapes, 3)
-    num_shapes = robot_material_props.shape[1]
-    num_bodies = robot_masses.shape[1]
-    shapes_per_body = num_shapes // num_bodies
-    tool_shape_start = tool_idx * shapes_per_body
-    tool_shape_end = min((tool_idx + 1) * shapes_per_body, num_shapes)
-    tool_material = robot_material_props[:, tool_shape_start:tool_shape_end, :]
-    tool_static_friction = tool_material[:, :, 0].mean(dim=1)
-    tool_dynamic_friction = tool_material[:, :, 1].mean(dim=1)
-    tool_restitution = tool_material[:, :, 2].mean(dim=1)
+        # Tool friction from robot's material properties
+        robot_material_props = hand.root_physx_view.get_material_properties()  # (num_envs, num_shapes, 3)
+        num_shapes = robot_material_props.shape[1]
+        num_bodies = robot_masses.shape[1]
+        shapes_per_body = num_shapes // num_bodies
+        tool_shape_start = tool_idx * shapes_per_body
+        tool_shape_end = min((tool_idx + 1) * shapes_per_body, num_shapes)
+        tool_material = robot_material_props[:, tool_shape_start:tool_shape_end, :]
+        tool_static_friction = tool_material[:, :, 0].mean(dim=1)
+        tool_dynamic_friction = tool_material[:, :, 1].mean(dim=1)
+        tool_restitution = tool_material[:, :, 2].mean(dim=1)
 
     # 4. Get ground/terrain material only when runtime spec requests ground fields.
     ground_static_value = None
@@ -435,10 +459,6 @@ def phys_params(
         "object_static_friction": object_static_friction.to(device=device),
         "object_dynamic_friction": object_dynamic_friction.to(device=device),
         "object_restitution": object_restitution.to(device=device),
-        "tool_mass": tool_mass.to(device=device),
-        "tool_static_friction": tool_static_friction.to(device=device),
-        "tool_dynamic_friction": tool_dynamic_friction.to(device=device),
-        "tool_restitution": tool_restitution.to(device=device),
         "ground_static_friction": ground_static_friction.to(device=device),
         "ground_dynamic_friction": ground_dynamic_friction.to(device=device),
         "ground_restitution": ground_restitution.to(device=device),
@@ -446,6 +466,15 @@ def phys_params(
         "table_dynamic_friction": table_dynamic_friction.to(device=device),
         "table_restitution": table_restitution.to(device=device),
     }
+    if tool_fields_requested:
+        values.update(
+            {
+                "tool_mass": tool_mass.to(device=device),
+                "tool_static_friction": tool_static_friction.to(device=device),
+                "tool_dynamic_friction": tool_dynamic_friction.to(device=device),
+                "tool_restitution": tool_restitution.to(device=device),
+            }
+        )
     missing = [name for name in field_names if name not in values]
     if missing:
         raise ValueError(f"Unknown phys_params fields: {missing}")

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from configs.config_contact_gen import strip_contact_gen_hash_defaults
 from configs.config_exp import ExpCfg
 from utils.artifacts.naming import (
     CONTACT_ARTIFACT_GENERAL_NAME,
@@ -14,6 +15,7 @@ from utils.artifacts.naming import (
     encoder_artifact_name,
     experiment_artifact_name,
     rl_artifact_name,
+    _pretrain_model_hash_payload,
 )
 from utils.artifacts.paths import artifact_root, manifest_path
 from utils.config.hash import config_hash
@@ -142,12 +144,7 @@ def _semantic_pretrain_payload(pretrain_cfg) -> dict:
 
 
 def _semantic_pretrain_model_payload(cfg: ExpCfg) -> dict:
-    model = to_plain_data(cfg.model)
-    policy_fusion = dict(model.get("policy_fusion") or {})
-    if policy_fusion:
-        policy_fusion["query_dim"] = 128
-        model["policy_fusion"] = policy_fusion
-    return model
+    return _pretrain_model_hash_payload(cfg)
 
 
 def _strip_contact_runtime_fields(payload: dict) -> dict:
@@ -156,7 +153,7 @@ def _strip_contact_runtime_fields(payload: dict) -> dict:
     physics = dict(cleaned.get("physics") or {})
     physics.pop("num_workers", None)
     cleaned["physics"] = physics
-    return cleaned
+    return strip_contact_gen_hash_defaults(cleaned)
 
 
 def _strip_pretrain_runtime_fields(payload: dict) -> dict:

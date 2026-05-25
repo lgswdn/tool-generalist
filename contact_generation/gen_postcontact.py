@@ -7,7 +7,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from configs.config_contact_gen import ContactGenCfg
+from configs.config_contact_gen import (
+    ROTATION_SELECTION_MOST_DOWNWARD,
+    TOOL_SOURCE_OBJECTS,
+    ContactGenCfg,
+)
 from utils.contact.stabilize import (
     PhysicsBatchResult,
     PhysicsRunConfig,
@@ -59,6 +63,9 @@ class ContactPairConfig:
     object_scale_range: tuple[float, float] = (0.1, 0.2)
     num_tool_surface_pts: int = 512
     upright_threshold: float = 0.0
+    rotation_selection: str = ROTATION_SELECTION_MOST_DOWNWARD
+    tool_mesh_contract: str = "adjusted_decomposed_mesh"
+    use_tool_head_area: bool = True
     epsilon: float = 2e-3
     floor_eps: float = 0.0
     penetration_eps: float = 5e-4
@@ -138,6 +145,13 @@ class ContactPairConfig:
             object_scale_range=tuple(contact_cfg.object_scale_range),
             num_tool_surface_pts=contact_cfg.num_surface_pts,
             upright_threshold=contact_cfg.upright_threshold,
+            rotation_selection=contact_cfg.rotation_selection,
+            tool_mesh_contract=(
+                "object_mesh"
+                if contact_cfg.tool_source == TOOL_SOURCE_OBJECTS
+                else "adjusted_decomposed_mesh"
+            ),
+            use_tool_head_area=contact_cfg.tool_source != TOOL_SOURCE_OBJECTS,
             epsilon=contact_cfg.epsilon,
             floor_eps=contact_cfg.floor_eps,
             contact_mode_prob=dict(contact_cfg.contact_mode_prob),
@@ -200,6 +214,9 @@ class ContactPairConfig:
             object_scale_range=tuple(float(x) for x in self.object_scale_range),
             contact_mode_prob=dict(contact_mode_prob or {"head": 0.7, "body": 0.3}),
             upright_threshold=self.upright_threshold,
+            rotation_selection=self.rotation_selection,
+            tool_mesh_contract=self.tool_mesh_contract,
+            use_tool_head_area=bool(self.use_tool_head_area),
             epsilon=self.epsilon,
             floor_eps=self.floor_eps,
             penetration_eps=self.penetration_eps,
