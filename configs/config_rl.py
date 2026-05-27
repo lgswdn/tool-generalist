@@ -173,12 +173,11 @@ class RewardCfg:
     object_goal_fine_std: float = 0.3
     contact_std: float = 0.15
     rotation_distance_divisor: float = 5.0
-    stable_success_linear_velocity_threshold: float = 0.03
-    stable_success_angular_velocity_threshold: float = 0.15
-    stable_success_dwell_steps: int = 3
-    object_stillness_at_goal_term_weight: float = 2.0
-    object_stillness_linear_velocity_std: float = 0.03
-    object_stillness_angular_velocity_std: float = 0.15
+    stable_success_dwell_steps: int = 10
+    object_goal_threshold_term_weight: float = 2.0
+    bimanual_arm_proximity_penalty_weight: float = -20.0
+    bimanual_arm_proximity_warning_distance: float = 0.20
+    bimanual_arm_proximity_failure_distance: float = 0.15
 
 
 @dataclass

@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
-PRETRAINED_ENCODER_ADAPTERS = ("tce_strict", "point2vec_native", "icp_legacy")
+PRETRAINED_ENCODER_ADAPTERS = ("tce_strict", "point2vec_native", "icp_legacy", "unicorn_strict")
 
 
 @dataclass
@@ -62,6 +62,20 @@ class ICPCfg(EncoderCfg):
 
 
 @dataclass
+class UnicornCfg(EncoderCfg):
+    name: str = "UniCORN"
+    encoder_type: str = "UniCORN"
+    output_dim: int = 128
+    num_points: int = 512
+    num_patches: int = 16
+    patch_size: int = 32
+    encoder_channel: int = 128
+    vit_depth: int = 4
+    vit_heads: int = 4
+    checkpoint_path: Optional[str] = None
+
+
+@dataclass
 class ConcertoCfg(EncoderCfg):
     name: str = "Concerto"
     encoder_type: str = "Concerto"
@@ -100,6 +114,7 @@ class ModelCfg:
     tce: TCECfg = field(default_factory=TCECfg)
     p2v: P2VCfg = field(default_factory=P2VCfg)
     icp: ICPCfg = field(default_factory=ICPCfg)
+    unicorn: UnicornCfg = field(default_factory=UnicornCfg)
     pretrained_encoder: PretrainedEncoderCfg = field(default_factory=PretrainedEncoderCfg)
     policy_fusion: PolicyFusionCfg = field(default_factory=PolicyFusionCfg)
 
@@ -152,6 +167,8 @@ class ModelCfg:
             return self.p2v
         if backend == "icp":
             return self.icp
+        if backend == "unicorn":
+            return self.unicorn
         raise ValueError(f"Unsupported ModelCfg.encoder_backend: {self.encoder_backend!r}")
 
     @encoder.setter
@@ -168,7 +185,11 @@ class ModelCfg:
             self.icp = value
             self.encoder_backend = "icp"
             return
-        raise ValueError("ModelCfg.encoder must be a TCECfg, P2VCfg, or ICPCfg")
+        if isinstance(value, UnicornCfg):
+            self.unicorn = value
+            self.encoder_backend = "unicorn"
+            return
+        raise ValueError("ModelCfg.encoder must be a TCECfg, P2VCfg, ICPCfg, or UnicornCfg")
 
     @property
     def concerto(self) -> ConcertoCfg:
@@ -190,6 +211,8 @@ class ModelCfg:
             return "point2vec"
         if value in {"icp", "corn"}:
             return "icp"
+        if value in {"unicorn", "universal_corn"}:
+            return "unicorn"
         return value
 
     @property

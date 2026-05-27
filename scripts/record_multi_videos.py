@@ -144,7 +144,21 @@ parser.add_argument(
 )
 parser.add_argument("--video_width", type=int, default=512, help="Per-env tiled-camera video width.")
 parser.add_argument("--video_height", type=int, default=512, help="Per-env tiled-camera video height.")
-parser.add_argument("--video_fps", type=int, default=10, help="Output video frames per second.")
+parser.add_argument(
+    "--video_fps",
+    type=float,
+    default=None,
+    help="Output video frames per second. Defaults to 1 / (sim_dt * record_substep_interval).",
+)
+parser.add_argument(
+    "--record_substep_interval",
+    type=int,
+    default=None,
+    help=(
+        "Capture one video frame every N physics substeps within each policy step. "
+        "Defaults to env_params.decimation, which preserves one frame per policy step."
+    ),
+)
 parser.add_argument(
     "--video_dir",
     type=str,
@@ -156,6 +170,12 @@ parser.add_argument(
     action="store_true",
     default=False,
     help="Disable recording-only color/material overrides for isolating renderer memory regressions.",
+)
+parser.add_argument(
+    "--disable_tool_pointcloud_rendering",
+    action="store_true",
+    default=False,
+    help="Disable tool point-cloud debug marker rendering in recorded videos.",
 )
 parser.add_argument("--real_time", action="store_true", default=False, help="Run in real-time, if possible.")
 parser.add_argument("--distributed", action="store_true", default=False, help="Run recording across multiple GPUs.")
@@ -172,13 +192,32 @@ if args_cli.video_width <= 0:
     parser.error("--video_width must be positive")
 if args_cli.video_height <= 0:
     parser.error("--video_height must be positive")
-if args_cli.video_fps <= 0:
+if args_cli.video_fps is not None and args_cli.video_fps <= 0:
     parser.error("--video_fps must be positive")
+if args_cli.record_substep_interval is not None and args_cli.record_substep_interval <= 0:
+    parser.error("--record_substep_interval must be positive")
 
 runtime_spec_source = args_cli.runtime_spec or _latest_runtime_spec_for_config(args_cli.config)
 runtime_spec_path = os.path.abspath(os.path.normpath(runtime_spec_source))
 with open(runtime_spec_path, "r", encoding="utf-8") as f:
     runtime_spec = json.load(f)
+
+runtime_env_params = runtime_spec.get("env_params", {})
+if not isinstance(runtime_env_params, dict):
+    parser.error("runtime_spec env_params must be a JSON object")
+runtime_decimation = int(runtime_env_params.get("decimation", 1))
+if runtime_decimation <= 0:
+    parser.error("runtime_spec env_params.decimation must be positive")
+if args_cli.record_substep_interval is None:
+    args_cli.record_substep_interval = runtime_decimation
+if args_cli.record_substep_interval > runtime_decimation:
+    parser.error("--record_substep_interval must be <= runtime_spec env_params.decimation")
+if runtime_decimation % args_cli.record_substep_interval != 0:
+    parser.error("--record_substep_interval must evenly divide runtime_spec env_params.decimation")
+if args_cli.video_fps is None:
+    if "sim_dt" not in runtime_env_params:
+        parser.error("--video_fps is required when runtime_spec env_params.sim_dt is missing")
+    args_cli.video_fps = 1.0 / (float(runtime_env_params["sim_dt"]) * float(args_cli.record_substep_interval))
 
 runtime_robot_mode = str(runtime_spec.get("env_params", {}).get("robot_mode", "tool"))
 if runtime_robot_mode != "tool":
@@ -274,6 +313,11 @@ from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool 
     get_object_index_for_env,
     get_tool_index_for_env,
 )
+from scripts.video_diagnostics import (
+    format_recording_diagnostics,
+    overlay_recording_diagnostics,
+    recording_debug_metrics,
+)
 
 
 def _tool_names_from_loaded_data() -> list[str]:
@@ -342,20 +386,32 @@ def _make_record_camera_cfg() -> TiledCameraCfg:
     return TiledCameraCfg(
         prim_path="{ENV_REGEX_NS}/EvalRecordCamera",
         offset=TiledCameraCfg.OffsetCfg(
-            pos=(0.5, -1.45, 0.85),
-            rot=(0.5557194, -0.8313699, 0.0, 0.0),
+            pos=(1.5, 0.0, 1.0),
+            rot=(-0.3337, 0.6234, 0.6234, -0.3337),
             convention="ros",
         ),
         data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(
-            focal_length=18.0,
-            focus_distance=1.55,
-            horizontal_aperture=28.0,
+            focal_length=24.0,
+            focus_distance=1.30,
+            horizontal_aperture=26.0,
             clipping_range=(0.05, 20.0),
         ),
         width=args_cli.video_width,
         height=args_cli.video_height,
     )
+
+
+def _disable_tool_pointcloud_rendering(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg) -> None:
+    for attr in (
+        "visualize_tool_pointcloud",
+        "visualize_tool1_pointcloud",
+        "visualize_tool2_pointcloud",
+        "visualize_tool_head_area",
+        "visualize_tool_velocity_mass",
+    ):
+        if hasattr(env_cfg, attr):
+            setattr(env_cfg, attr, False)
 
 
 def _start_ffmpeg_writer(path: str) -> subprocess.Popen:
@@ -436,6 +492,7 @@ def _init_video_state(video_dir: str) -> dict:
         "failure_saved": 0,
         "success_saved": 0,
         "kept_paths": [],
+        "current_step": None,
     }
 
 
@@ -513,9 +570,54 @@ def _capture_video_frames(env, video_state: dict, env_ids: set[int] | None = Non
         frame_tensor = rgb_all[env_id, ..., :3].detach().cpu()
         if frame_tensor.dtype != torch.uint8:
             frame_tensor = torch.clamp(frame_tensor * 255.0, 0.0, 255.0).to(torch.uint8)
-        frame = frame_tensor.contiguous().numpy()
+        frame = frame_tensor.contiguous().numpy().copy()
+        metrics = recording_debug_metrics(
+            env.unwrapped,
+            env_id,
+            runtime_spec.get("reward_params", {}),
+        )
+        step = video_state.get("current_step")
+        record["last_diag"] = format_recording_diagnostics(metrics, step=step)
+        frame = overlay_recording_diagnostics(frame, metrics, step=step)
         writer.stdin.write(frame.tobytes())
         record["frames"] = int(record["frames"]) + 1
+
+
+def _active_diag_summary(video_state: dict) -> str:
+    for record in video_state["active"].values():
+        diag = record.get("last_diag")
+        if diag:
+            return str(diag)
+    return "pending"
+
+
+def _install_substep_capture_hook(env, video_state: dict) -> dict:
+    state = {
+        "enabled": False,
+        "substeps": 0,
+        "frames": 0,
+        "original_step": env.unwrapped.sim.step,
+    }
+
+    def _step_with_capture(*args, **kwargs):
+        result = state["original_step"](*args, **kwargs)
+        if state["enabled"]:
+            state["substeps"] = int(state["substeps"]) + 1
+            if int(state["substeps"]) % args_cli.record_substep_interval == 0:
+                _capture_video_frames(env, video_state)
+                state["frames"] = int(state["frames"]) + 1
+        return result
+
+    env.unwrapped.sim.step = _step_with_capture
+    return state
+
+
+def _remove_substep_capture_hook(env, hook_state: dict | None) -> None:
+    if hook_state is None:
+        return
+    original_step = hook_state.get("original_step")
+    if original_step is not None:
+        env.unwrapped.sim.step = original_step
 
 
 def _discard_video_tmp(path: str) -> None:
@@ -582,6 +684,8 @@ def _write_summary(
         "num_envs_per_rank": args_cli.num_envs,
         "num_steps": args_cli.num_steps,
         "steps_completed": steps_completed,
+        "record_substep_interval": args_cli.record_substep_interval,
+        "video_fps": args_cli.video_fps,
         "object_random_seed": object_random_seed,
         "asset_assignment": asset_assignment,
         "failure_videos_saved": int(video_state["failure_saved"]),
@@ -623,6 +727,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         else os.path.join(runtime_spec_dir, "multi_videos")
     )
     env_cfg.scene.eval_record_camera = _make_record_camera_cfg()
+    if args_cli.disable_tool_pointcloud_rendering:
+        _disable_tool_pointcloud_rendering(env_cfg)
     if not args_cli.disable_recording_visual_overrides:
         _apply_recording_visual_overrides(env_cfg)
 
@@ -645,7 +751,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print(f"[INFO][rank {rank}]: Loading model checkpoint from: {resume_path}", flush=True)
         print(
             f"[INFO][rank {rank}]: Asset assignment seed={asset_seed} "
-            f"num_steps={args_cli.num_steps}",
+            f"num_steps={args_cli.num_steps} "
+            f"record_substep_interval={args_cli.record_substep_interval} "
+            f"video_fps={args_cli.video_fps:g}",
             flush=True,
         )
         ppo_runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
@@ -676,6 +784,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     successes_seen = 0
     asset_assignment = {}
     env = None
+    hook_state = None
     try:
         (
             env,
@@ -703,15 +812,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             object_names,
         )
         _capture_video_frames(env, video_state, started_env_ids)
+        hook_state = _install_substep_capture_hook(env, video_state)
+        hook_state["enabled"] = True
 
         while steps < args_cli.num_steps and simulation_app.is_running():
             start_time = time.time()
+            video_state["current_step"] = steps + 1
             with torch.inference_mode():
                 actions = inference_policy(obs)
                 obs, _, dones, _ = env.step(actions)
             steps += 1
-
-            _capture_video_frames(env, video_state)
 
             ended = dones.bool()
             if torch.any(ended):
@@ -763,10 +873,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 f"saved_success_videos={video_state['success_saved']} "
                 f"episodes_seen={total_episodes} failures_seen={failures_seen} "
                 f"successes_seen={successes_seen} active_recordings={len(video_state['active'])} "
+                f"diag={_active_diag_summary(video_state)} "
                 f"step_time={elapsed:.4f}s",
                 flush=True,
             )
     finally:
+        if hook_state is not None:
+            hook_state["enabled"] = False
+        if env is not None:
+            _remove_substep_capture_hook(env, hook_state)
         _close_video_state(video_state)
         if env is not None:
             env.close()

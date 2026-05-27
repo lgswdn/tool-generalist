@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 from isaaclab.assets import RigidObject
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils.math import combine_frame_transforms
+from .rewards_bimanual import bimanual_link_min_distance
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -78,17 +79,15 @@ def object_reached_goal(
     return position_reached & rotation_reached
 
 
-def object_reached_goal_still(
+def object_reached_goal_dwell(
     env: ManagerBasedRLEnv,
     command_name: str = "object_pose",
     threshold: float = 0.05,
     rotation_threshold: float = 0.2,
-    linear_velocity_threshold: float = 0.03,
-    angular_velocity_threshold: float = 0.15,
-    dwell_steps: int = 3,
+    dwell_steps: int = 10,
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
 ) -> torch.Tensor:
-    """Terminate when the object reaches the target pose and remains nearly still."""
+    """Terminate when the object stays inside the target-pose window for N steps."""
 
     object: RigidObject = env.scene[object_cfg.name]
     command = env.command_manager.get_command(command_name)
@@ -102,23 +101,19 @@ def object_reached_goal_still(
     dot_product = torch.sum(object_quat_w * des_rot_env, dim=1)
     dot_product = torch.clamp(torch.abs(dot_product), max=1.0)
     angular_distance = 2.0 * torch.acos(dot_product)
-    lin_speed = torch.norm(object.data.root_lin_vel_w[:, :3], dim=1)
-    ang_speed = torch.norm(object.data.root_ang_vel_w[:, :3], dim=1)
 
     success_now = (
         (position_distance < threshold)
         & (angular_distance < rotation_threshold)
-        & (lin_speed < linear_velocity_threshold)
-        & (ang_speed < angular_velocity_threshold)
     )
     if dwell_steps <= 1:
         return success_now
 
-    counter = getattr(env, "_goal_still_success_count", None)
+    counter = getattr(env, "_goal_pose_success_count", None)
     if counter is None or counter.shape[0] != env.num_envs:
         counter = torch.zeros(env.num_envs, dtype=torch.int32, device=env.device)
     counter = torch.where(success_now, counter + 1, torch.zeros_like(counter))
-    env._goal_still_success_count = counter
+    env._goal_pose_success_count = counter
     return counter >= int(dwell_steps)
 
 
@@ -144,3 +139,14 @@ def object_dropped_off_table(
     object_height = object_pos_w[:, 2]  # z-coordinate
     # terminate if object is below minimum height (fell off table)
     return object_height < minimum_height
+
+
+def bimanual_links_too_close(
+    env: ManagerBasedRLEnv,
+    threshold: float = 0.15,
+    robot1_cfg: SceneEntityCfg = SceneEntityCfg("robot_1"),
+    robot2_cfg: SceneEntityCfg = SceneEntityCfg("robot_2"),
+) -> torch.Tensor:
+    """Terminate when selected links on the two bimanual arms violate the hard distance threshold."""
+
+    return bimanual_link_min_distance(env, robot1_cfg=robot1_cfg, robot2_cfg=robot2_cfg) < float(threshold)

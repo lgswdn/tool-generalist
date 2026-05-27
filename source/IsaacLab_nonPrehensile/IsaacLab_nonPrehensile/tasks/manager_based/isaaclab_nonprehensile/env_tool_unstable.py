@@ -2,8 +2,7 @@
 
 This task reuses the base scene, actions, events, and environment class from
 ``env_tool``. It swaps the target command to arbitrary orientations and adds
-object root velocity to the policy observation so the policy can learn to make
-the object settle at the commanded pose.
+object root velocity to the policy observation.
 """
 
 from __future__ import annotations
@@ -123,7 +122,7 @@ class ObservationsCfg:
 
 @configclass
 class RewardsCfg:
-    """Reward terms for pose tracking and still support."""
+    """Reward terms for pose tracking and threshold success."""
 
     task_success = RewTerm(
         func=mdp.task_success_from_termination,
@@ -166,17 +165,15 @@ class RewardsCfg:
         weight=_RL_CONTRACT.reward.object_goal_tracking_fine_term_weight,
     )
 
-    object_stillness_at_goal = RewTerm(
-        func=mdp.object_stillness_at_goal_tanh,
+    object_within_goal_threshold = RewTerm(
+        func=mdp.object_within_goal_threshold,
         params={
             "command_name": "target_object_pose",
             "threshold": _RL_CONTRACT.reward.success_threshold,
             "rotation_threshold": _RL_CONTRACT.reward.rotation_threshold,
-            "linear_velocity_std": _RL_CONTRACT.reward.object_stillness_linear_velocity_std,
-            "angular_velocity_std": _RL_CONTRACT.reward.object_stillness_angular_velocity_std,
             "object_cfg": SceneEntityCfg("object"),
         },
-        weight=_RL_CONTRACT.reward.object_stillness_at_goal_term_weight,
+        weight=_RL_CONTRACT.reward.object_goal_threshold_term_weight,
     )
 
     energy_penalty = RewTerm(
@@ -192,13 +189,11 @@ class TerminationsCfg:
 
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
     reached = DoneTerm(
-        func=mdp.object_reached_goal_still,
+        func=mdp.object_reached_goal_dwell,
         params={
             "command_name": "target_object_pose",
             "threshold": _RL_CONTRACT.reward.success_threshold,
             "rotation_threshold": _RL_CONTRACT.reward.rotation_threshold,
-            "linear_velocity_threshold": _RL_CONTRACT.reward.stable_success_linear_velocity_threshold,
-            "angular_velocity_threshold": _RL_CONTRACT.reward.stable_success_angular_velocity_threshold,
             "dwell_steps": _RL_CONTRACT.reward.stable_success_dwell_steps,
             "object_cfg": SceneEntityCfg("object"),
         },

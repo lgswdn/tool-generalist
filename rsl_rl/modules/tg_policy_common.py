@@ -8,10 +8,11 @@ learnable policy heads are owned here so their RL parameters stay aligned.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Optional
+from typing import Any, Mapping, Optional
 
 import torch
 import torch.nn as nn
+from torch.distributions import Normal
 
 from rsl_rl.modules.models.rl.net.sd_cross import StateDependentCrossFeatNet
 
@@ -212,3 +213,102 @@ def build_state_cross_attention(
     if sd_cat_query:
         output_dim += int(sd_num_query) * int(sd_emb_dim)
     return module, output_dim
+
+
+def validate_observation_layout(
+    *,
+    policy_name: str,
+    num_actor_obs: int,
+    num_critic_obs: int,
+    layout: Any,
+) -> None:
+    if num_actor_obs != layout.total_dim:
+        raise ValueError(
+            f"{policy_name} observation layout mismatch: "
+            f"num_actor_obs={num_actor_obs}, expected={layout.total_dim}"
+        )
+    if num_critic_obs != num_actor_obs:
+        raise ValueError(
+            f"{policy_name} expects critic observations to use the same named layout "
+            f"as actor observations, got num_critic_obs={num_critic_obs}, "
+            f"num_actor_obs={num_actor_obs}"
+        )
+
+
+def initialize_action_noise(
+    module: nn.Module,
+    *,
+    num_actions: int,
+    init_noise_std: float,
+    noise_std_type: str,
+) -> None:
+    if noise_std_type == "scalar":
+        module.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
+    elif noise_std_type == "log":
+        module.log_std = nn.Parameter(torch.log(init_noise_std * torch.ones(num_actions)))
+    else:
+        raise ValueError("noise_std_type must be 'scalar' or 'log'")
+    module.distribution = None
+    Normal.set_default_validate_args(False)
+
+
+class TGActorCriticHeadMixin:
+    """Shared TG-style actor/critic action distribution helpers."""
+
+    def _get_features(self, observations: torch.Tensor, *, branch: str = "actor") -> torch.Tensor:
+        all_tokens, ctx_vec = self._tokenize(observations)
+        return self._features_from_tokens_context(all_tokens, ctx_vec, branch=branch)
+
+    def _action_std(self, mean: torch.Tensor) -> torch.Tensor:
+        if self.noise_std_type == "scalar":
+            return self.std.expand_as(mean)
+        return torch.exp(self.log_std).expand_as(mean)
+
+    def update_distribution(self, observations: torch.Tensor):
+        mean = self.actor(self._get_features(observations))
+        self.distribution = Normal(mean, torch.clamp(self._action_std(mean), min=1e-6))
+
+    def act(self, observations: torch.Tensor, **kwargs):
+        self.update_distribution(observations)
+        return self.distribution.sample()
+
+    def act_inference(self, observations: torch.Tensor):
+        return self.actor(self._get_features(observations))
+
+    def reset(self, dones=None):
+        pass
+
+    def get_actions_log_prob(self, actions: torch.Tensor, **kwargs):
+        return self.distribution.log_prob(actions).sum(dim=-1)
+
+    def evaluate(self, critic_observations: torch.Tensor, **kwargs):
+        return self.critic(self._get_features(critic_observations, branch="critic"))
+
+    def get_cached_encoder_features(self, observations: torch.Tensor):
+        return self._tokenize(observations)
+
+    def act_from_cached_features(self, all_tokens: torch.Tensor, ctx_vec: torch.Tensor):
+        mean = self.actor(self._features_from_tokens_context(all_tokens, ctx_vec))
+        self.distribution = Normal(mean, torch.clamp(self._action_std(mean), min=1e-6))
+        return self.distribution.sample()
+
+    def evaluate_from_cached_features(self, all_tokens: torch.Tensor, ctx_vec: torch.Tensor):
+        return self.critic(self._features_from_tokens_context(all_tokens, ctx_vec, branch="critic"))
+
+    def get_actions_log_prob_from_cached_features(self, actions: torch.Tensor):
+        return self.distribution.log_prob(actions).sum(dim=-1)
+
+    def act_inference_from_cached_features(self, all_tokens: torch.Tensor, ctx_vec: torch.Tensor):
+        return self.actor(self._features_from_tokens_context(all_tokens, ctx_vec))
+
+    @property
+    def action_mean(self):
+        return self.distribution.mean
+
+    @property
+    def action_std(self):
+        return self.distribution.stddev
+
+    @property
+    def entropy(self):
+        return self.distribution.entropy().sum(dim=-1)

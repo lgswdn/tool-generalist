@@ -75,6 +75,7 @@ if _USE_BARE_FRANKA:
 # separated laterally around the object/goal workspace centerline.
 _BIMANUAL_BASE_HALF_SPACING_Y = 0.35
 _BIMANUAL_GOAL_XY_OFFSET_RANGE = min(float(_RL_CONTRACT.object_pose_sampling.xy_offset_range), 0.075)
+_BIMANUAL_ARM_PROXIMITY_BODY_NAMES = ("panda_link5", "panda_link6", "panda_link7")
 
 ROBOT1_BASE_POS = (0.0, -_BIMANUAL_BASE_HALF_SPACING_Y, 0.0)
 ROBOT1_BASE_ROT = (1.0, 0.0, 0.0, 0.0)
@@ -505,17 +506,26 @@ class RewardsCfg:
         weight=_RL_CONTRACT.reward.object_goal_tracking_fine_term_weight,
     )
 
-    object_stillness_at_goal = RewTerm(
-        func=mdp.object_stillness_at_goal_tanh,
+    object_within_goal_threshold = RewTerm(
+        func=mdp.object_within_goal_threshold,
         params={
             "command_name": "target_object_pose",
             "threshold": _RL_CONTRACT.reward.success_threshold,
             "rotation_threshold": _RL_CONTRACT.reward.rotation_threshold,
-            "linear_velocity_std": _RL_CONTRACT.reward.object_stillness_linear_velocity_std,
-            "angular_velocity_std": _RL_CONTRACT.reward.object_stillness_angular_velocity_std,
             "object_cfg": SceneEntityCfg("object"),
         },
-        weight=_RL_CONTRACT.reward.object_stillness_at_goal_term_weight,
+        weight=_RL_CONTRACT.reward.object_goal_threshold_term_weight,
+    )
+
+    arm_proximity_penalty = RewTerm(
+        func=mdp.bimanual_link_proximity_penalty,
+        params={
+            "warning_distance": _RL_CONTRACT.reward.bimanual_arm_proximity_warning_distance,
+            "failure_distance": _RL_CONTRACT.reward.bimanual_arm_proximity_failure_distance,
+            "robot1_cfg": SceneEntityCfg("robot_1", body_names=list(_BIMANUAL_ARM_PROXIMITY_BODY_NAMES)),
+            "robot2_cfg": SceneEntityCfg("robot_2", body_names=list(_BIMANUAL_ARM_PROXIMITY_BODY_NAMES)),
+        },
+        weight=_RL_CONTRACT.reward.bimanual_arm_proximity_penalty_weight,
     )
 
     energy_penalty = RewTerm(
@@ -531,13 +541,11 @@ class TerminationsCfg:
 
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
     reached = DoneTerm(
-        func=mdp.object_reached_goal_still,
+        func=mdp.object_reached_goal_dwell,
         params={
             "command_name": "target_object_pose",
             "threshold": _RL_CONTRACT.reward.success_threshold,
             "rotation_threshold": _RL_CONTRACT.reward.rotation_threshold,
-            "linear_velocity_threshold": _RL_CONTRACT.reward.stable_success_linear_velocity_threshold,
-            "angular_velocity_threshold": _RL_CONTRACT.reward.stable_success_angular_velocity_threshold,
             "dwell_steps": _RL_CONTRACT.reward.stable_success_dwell_steps,
             "object_cfg": SceneEntityCfg("object"),
         },
@@ -545,6 +553,14 @@ class TerminationsCfg:
     object_dropped = DoneTerm(
         func=mdp.object_dropped_off_table,
         params={"minimum_height": _table_top_z() - 0.15},
+    )
+    arms_too_close = DoneTerm(
+        func=mdp.bimanual_links_too_close,
+        params={
+            "threshold": _RL_CONTRACT.reward.bimanual_arm_proximity_failure_distance,
+            "robot1_cfg": SceneEntityCfg("robot_1", body_names=list(_BIMANUAL_ARM_PROXIMITY_BODY_NAMES)),
+            "robot2_cfg": SceneEntityCfg("robot_2", body_names=list(_BIMANUAL_ARM_PROXIMITY_BODY_NAMES)),
+        },
     )
 
 
@@ -611,8 +627,8 @@ class BimanualUnstableEnvCfg(ManagerBasedRLEnvCfg):
 
         self.decimation = _RL_CONTRACT.env.decimation
         self.episode_length_s = _RL_CONTRACT.env.episode_length_s
-        self.viewer.eye = (0.5, -1.45, 0.85)
-        self.viewer.lookat = (0.5, 0.0, 0.25)
+        self.viewer.eye = (2.5, 0.5, 0.8)
+        self.viewer.lookat = (0.0, 0.0, 0.0)
         self.sim.dt = _RL_CONTRACT.env.sim_dt
         self.sim.render_interval = self.decimation
         self.sim.physx.solver_position_iteration_count = _RL_CONTRACT.env.solver_position_iteration_count

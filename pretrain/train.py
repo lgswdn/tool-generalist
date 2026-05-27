@@ -33,10 +33,15 @@ from utils.io import hash_json, read_json, to_plain_data, write_json
 
 from pretrain.dataset import make_split
 from pretrain.model import ContactDiffusionModel
+from pretrain.optim import SAM
+from pretrain.unicorn_dataset import make_unicorn_split
+from pretrain.unicorn_model import UnicornPretrainModel
 
 
 @dataclass
 class PretrainRuntimeConfig:
+    pretrain_mode: str
+    device: str | None
     data_dir: str
     max_files: int
     val_ratio: float
@@ -94,6 +99,10 @@ class PretrainRuntimeConfig:
     batch_size: int
     lr: float
     weight_decay: float
+    optimizer_name: str
+    optimizer_betas: tuple[float, float]
+    optimizer_eps: float
+    sam_rho: float
     scheduler: str
     min_lr: float
     epochs: int
@@ -114,6 +123,17 @@ class PretrainRuntimeConfig:
     wandb_entity: str | None
     wandb_mode: str
     seed: int
+    unicorn_num_patches: int
+    unicorn_decoder_hidden: tuple[int, ...]
+    unicorn_positive_patch_fraction: float
+    unicorn_label_backend: str
+    unicorn_contact_eps: float
+    unicorn_patch_positive_rule: str
+    unicorn_positive_min_points: int
+    unicorn_label_chunk_size: int
+    unicorn_aug_translation_range: tuple[float, float]
+    unicorn_aug_log_scale_range: tuple[float, float]
+    unicorn_aug_noise_std: float
 
 
 # ============================================================================ #
@@ -221,6 +241,7 @@ def build_checkpoint_metadata(
         "best_metric": float(best_val),
         "epoch": int(epoch),
         "model": {
+            "family": getattr(raw_model, "model_family", cfg_dump.get("pretrain_mode", "")),
             "dims": model_dims,
             "enabled_heads": enabled_heads,
             "loss_weights": loss_weights,
@@ -345,12 +366,112 @@ def train_step(
     )
 
 
+def train_step_unicorn(
+    model: torch.nn.Module,
+    batch: dict,
+    device: torch.device,
+) -> tuple[torch.Tensor, dict]:
+    tensor_batch = {
+        key: value.to(device) if isinstance(value, torch.Tensor) else value
+        for key, value in batch.items()
+    }
+    return model(
+        points_A=tensor_batch["points_A"],
+        points_B=tensor_batch["points_B"],
+        label_points_A_E=tensor_batch["label_points_A_E"],
+        label_points_B_E=tensor_batch["label_points_B_E"],
+        object_mesh_vertices=tensor_batch.get("object_mesh_vertices"),
+        object_mesh_faces=tensor_batch.get("object_mesh_faces"),
+        tool_mesh_vertices=tensor_batch.get("tool_mesh_vertices"),
+        tool_mesh_faces=tensor_batch.get("tool_mesh_faces"),
+        object_rotation_E=tensor_batch["object_rotation_E"],
+        object_bbox_center_E=tensor_batch["object_bbox_center_E"],
+        tool_rotation_E_k=tensor_batch["tool_rotation_E_k"],
+        tool_translation_E_k=tensor_batch["tool_translation_E_k"],
+    )
+
+
 def _format_metric_subset(metrics: dict[str, float], keys: tuple[str, ...]) -> str:
     parts = []
     for key in keys:
         if key in metrics:
             parts.append(f"{key}={float(metrics[key]):.6g}")
     return " ".join(parts)
+
+
+_UNICORN_STEP_METRIC_KEYS = (
+    "total_loss",
+    "contact_loss",
+    "bce_A",
+    "bce_B",
+    "patch_pos_frac_A",
+    "patch_pos_frac_B",
+    "empty_positive_patch_count",
+    "contact_acc",
+    "contact_precision",
+    "contact_recall",
+)
+
+
+def _distributed_average_metric_sums(
+    metric_sums: dict[str, float],
+    count: int,
+    *,
+    device: torch.device,
+    prefix: str = "",
+) -> dict[str, float]:
+    keys = sorted(metric_sums)
+    values = [float(metric_sums[key]) for key in keys]
+    payload = torch.tensor(values + [float(count)], dtype=torch.float64, device=device)
+    if dist.is_initialized():
+        dist.all_reduce(payload, op=dist.ReduceOp.SUM)
+    total_count = float(payload[-1].item())
+    denom = max(total_count, 1.0)
+    return {
+        f"{prefix}{key}": float(payload[i].item() / denom)
+        for i, key in enumerate(keys)
+    }
+
+
+def _distributed_average_scalar(
+    value_sum: float,
+    count: int,
+    *,
+    device: torch.device,
+) -> float:
+    payload = torch.tensor([float(value_sum), float(count)], dtype=torch.float64, device=device)
+    if dist.is_initialized():
+        dist.all_reduce(payload, op=dist.ReduceOp.SUM)
+    return float(payload[0].item() / max(float(payload[1].item()), 1.0))
+
+
+def _distributed_max_scalar(value: float, *, device: torch.device) -> float:
+    payload = torch.tensor(float(value), dtype=torch.float64, device=device)
+    if dist.is_initialized():
+        dist.all_reduce(payload, op=dist.ReduceOp.MAX)
+    return float(payload.item())
+
+
+def _wandb_log_local_step_metrics(
+    *,
+    rank: int,
+    metrics: dict[str, float],
+    loss_value: float,
+    lr: float,
+    epoch: int,
+    batch_idx: int,
+    global_step: int,
+) -> None:
+    payload: dict[str, float | int] = {
+        "train_step/epoch": int(epoch + 1),
+        "train_step/batch": int(batch_idx + 1),
+        "train_step/global_step": int(global_step),
+        f"train_step/rank{rank}/loss": float(loss_value),
+        f"train_step/rank{rank}/lr": float(lr),
+    }
+    for key in _UNICORN_STEP_METRIC_KEYS:
+        payload[f"train_step/rank{rank}/{key}"] = float(metrics.get(key, float("nan")))
+    wandb.log(payload, step=global_step)
 
 
 def run_pretrain(
@@ -425,6 +546,7 @@ def build_runtime_config(
     pretrain_cfg = exp_cfg.pretrain
     model_cfg = exp_cfg.model
     general_cfg = exp_cfg.general
+    active_encoder_cfg = model_cfg.encoder
     enabled_heads = tuple(pretrain_cfg.enabled_heads)
     if "sdf" in enabled_heads:
         if pretrain_cfg.sdf_target.mode != "signed":
@@ -447,6 +569,8 @@ def build_runtime_config(
             resume_checkpoint = str(existing_best)
 
     return PretrainRuntimeConfig(
+        pretrain_mode=pretrain_cfg.mode,
+        device=pretrain_cfg.device,
         data_dir=str(data_dir),
         max_files=pretrain_cfg.max_files,
         val_ratio=pretrain_cfg.val_ratio,
@@ -463,12 +587,12 @@ def build_runtime_config(
         head_mode=pretrain_cfg.sdf_head_mode,
         patch_agg=pretrain_cfg.decoder_pooling,
         head_hidden=tuple(pretrain_cfg.sdf_head_hidden_dims),
-        num_pts=model_cfg.num_points,
-        patch_size=model_cfg.patch_size,
-        encoder_channel=model_cfg.encoder_channel,
-        vit_depth=model_cfg.vit_depth,
-        vit_heads=model_cfg.vit_heads,
-        freeze_encoder=not model_cfg.encoder.trainable,
+        num_pts=active_encoder_cfg.num_points,
+        patch_size=getattr(active_encoder_cfg, "patch_size", model_cfg.patch_size),
+        encoder_channel=getattr(active_encoder_cfg, "encoder_channel", model_cfg.encoder_channel),
+        vit_depth=getattr(active_encoder_cfg, "vit_depth", model_cfg.vit_depth),
+        vit_heads=getattr(active_encoder_cfg, "vit_heads", model_cfg.vit_heads),
+        freeze_encoder=not active_encoder_cfg.trainable,
         cross_attn_heads=pretrain_cfg.cross_attn_heads,
         cross_attn_layers=pretrain_cfg.cross_attn_layers,
         condition_mlp_hidden_dims=tuple(pretrain_cfg.condition_mlp_hidden_dims),
@@ -508,6 +632,10 @@ def build_runtime_config(
         batch_size=pretrain_cfg.batch.batch_size,
         lr=pretrain_cfg.optimizer.learning_rate,
         weight_decay=pretrain_cfg.optimizer.weight_decay,
+        optimizer_name=pretrain_cfg.optimizer.name,
+        optimizer_betas=tuple(pretrain_cfg.optimizer.betas),
+        optimizer_eps=pretrain_cfg.optimizer.eps,
+        sam_rho=pretrain_cfg.optimizer.sam_rho,
         scheduler=pretrain_cfg.optimizer.scheduler,
         min_lr=pretrain_cfg.optimizer.min_learning_rate,
         epochs=pretrain_cfg.epochs,
@@ -528,6 +656,17 @@ def build_runtime_config(
         wandb_entity=pretrain_cfg.wandb_entity or general_cfg.wandb.entity,
         wandb_mode=pretrain_cfg.wandb_mode or general_cfg.wandb.mode,
         seed=general_cfg.seed,
+        unicorn_num_patches=int(pretrain_cfg.unicorn.num_patches),
+        unicorn_decoder_hidden=tuple(pretrain_cfg.unicorn.decoder_hidden_dims),
+        unicorn_positive_patch_fraction=float(pretrain_cfg.unicorn.positive_patch_fraction),
+        unicorn_label_backend=pretrain_cfg.unicorn.label.backend,
+        unicorn_contact_eps=float(pretrain_cfg.unicorn.label.contact_eps),
+        unicorn_patch_positive_rule=pretrain_cfg.unicorn.label.patch_positive_rule,
+        unicorn_positive_min_points=int(pretrain_cfg.unicorn.label.positive_min_points),
+        unicorn_label_chunk_size=int(pretrain_cfg.unicorn.label.chunk_size),
+        unicorn_aug_translation_range=tuple(pretrain_cfg.unicorn.augment.translation_range),
+        unicorn_aug_log_scale_range=tuple(pretrain_cfg.unicorn.augment.log_scale_range),
+        unicorn_aug_noise_std=float(pretrain_cfg.unicorn.augment.noise_std),
     )
 
 
@@ -734,6 +873,10 @@ def _runtime_config_from_json(path: str | Path) -> PretrainRuntimeConfig:
         "postcontact_hidden",
         "condition_mean",
         "condition_std",
+        "optimizer_betas",
+        "unicorn_decoder_hidden",
+        "unicorn_aug_translation_range",
+        "unicorn_aug_log_scale_range",
     }
     for key in tuple_keys:
         if key in payload and payload[key] is not None:
@@ -751,12 +894,260 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _select_pretrain_device(cfg: PretrainRuntimeConfig, local_rank: int) -> torch.device:
+    if cfg.device:
+        requested = str(cfg.device).strip().lower()
+        if requested == "cpu":
+            return torch.device("cpu")
+        return torch.device(cfg.device)
+    return torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+
+
+def _run_unicorn_training_loop(cfg: PretrainRuntimeConfig) -> dict[str, Any]:
+    rank, local_rank = setup_ddp()
+    device = _select_pretrain_device(cfg, local_rank)
+    torch.manual_seed(cfg.seed + rank)
+
+    train_ds, val_ds = make_unicorn_split(
+        data_dir=cfg.data_dir,
+        val_ratio=cfg.val_ratio,
+        seed=cfg.seed,
+        augment=cfg.augment,
+        max_files=cfg.max_files,
+        num_points=cfg.num_pts,
+        allow_mock_physics=cfg.allow_mock_physics,
+        contact_eps=cfg.unicorn_contact_eps,
+        label_backend=cfg.unicorn_label_backend,
+        label_chunk_size=cfg.unicorn_label_chunk_size,
+        translation_range=cfg.unicorn_aug_translation_range,
+        log_scale_range=cfg.unicorn_aug_log_scale_range,
+        noise_std=cfg.unicorn_aug_noise_std,
+    )
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    per_rank_batch = max(1, int(cfg.batch_size) // max(1, world_size))
+    train_sampler = DistributedSampler(train_ds) if world_size > 1 else None
+    val_sampler = DistributedSampler(val_ds, shuffle=False) if world_size > 1 else None
+    train_dl = DataLoader(
+        train_ds,
+        batch_size=per_rank_batch,
+        sampler=train_sampler,
+        shuffle=(train_sampler is None),
+        num_workers=cfg.num_workers,
+        pin_memory=(device.type == "cuda"),
+        drop_last=False,
+        collate_fn=collate_fn,
+    )
+    val_dl = DataLoader(
+        val_ds,
+        batch_size=per_rank_batch,
+        sampler=val_sampler,
+        shuffle=False,
+        num_workers=cfg.num_workers,
+        pin_memory=(device.type == "cuda"),
+        drop_last=False,
+        collate_fn=collate_fn,
+    )
+
+    if is_main():
+        print(f"Train: {len(train_ds)} contact cases, Val: {len(val_ds)} contact cases")
+        print(
+            "Task: unicorn_contact "
+            f"global_batch_size={cfg.batch_size} per_rank_batch_size={per_rank_batch} "
+            f"num_workers={cfg.num_workers} lr={cfg.lr:.6g} optimizer={cfg.optimizer_name} "
+            f"scheduler={cfg.scheduler} min_lr={cfg.min_lr:.6g}"
+        )
+        print(
+            "UniCORN labels: "
+            f"backend={cfg.unicorn_label_backend} contact_eps={cfg.unicorn_contact_eps:g} "
+            f"positive_patch_fraction={cfg.unicorn_positive_patch_fraction:g}"
+        )
+
+    model = UnicornPretrainModel(
+        num_points=cfg.num_pts,
+        num_patches=cfg.unicorn_num_patches,
+        patch_size=cfg.patch_size,
+        encoder_channel=cfg.encoder_channel,
+        vit_depth=cfg.vit_depth,
+        vit_heads=cfg.vit_heads,
+        decoder_hidden_dims=cfg.unicorn_decoder_hidden,
+        positive_patch_fraction=cfg.unicorn_positive_patch_fraction,
+        patch_positive_rule=cfg.unicorn_patch_positive_rule,
+        positive_min_points=cfg.unicorn_positive_min_points,
+        label_backend=cfg.unicorn_label_backend,
+        contact_eps=cfg.unicorn_contact_eps,
+        label_chunk_size=cfg.unicorn_label_chunk_size,
+    ).to(device)
+    if world_size > 1:
+        model = DDP(model, device_ids=[local_rank] if device.type == "cuda" else None, find_unused_parameters=False)
+
+    optimizer = _build_optimizer(model.parameters(), cfg)
+    scheduler = _build_lr_scheduler(optimizer, cfg)
+
+    start_epoch = 0
+    best_val = float("inf")
+    if cfg.resume:
+        start_epoch, best_val = load_ckpt(cfg.resume, model, optimizer)
+        if is_main():
+            print(f"Resumed from {cfg.resume} at epoch {start_epoch}, best_val={best_val:.6f}")
+
+    if cfg.wandb and HAS_WANDB and is_main():
+        wandb.init(
+            project=cfg.wandb_project,
+            entity=cfg.wandb_entity,
+            name=cfg.wandb_run_name or "unicorn_contact",
+            mode=cfg.wandb_mode,
+            config=vars(cfg),
+        )
+    elif cfg.wandb and not HAS_WANDB and is_main():
+        print("[pretrain] wandb requested but wandb is not installed; continuing without wandb", flush=True)
+
+    ckpt_dir = Path(cfg.ckpt_dir)
+    if is_main():
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    for epoch in range(start_epoch, cfg.epochs):
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
+        model.train()
+        epoch_loss = 0.0
+        epoch_metrics: dict[str, float] = {}
+        n_batches = 0
+        t0 = time.time()
+        for batch_idx, batch in enumerate(train_dl):
+            if isinstance(optimizer, SAM):
+                loss, metrics = train_step_unicorn(model, batch, device)
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1000.0)
+                optimizer.first_step(zero_grad=True)
+                second_loss, _ = train_step_unicorn(model, batch, device)
+                second_loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1000.0)
+                optimizer.second_step(zero_grad=True)
+            else:
+                loss, metrics = train_step_unicorn(model, batch, device)
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1000.0)
+                optimizer.step()
+            epoch_loss += float(loss.item())
+            for key, value in metrics.items():
+                epoch_metrics[key] = epoch_metrics.get(key, 0.0) + float(value)
+            n_batches += 1
+            global_step = epoch * len(train_dl) + batch_idx + 1
+            if cfg.wandb and HAS_WANDB and is_main():
+                _wandb_log_local_step_metrics(
+                    rank=rank,
+                    metrics=metrics,
+                    loss_value=float(loss.item()),
+                    lr=float(optimizer.param_groups[0]["lr"]),
+                    epoch=epoch,
+                    batch_idx=batch_idx,
+                    global_step=global_step,
+                )
+            if is_main() and (batch_idx + 1) % cfg.log_interval == 0:
+                avg = {key: value / n_batches for key, value in epoch_metrics.items()}
+                tracked = _format_metric_subset(
+                    avg,
+                    (
+                        "contact_loss",
+                        "bce_A",
+                        "bce_B",
+                        "patch_pos_frac_A",
+                        "patch_pos_frac_B",
+                        "contact_acc",
+                        "contact_precision",
+                        "contact_recall",
+                    ),
+                )
+                print(
+                    f"  [{epoch+1}/{cfg.epochs}] batch {batch_idx+1}/{len(train_dl)} "
+                    f"loss={loss.item():.6f} lr={optimizer.param_groups[0]['lr']:.6g} {tracked}"
+                )
+
+        avg_train = _distributed_average_metric_sums(epoch_metrics, n_batches, device=device)
+        avg_train["epoch_loss"] = _distributed_average_scalar(epoch_loss, n_batches, device=device)
+        avg_train["epoch_time"] = _distributed_max_scalar(time.time() - t0, device=device)
+        avg_train["lr"] = optimizer.param_groups[0]["lr"]
+
+        model.eval()
+        val_loss = 0.0
+        val_metrics: dict[str, float] = {}
+        n_val = 0
+        with torch.no_grad():
+            for batch in val_dl:
+                loss, metrics = train_step_unicorn(model, batch, device)
+                val_loss += float(loss.item())
+                for key, value in metrics.items():
+                    val_metrics[key] = val_metrics.get(key, 0.0) + float(value)
+                n_val += 1
+        avg_val = _distributed_average_metric_sums(val_metrics, n_val, device=device, prefix="val_")
+        avg_val["val_loss"] = _distributed_average_scalar(val_loss, n_val, device=device)
+
+        if is_main():
+            train_detail = _format_metric_subset(
+                avg_train,
+                ("contact_loss", "bce_A", "bce_B", "patch_pos_frac_A", "patch_pos_frac_B", "contact_acc"),
+            )
+            val_detail = _format_metric_subset(
+                avg_val,
+                (
+                    "val_contact_loss",
+                    "val_bce_A",
+                    "val_bce_B",
+                    "val_patch_pos_frac_A",
+                    "val_patch_pos_frac_B",
+                    "val_contact_acc",
+                ),
+            )
+            print(
+                f"Epoch {epoch+1}/{cfg.epochs} - "
+                f"train_loss={avg_train['epoch_loss']:.6f} val_loss={avg_val['val_loss']:.6f} "
+                f"time={avg_train['epoch_time']:.1f}s {train_detail} {val_detail}"
+            )
+            if cfg.wandb and HAS_WANDB:
+                wandb.log(
+                    {**avg_train, **avg_val, "epoch": epoch + 1},
+                    step=(epoch + 1) * len(train_dl),
+                )
+            if avg_val["val_loss"] < best_val:
+                best_val = avg_val["val_loss"]
+                save_ckpt(
+                    ckpt_dir / "best.pt",
+                    model,
+                    optimizer,
+                    epoch + 1,
+                    best_val,
+                    cfg=cfg,
+                    dataset=train_ds,
+                )
+                print(f"  -> New best val_loss: {best_val:.6f}")
+        if scheduler is not None:
+            scheduler.step()
+
+    if dist.is_initialized():
+        dist.destroy_process_group()
+    if is_main():
+        print("Training complete.")
+        if cfg.wandb and HAS_WANDB:
+            wandb.finish()
+    best_checkpoint_path = ckpt_dir / "best.pt"
+    return {
+        "status": "complete",
+        "best_val": best_val,
+        "checkpoint_dir": str(ckpt_dir),
+        "best_checkpoint_path": str(best_checkpoint_path),
+    }
+
+
 def _run_training_loop(cfg: PretrainRuntimeConfig) -> dict[str, Any]:
+    if cfg.pretrain_mode == "unicorn_contact":
+        return _run_unicorn_training_loop(cfg)
     require_movement = "postcontact" in cfg.enabled_heads
 
     # ── Setup ────────────────────────────────────────────────────────────
     rank, local_rank = setup_ddp()
-    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+    device = _select_pretrain_device(cfg, local_rank)
     torch.manual_seed(cfg.seed + rank)
 
     # ── Data ─────────────────────────────────────────────────────────────
@@ -1083,6 +1474,21 @@ def _build_lr_scheduler(
             eta_min=float(cfg.min_lr),
         )
     raise ValueError(f"Unsupported pretrain optimizer scheduler {cfg.scheduler!r}")
+
+
+def _build_optimizer(params, cfg: PretrainRuntimeConfig) -> torch.optim.Optimizer:
+    name = str(cfg.optimizer_name).lower()
+    common = {
+        "lr": cfg.lr,
+        "weight_decay": cfg.weight_decay,
+        "betas": tuple(cfg.optimizer_betas),
+        "eps": cfg.optimizer_eps,
+    }
+    if name == "adamw":
+        return torch.optim.AdamW(params, **common)
+    if name == "sam":
+        return SAM(params, torch.optim.AdamW, rho=cfg.sam_rho, **common)
+    raise ValueError(f"Unsupported pretrain optimizer {cfg.optimizer_name!r}")
 
 
 if __name__ == "__main__":

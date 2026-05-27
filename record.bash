@@ -4,6 +4,7 @@ set -euo pipefail
 if [[ $# -lt 1 ]]; then
   echo "Usage: $0 <config-name-or-path> [extra record_failure_videos.py args...]" >&2
   echo "Example: $0 bimanual_stable_full_tool_diff_post --num_envs 128" >&2
+  echo "2-GPU: CUDA_VISIBLE_DEVICES=0,1 RECORD_NUM_GPUS=2 $0 bimanual_stable_full_tool_diff_post" >&2
   exit 2
 fi
 
@@ -59,9 +60,18 @@ CONFIG_PATH="$(resolve_config "${CONFIG_INPUT}")"
 echo "[record.bash] config=${CONFIG_PATH}"
 echo "[record.bash] PYTHONPATH=${PYTHONPATH}"
 
+NUM_GPUS="${RECORD_NUM_GPUS:-1}"
+if ! [[ "${NUM_GPUS}" =~ ^[0-9]+$ ]] || [[ "${NUM_GPUS}" -lt 1 ]]; then
+  echo "RECORD_NUM_GPUS must be a positive integer, got '${NUM_GPUS}'." >&2
+  exit 2
+fi
+
 EXTRA_RECORD_ARGS=()
 if [[ "${RECORD_DISABLE_VISUAL_OVERRIDES:-0}" == "1" ]]; then
   EXTRA_RECORD_ARGS+=(--disable_recording_visual_overrides)
+fi
+if [[ "${NUM_GPUS}" -gt 1 ]]; then
+  EXTRA_RECORD_ARGS+=(--distributed)
 fi
 
 DEFAULT_FAILURE_VIDEOS="${RECORD_NUM_FAILURE_VIDEOS:-4}"
@@ -71,7 +81,8 @@ if [[ "${DEFAULT_FAILURE_VIDEOS}" == "0" && "${DEFAULT_SUCCESS_VIDEOS}" != "0" ]
   DEFAULT_ACTIVE_EPISODES=16
 fi
 
-exec python scripts/record_failure_videos.py \
+RECORD_CMD=(
+  scripts/record_failure_videos.py
   --config "${CONFIG_PATH}" \
   --num_envs "${RECORD_NUM_ENVS:-64}" \
   --num_failure_videos "${DEFAULT_FAILURE_VIDEOS}" \
@@ -83,3 +94,11 @@ exec python scripts/record_failure_videos.py \
   --headless \
   "${EXTRA_RECORD_ARGS[@]}" \
   "$@"
+)
+
+echo "[record.bash] num_gpus=${NUM_GPUS} num_envs_per_gpu=${RECORD_NUM_ENVS:-64}"
+if [[ "${NUM_GPUS}" -gt 1 ]]; then
+  exec python -m torch.distributed.run --nproc_per_node="${NUM_GPUS}" "${RECORD_CMD[@]}"
+fi
+
+exec python "${RECORD_CMD[@]}"

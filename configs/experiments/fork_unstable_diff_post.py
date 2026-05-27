@@ -24,10 +24,8 @@ EXP_CFG.rl.reward.rotation_threshold = 0.2
 EXP_CFG.rl.separate_actor_critic_fusion = True
 EXP_CFG.rl.reward.object_goal_tracking_term_weight = 2.5
 EXP_CFG.rl.reward.object_goal_tracking_fine_term_weight = 4.5
-EXP_CFG.rl.reward.object_stillness_at_goal_term_weight = 250.0
-EXP_CFG.rl.reward.stable_success_linear_velocity_threshold = 0.03
-EXP_CFG.rl.reward.stable_success_angular_velocity_threshold = 0.15
-EXP_CFG.rl.reward.stable_success_dwell_steps = 3
+EXP_CFG.rl.reward.object_goal_threshold_term_weight = 6.0
+EXP_CFG.rl.reward.stable_success_dwell_steps = 10
 
 EXP_CFG.rl.curriculum.enabled = True
 EXP_CFG.rl.curriculum.start_step = 1000 * 8

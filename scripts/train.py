@@ -119,19 +119,36 @@ def build_rl_runtime_spec(
     )
 
 
-def _build_policy_params(exp_cfg: ExpCfg, checkpoint: str | None) -> dict[str, Any]:
+def _base_policy_params(
+    exp_cfg: ExpCfg,
+    checkpoint: str | None,
+    *,
+    class_name: str,
+    num_points: int,
+) -> dict[str, Any]:
     rl = exp_cfg.rl
     model = exp_cfg.model
     pretrained = model.pretrained_encoder
-    if rl.actor_critic_class == "ActorCriticICP":
-        return {
-            "class_name": "ActorCriticICP",
-            "num_points": rl.observation.num_points,
-            "point_dim": rl.observation.point_dim,
-            "encoder_weights_path": checkpoint,
-            "encoder_checkpoint_name": pretrained.name,
-            "encoder_checkpoint_schema": pretrained.schema,
-            "encoder_checkpoint_adapter": pretrained.adapter,
+    return {
+        "class_name": class_name,
+        "num_points": num_points,
+        "point_dim": rl.observation.point_dim,
+        "encoder_weights_path": checkpoint,
+        "encoder_checkpoint_name": pretrained.name,
+        "encoder_checkpoint_schema": pretrained.schema,
+        "encoder_checkpoint_adapter": pretrained.adapter,
+    }
+
+
+def _append_icp_policy_params(
+    params: dict[str, Any],
+    exp_cfg: ExpCfg,
+    checkpoint: str | None,
+) -> dict[str, Any]:
+    rl = exp_cfg.rl
+    model = exp_cfg.model
+    params.update(
+        {
             "icp_weights_path": checkpoint,
             "icp_point_dim": rl.observation.point_dim,
             "icp_num_points": rl.observation.num_points,
@@ -163,76 +180,114 @@ def _build_policy_params(exp_cfg: ExpCfg, checkpoint: str | None) -> dict[str, A
             "init_noise_std": 1.0,
             "noise_std_type": "scalar",
         }
+    )
+    return params
 
-    encoder = model.encoder
-    common = {
-        "class_name": rl.actor_critic_class,
-        "num_points": encoder.num_points,
-        "point_dim": rl.observation.point_dim,
-        "encoder_weights_path": checkpoint,
-        "encoder_checkpoint_name": pretrained.name,
-        "encoder_checkpoint_schema": pretrained.schema,
-        "encoder_checkpoint_adapter": pretrained.adapter,
-        "freeze_encoder": rl.freeze_encoder,
-        "freeze_point2vec": rl.freeze_encoder,
-        "separate_actor_critic_fusion": rl.separate_actor_critic_fusion,
-        "sd_num_query": model.policy_fusion.sd_num_query,
-        "sd_emb_dim": model.policy_fusion.query_dim,
-        "relative_translation_query_tokens": model.policy_fusion.relative_translation_query_tokens,
-        "reuse_pretrain_pose_cross_attn": model.policy_fusion.reuse_pretrain_pose_cross_attn,
-        "sd_query_keys": ("context",),
-        "cross_attn_heads": model.policy_fusion.cross_attn_heads,
-        "cross_attn_layers": model.policy_fusion.cross_attn_layers,
-        "cross_attn_ff_dim": None,
-        "cross_attn_dropout": 0.0,
-        "sd_cat_query": False,
-        "sd_cat_ctx": True,
-        "fusion_hidden_dims": list(model.policy_fusion.fusion_hidden_dims),
-        "actor_hidden_dims": list(model.policy_fusion.actor_hidden_dims),
-        "critic_hidden_dims": list(model.policy_fusion.critic_hidden_dims),
-        "hand_state_dim": rl.observation.hand_state_dim,
-        "robot_state_dim": rl.observation.robot_state_dim,
-        "previous_action_dim": rl.effective_action_dim,
-        "relative_goal_dim": rl.observation.relative_goal_dim,
-        "object_velocity_dim": rl.observation.object_velocity_dim,
-        "physics_dim": rl.effective_physics_dim,
-        "model_input_centering": rl.observation.model_input_centering,
-        "activation": "elu",
-        "init_noise_std": 1.0,
-        "noise_std_type": "scalar",
-    }
+
+def _append_tg_shared_policy_params(params: dict[str, Any], exp_cfg: ExpCfg) -> dict[str, Any]:
+    rl = exp_cfg.rl
+    model = exp_cfg.model
+    params.update(
+        {
+            "freeze_encoder": rl.freeze_encoder,
+            "freeze_point2vec": rl.freeze_encoder,
+            "separate_actor_critic_fusion": rl.separate_actor_critic_fusion,
+            "sd_num_query": model.policy_fusion.sd_num_query,
+            "sd_emb_dim": model.policy_fusion.query_dim,
+            "relative_translation_query_tokens": model.policy_fusion.relative_translation_query_tokens,
+            "reuse_pretrain_pose_cross_attn": model.policy_fusion.reuse_pretrain_pose_cross_attn,
+            "sd_query_keys": ("context",),
+            "cross_attn_heads": model.policy_fusion.cross_attn_heads,
+            "cross_attn_layers": model.policy_fusion.cross_attn_layers,
+            "cross_attn_ff_dim": None,
+            "cross_attn_dropout": 0.0,
+            "sd_cat_query": False,
+            "sd_cat_ctx": True,
+            "fusion_hidden_dims": list(model.policy_fusion.fusion_hidden_dims),
+            "actor_hidden_dims": list(model.policy_fusion.actor_hidden_dims),
+            "critic_hidden_dims": list(model.policy_fusion.critic_hidden_dims),
+            "hand_state_dim": rl.observation.hand_state_dim,
+            "robot_state_dim": rl.observation.robot_state_dim,
+            "previous_action_dim": rl.effective_action_dim,
+            "relative_goal_dim": rl.observation.relative_goal_dim,
+            "object_velocity_dim": rl.observation.object_velocity_dim,
+            "physics_dim": rl.effective_physics_dim,
+            "model_input_centering": rl.observation.model_input_centering,
+            "activation": "elu",
+            "init_noise_std": 1.0,
+            "noise_std_type": "scalar",
+        }
+    )
+    return params
+
+
+def _append_tce_policy_params(params: dict[str, Any], exp_cfg: ExpCfg) -> dict[str, Any]:
+    _append_tg_shared_policy_params(params, exp_cfg)
+    tce = exp_cfg.model.tce
+    params.update(
+        {
+            "patch_size": tce.patch_size,
+            "encoder_channel": tce.encoder_channel,
+            "vit_depth": tce.vit_depth,
+            "vit_heads": tce.vit_heads,
+        }
+    )
+    return params
+
+
+def _append_point2vec_policy_params(
+    params: dict[str, Any],
+    exp_cfg: ExpCfg,
+    checkpoint: str | None,
+) -> dict[str, Any]:
+    _append_tg_shared_policy_params(params, exp_cfg)
+    p2v = exp_cfg.model.p2v
+    params.update(
+        {
+            "token_dim": p2v.token_dim,
+            "point2vec_ckpt_path": checkpoint,
+            "tokenizer_num_groups": p2v.tokenizer_num_groups,
+            "tokenizer_group_size": p2v.tokenizer_group_size,
+            "tokenizer_group_radius": p2v.tokenizer_group_radius,
+            "encoder_dim": p2v.encoder_dim,
+            "encoder_depth": p2v.encoder_depth,
+            "encoder_heads": p2v.encoder_heads,
+            "encoder_dropout": p2v.encoder_dropout,
+            "encoder_attention_dropout": p2v.encoder_attention_dropout,
+            "encoder_drop_path_rate": p2v.encoder_drop_path_rate,
+            "encoder_add_pos_at_every_layer": p2v.encoder_add_pos_at_every_layer,
+            "train_transformations": list(p2v.train_transformations),
+            "val_transformations": list(p2v.val_transformations),
+        }
+    )
+    return params
+
+
+def _build_policy_params(exp_cfg: ExpCfg, checkpoint: str | None) -> dict[str, Any]:
+    rl = exp_cfg.rl
+    if rl.actor_critic_class == "ActorCriticICP":
+        return _append_icp_policy_params(
+            _base_policy_params(
+                exp_cfg,
+                checkpoint,
+                class_name="ActorCriticICP",
+                num_points=rl.observation.num_points,
+            ),
+            exp_cfg,
+            checkpoint,
+        )
+
+    encoder = exp_cfg.model.encoder
+    common = _base_policy_params(
+        exp_cfg,
+        checkpoint,
+        class_name=rl.actor_critic_class,
+        num_points=encoder.num_points,
+    )
     if rl.actor_critic_class in {"ActorCriticTG", "ActorCriticTGBimanual"}:
-        tce = model.tce
-        common.update(
-            {
-                "patch_size": tce.patch_size,
-                "encoder_channel": tce.encoder_channel,
-                "vit_depth": tce.vit_depth,
-                "vit_heads": tce.vit_heads,
-            }
-        )
-        return common
+        return _append_tce_policy_params(common, exp_cfg)
     if rl.actor_critic_class == "ActorCriticPoint2Vec":
-        p2v = model.p2v
-        common.update(
-            {
-                "token_dim": p2v.token_dim,
-                "point2vec_ckpt_path": checkpoint,
-                "tokenizer_num_groups": p2v.tokenizer_num_groups,
-                "tokenizer_group_size": p2v.tokenizer_group_size,
-                "tokenizer_group_radius": p2v.tokenizer_group_radius,
-                "encoder_dim": p2v.encoder_dim,
-                "encoder_depth": p2v.encoder_depth,
-                "encoder_heads": p2v.encoder_heads,
-                "encoder_dropout": p2v.encoder_dropout,
-                "encoder_attention_dropout": p2v.encoder_attention_dropout,
-                "encoder_drop_path_rate": p2v.encoder_drop_path_rate,
-                "encoder_add_pos_at_every_layer": p2v.encoder_add_pos_at_every_layer,
-                "train_transformations": list(p2v.train_transformations),
-                "val_transformations": list(p2v.val_transformations),
-            }
-        )
-        return common
+        return _append_point2vec_policy_params(common, exp_cfg, checkpoint)
     raise ValueError(f"Unsupported RLCfg.actor_critic_class: {rl.actor_critic_class!r}")
 
 

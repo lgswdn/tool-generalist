@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Iterable, Optional
 
 from configs.config_exp import ExpCfg
-from configs.config_contact_gen import strip_contact_gen_hash_defaults
 from utils.artifacts import (
     ArtifactManifest,
     artifact_dir,
@@ -19,6 +18,7 @@ from utils.artifacts import (
     write_manifest,
 )
 from utils.config import config_hash, load_project_paths, to_plain_data
+from utils.config.hash_payloads import planner_exp_hash_payload as _exp_hash_payload
 from utils.config.paths import ProjectPaths
 from utils.experiment.stages import all_stages
 from utils.experiment.runtime import git_metadata, runtime_metadata, utc_timestamp
@@ -170,14 +170,6 @@ def _format_stage(stage: StagePlan) -> str:
         f"{stage.stage}: status={stage.status} "
         f"artifact={stage.artifact_dir} manifest={stage.manifest_path}"
     )
-
-
-def _exp_hash_payload(cfg: ExpCfg) -> dict[str, Any]:
-    payload = to_plain_data(cfg)
-    payload.pop("pretrain_reuse", None)
-    if isinstance(payload.get("contact_gen"), dict):
-        payload["contact_gen"] = strip_contact_gen_hash_defaults(payload["contact_gen"])
-    return payload
 
 
 def _source_paths(paths: ProjectPaths) -> dict[str, str]:

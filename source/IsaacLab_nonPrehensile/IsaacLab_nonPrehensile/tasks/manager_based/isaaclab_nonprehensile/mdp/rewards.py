@@ -165,17 +165,15 @@ def task_success_from_termination(
     return env.termination_manager.get_term(term_name).float() * float(base_reward)
 
 
-def task_success_still_reward(
+def object_within_goal_threshold(
     env: ManagerBasedRLEnv,
     command_name: str = "object_pose",
     threshold: float = 0.05,
     rotation_threshold: float = 0.2,
-    linear_velocity_threshold: float = 0.03,
-    angular_velocity_threshold: float = 0.15,
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
     base_reward: float = 1.0,
 ) -> torch.Tensor:
-    """Reward task success only when the object is at the target pose and nearly still."""
+    """Reward the object being inside the target pose success window."""
 
     object: RigidObject = env.scene[object_cfg.name]
     pose_success = _object_pose_success_mask(
@@ -185,43 +183,11 @@ def task_success_still_reward(
         threshold=threshold,
         rotation_threshold=rotation_threshold,
     )
-    still_success = _object_still_mask(
-        object,
-        linear_velocity_threshold=linear_velocity_threshold,
-        angular_velocity_threshold=angular_velocity_threshold,
-    )
-    success_mask = pose_success & still_success
     return torch.where(
-        success_mask,
+        pose_success,
         torch.full_like(object.data.root_pos_w[:, 0], float(base_reward)),
         torch.zeros_like(object.data.root_pos_w[:, 0]),
     )
-
-
-def object_stillness_at_goal_tanh(
-    env: ManagerBasedRLEnv,
-    command_name: str = "object_pose",
-    threshold: float = 0.05,
-    rotation_threshold: float = 0.2,
-    linear_velocity_std: float = 0.03,
-    angular_velocity_std: float = 0.15,
-    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
-) -> torch.Tensor:
-    """Reward low object velocity only after the object is inside the pose-success window."""
-
-    object: RigidObject = env.scene[object_cfg.name]
-    pose_success = _object_pose_success_mask(
-        env,
-        object,
-        command_name=command_name,
-        threshold=threshold,
-        rotation_threshold=rotation_threshold,
-    )
-    lin_speed = torch.norm(object.data.root_lin_vel_w[:, :3], dim=1)
-    ang_speed = torch.norm(object.data.root_ang_vel_w[:, :3], dim=1)
-    lin_reward = 1.0 - torch.tanh(lin_speed / linear_velocity_std)
-    ang_reward = 1.0 - torch.tanh(ang_speed / angular_velocity_std)
-    return pose_success.float() * 0.5 * (lin_reward + ang_reward)
 
 
 def _object_pose_success_mask(
@@ -242,14 +208,3 @@ def _object_pose_success_mask(
     dot_product = torch.clamp(torch.abs(dot_product), max=1.0)
     angular_distance = 2.0 * torch.acos(dot_product)
     return (position_distance < threshold) & (angular_distance < rotation_threshold)
-
-
-def _object_still_mask(
-    object: RigidObject,
-    *,
-    linear_velocity_threshold: float,
-    angular_velocity_threshold: float,
-) -> torch.Tensor:
-    lin_speed = torch.norm(object.data.root_lin_vel_w[:, :3], dim=1)
-    ang_speed = torch.norm(object.data.root_ang_vel_w[:, :3], dim=1)
-    return (lin_speed < linear_velocity_threshold) & (ang_speed < angular_velocity_threshold)

@@ -25,18 +25,20 @@ from typing import Any, Optional
 
 import torch
 import torch.nn as nn
-from torch.distributions import Normal
 
 from pretrain.model import TCEPointCloudEncoder, TCEPointCloudEncoderCfg
 from rsl_rl.utils import resolve_nn_activation
 from rsl_rl.modules.tg_policy_common import (
     ObservationLayout as TGObservationLayout,
+    TGActorCriticHeadMixin,
     build_context_vector,
     build_fusion_mlp,
     build_mlp,
     center_clouds_by_bbox,
     context_dim,
+    initialize_action_noise,
     split_observations,
+    validate_observation_layout,
 )
 
 
@@ -213,7 +215,7 @@ class RelativeContextCrossAttention(nn.Module):
             )
 
 
-class ActorCriticTG(nn.Module):
+class ActorCriticTG(TGActorCriticHeadMixin, nn.Module):
     """Actor-critic network using canonical TCEPointCloudEncoder.
 
     Observation layout:
@@ -314,17 +316,12 @@ class ActorCriticTG(nn.Module):
             object_velocity_dim=self.object_velocity_dim,
             physics_dim=self.physics_dim,
         )
-        if num_actor_obs != self.obs_layout.total_dim:
-            raise ValueError(
-                "ActorCriticTG observation layout mismatch: "
-                f"num_actor_obs={num_actor_obs}, expected={self.obs_layout.total_dim}"
-            )
-        if num_critic_obs != num_actor_obs:
-            raise ValueError(
-                "ActorCriticTG expects critic observations to use the same named layout "
-                f"as actor observations, got num_critic_obs={num_critic_obs}, "
-                f"num_actor_obs={num_actor_obs}"
-            )
+        validate_observation_layout(
+            policy_name="ActorCriticTG",
+            num_actor_obs=num_actor_obs,
+            num_critic_obs=num_critic_obs,
+            layout=self.obs_layout,
+        )
         self.pc_dim = 2 * num_points * point_dim
 
         activation_fn = resolve_nn_activation(activation)
@@ -493,15 +490,12 @@ class ActorCriticTG(nn.Module):
         self.actor = build_mlp(fusion_out_dim, actor_hidden_dims, activation_fn, num_actions)
         self.critic = build_mlp(fusion_out_dim, critic_hidden_dims, activation_fn, 1)
 
-        # Action distribution params
-        if self.noise_std_type == "scalar":
-            self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
-        elif self.noise_std_type == "log":
-            self.log_std = nn.Parameter(torch.log(init_noise_std * torch.ones(num_actions)))
-        else:
-            raise ValueError("noise_std_type must be 'scalar' or 'log'")
-        self.distribution = None
-        Normal.set_default_validate_args(False)
+        initialize_action_noise(
+            self,
+            num_actions=num_actions,
+            init_noise_std=init_noise_std,
+            noise_std_type=self.noise_std_type,
+        )
 
         print(f"[ActorCriticTG] Initialization complete")
 
@@ -731,80 +725,6 @@ class ActorCriticTG(nn.Module):
         )
 
         return fusion_mlp(fusion_input)
-
-    def _get_features(self, observations: torch.Tensor, *, branch: str = "actor"):
-        """Get fused features using either SD-Cross or learnable query tokens."""
-        all_tokens, ctx_vec = self._tokenize(observations)
-        return self._features_from_tokens_context(all_tokens, ctx_vec, branch=branch)
-
-    # --------------------------------------------------------------------------
-    # Actor / Critic helpers
-    # --------------------------------------------------------------------------
-    def update_distribution(self, observations: torch.Tensor):
-        features = self._get_features(observations)
-        mean = self.actor(features)
-
-        if self.noise_std_type == "scalar":
-            std = self.std.expand_as(mean)
-        else:
-            std = torch.exp(self.log_std).expand_as(mean)
-        std = torch.clamp(std, min=1e-6)
-        self.distribution = Normal(mean, std)
-
-    def act(self, observations: torch.Tensor, **kwargs):
-        self.update_distribution(observations)
-        return self.distribution.sample()
-
-    def act_inference(self, observations: torch.Tensor):
-        features = self._get_features(observations)
-        return self.actor(features)
-
-    def reset(self, dones=None):
-        """Stateless policy; nothing to reset."""
-        pass
-
-    def get_actions_log_prob(self, actions: torch.Tensor, **kwargs):
-        return self.distribution.log_prob(actions).sum(dim=-1)
-
-    def evaluate(self, critic_observations: torch.Tensor, **kwargs):
-        features = self._get_features(critic_observations, branch="critic")
-        return self.critic(features)
-
-    def get_cached_encoder_features(self, observations: torch.Tensor):
-        return self._tokenize(observations)
-
-    def act_from_cached_features(self, all_tokens: torch.Tensor, ctx_vec: torch.Tensor):
-        features = self._features_from_tokens_context(all_tokens, ctx_vec)
-        mean = self.actor(features)
-
-        if self.noise_std_type == "scalar":
-            std = self.std.expand_as(mean)
-        else:
-            std = torch.exp(self.log_std).expand_as(mean)
-        std = torch.clamp(std, min=1e-6)
-        self.distribution = Normal(mean, std)
-        return self.distribution.sample()
-
-    def evaluate_from_cached_features(self, all_tokens: torch.Tensor, ctx_vec: torch.Tensor):
-        return self.critic(self._features_from_tokens_context(all_tokens, ctx_vec, branch="critic"))
-
-    def get_actions_log_prob_from_cached_features(self, actions: torch.Tensor):
-        return self.distribution.log_prob(actions).sum(dim=-1)
-
-    def act_inference_from_cached_features(self, all_tokens: torch.Tensor, ctx_vec: torch.Tensor):
-        return self.actor(self._features_from_tokens_context(all_tokens, ctx_vec))
-
-    @property
-    def action_mean(self):
-        return self.distribution.mean
-
-    @property
-    def action_std(self):
-        return self.distribution.stddev
-
-    @property
-    def entropy(self):
-        return self.distribution.entropy().sum(dim=-1)
 
     def forward(self):
         raise NotImplementedError

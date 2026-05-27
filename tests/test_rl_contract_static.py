@@ -20,6 +20,13 @@ def _top_imports(rel_path: str) -> list[str]:
     ]
 
 
+def _class_node(rel_path: str, class_name: str) -> ast.ClassDef:
+    for node in ast.walk(ast.parse(_source(rel_path))):
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            return node
+    raise AssertionError(f"{class_name} not found in {rel_path}")
+
+
 def test_run_experiment_is_single_lightweight_entrypoint():
     source = _source("run_experiment.py")
     flags = [
@@ -306,7 +313,184 @@ def test_tg_and_point2vec_use_shared_policy_common_and_bbox_centering():
     assert "random initialization" not in p2v_actor
 
 
-def test_unstable_task_adds_random_pose_stillness_and_velocity_observation():
+def test_tg_policy_heads_share_mixin_noise_and_layout_helpers():
+    common = _source("rsl_rl/modules/tg_policy_common.py")
+    assert "def validate_observation_layout" in common
+    assert "def initialize_action_noise" in common
+    assert "Normal.set_default_validate_args(False)" in common
+
+    duplicated_helpers = {
+        "_get_features",
+        "_action_std",
+        "update_distribution",
+        "act",
+        "act_inference",
+        "reset",
+        "get_actions_log_prob",
+        "evaluate",
+        "get_cached_encoder_features",
+        "act_from_cached_features",
+        "evaluate_from_cached_features",
+        "get_actions_log_prob_from_cached_features",
+        "act_inference_from_cached_features",
+        "action_mean",
+        "action_std",
+        "entropy",
+    }
+    actors = {
+        "rsl_rl/modules/actor_critic_tg.py": "ActorCriticTG",
+        "rsl_rl/modules/actor_critic_point2vec.py": "ActorCriticPoint2Vec",
+        "rsl_rl/modules/actor_critic_tg_bimanual.py": "ActorCriticTGBimanual",
+    }
+    for rel_path, class_name in actors.items():
+        source = _source(rel_path)
+        class_def = _class_node(rel_path, class_name)
+        assert "TGActorCriticHeadMixin" in {ast.unparse(base) for base in class_def.bases}
+        declared = {
+            node.name
+            for node in class_def.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        assert duplicated_helpers.isdisjoint(declared)
+        assert "initialize_action_noise(" in source
+        assert "validate_observation_layout(" in source
+        assert "from torch.distributions import Normal" not in source
+        assert "Normal.set_default_validate_args(False)" not in source
+
+
+def test_train_policy_params_payload_shapes_are_stable():
+    from configs.config_exp import ExpCfg
+    from scripts.train import _build_policy_params
+
+    checkpoint = "/tmp/encoder.ckpt"
+    shared_tg_keys = [
+        "class_name",
+        "num_points",
+        "point_dim",
+        "encoder_weights_path",
+        "encoder_checkpoint_name",
+        "encoder_checkpoint_schema",
+        "encoder_checkpoint_adapter",
+        "freeze_encoder",
+        "freeze_point2vec",
+        "separate_actor_critic_fusion",
+        "sd_num_query",
+        "sd_emb_dim",
+        "relative_translation_query_tokens",
+        "reuse_pretrain_pose_cross_attn",
+        "sd_query_keys",
+        "cross_attn_heads",
+        "cross_attn_layers",
+        "cross_attn_ff_dim",
+        "cross_attn_dropout",
+        "sd_cat_query",
+        "sd_cat_ctx",
+        "fusion_hidden_dims",
+        "actor_hidden_dims",
+        "critic_hidden_dims",
+        "hand_state_dim",
+        "robot_state_dim",
+        "previous_action_dim",
+        "relative_goal_dim",
+        "object_velocity_dim",
+        "physics_dim",
+        "model_input_centering",
+        "activation",
+        "init_noise_std",
+        "noise_std_type",
+    ]
+    tce_keys = shared_tg_keys + ["patch_size", "encoder_channel", "vit_depth", "vit_heads"]
+    p2v_keys = shared_tg_keys + [
+        "token_dim",
+        "point2vec_ckpt_path",
+        "tokenizer_num_groups",
+        "tokenizer_group_size",
+        "tokenizer_group_radius",
+        "encoder_dim",
+        "encoder_depth",
+        "encoder_heads",
+        "encoder_dropout",
+        "encoder_attention_dropout",
+        "encoder_drop_path_rate",
+        "encoder_add_pos_at_every_layer",
+        "train_transformations",
+        "val_transformations",
+    ]
+    icp_keys = [
+        "class_name",
+        "num_points",
+        "point_dim",
+        "encoder_weights_path",
+        "encoder_checkpoint_name",
+        "encoder_checkpoint_schema",
+        "encoder_checkpoint_adapter",
+        "icp_weights_path",
+        "icp_point_dim",
+        "icp_num_points",
+        "freeze_icp",
+        "freeze_encoder",
+        "separate_actor_critic_fusion",
+        "sd_num_query",
+        "sd_emb_dim",
+        "relative_translation_query_tokens",
+        "reuse_pretrain_pose_cross_attn",
+        "sd_query_keys",
+        "cross_attn_heads",
+        "cross_attn_layers",
+        "cross_attn_ff_dim",
+        "cross_attn_dropout",
+        "sd_cat_query",
+        "sd_cat_ctx",
+        "hand_state_dim",
+        "robot_state_dim",
+        "previous_action_dim",
+        "relative_goal_dim",
+        "object_velocity_dim",
+        "physics_dim",
+        "model_input_centering",
+        "fusion_hidden_dims",
+        "actor_hidden_dims",
+        "critic_hidden_dims",
+        "activation",
+        "init_noise_std",
+        "noise_std_type",
+    ]
+
+    def params_for(class_name: str) -> dict:
+        cfg = ExpCfg()
+        cfg.rl.actor_critic_class = class_name
+        if class_name == "ActorCriticPoint2Vec":
+            cfg.model.encoder_backend = "point2vec"
+            cfg.model.pretrained_encoder.name = "point2vec"
+            cfg.model.pretrained_encoder.schema = "point2vec"
+            cfg.model.pretrained_encoder.adapter = "point2vec_native"
+        elif class_name == "ActorCriticICP":
+            cfg.model.encoder_backend = "icp"
+            cfg.model.pretrained_encoder.name = "icp"
+            cfg.model.pretrained_encoder.schema = "icp_legacy"
+            cfg.model.pretrained_encoder.adapter = "icp_legacy"
+        return _build_policy_params(cfg, checkpoint)
+
+    for class_name in ("ActorCriticTG", "ActorCriticTGBimanual"):
+        params = params_for(class_name)
+        assert list(params) == tce_keys
+        assert params["class_name"] == class_name
+        assert params["encoder_weights_path"] == checkpoint
+        assert params["freeze_point2vec"] is params["freeze_encoder"]
+    p2v = params_for("ActorCriticPoint2Vec")
+    assert list(p2v) == p2v_keys
+    assert p2v["class_name"] == "ActorCriticPoint2Vec"
+    assert p2v["encoder_weights_path"] == checkpoint
+    assert p2v["point2vec_ckpt_path"] == checkpoint
+    icp = params_for("ActorCriticICP")
+    assert list(icp) == icp_keys
+    assert icp["class_name"] == "ActorCriticICP"
+    assert icp["encoder_weights_path"] == checkpoint
+    assert icp["icp_weights_path"] == checkpoint
+    assert "freeze_point2vec" not in icp
+
+
+def test_unstable_task_adds_random_pose_dwell_success_and_velocity_observation():
     registration = _source(
         "source/IsaacLab_nonPrehensile/IsaacLab_nonPrehensile/tasks/manager_based/"
         "isaaclab_nonprehensile/__init__.py"
@@ -339,12 +523,12 @@ def test_unstable_task_adds_random_pose_stillness_and_velocity_observation():
     assert "object_velocity = ObsTerm(func=mdp.object_root_velocity)" in env
     assert "func=mdp.task_success_from_termination" in env
     assert "\"term_name\": \"reached\"" in env
-    assert "func=mdp.object_stillness_at_goal_tanh" in env
-    assert "func=mdp.object_reached_goal_still" in env
+    assert "func=mdp.object_within_goal_threshold" in env
+    assert "func=mdp.object_reached_goal_dwell" in env
     assert "def object_root_velocity" in obs
     assert "def task_success_from_termination" in rewards
-    assert "def object_stillness_at_goal_tanh" in rewards
-    assert "def object_reached_goal_still" in terminations
+    assert "def object_within_goal_threshold" in rewards
+    assert "def object_reached_goal_dwell" in terminations
     assert "EXP_CFG.pretrain_reuse = \"multitools_diff_post.py\"" in cfg
     assert "EXP_CFG.rl.isaac_task_id = \"tool-unstable-v0\"" in cfg
     assert "\"object_velocity\"" in cfg
@@ -379,10 +563,13 @@ def test_bimanual_unstable_task_is_additive_and_uses_three_cloud_layout():
     assert "tool1_cloud = ObsTerm" in env
     assert "tool2_cloud = ObsTerm" in env
     assert "object_velocity = ObsTerm(func=mdp.object_root_velocity)" in env
-    assert "func=mdp.object_reached_goal_still" in env
+    assert "func=mdp.object_reached_goal_dwell" in env
+    assert "func=mdp.bimanual_links_too_close" in env
+    assert "func=mdp.bimanual_link_proximity_penalty" in env
     assert "def get_tool1_pointcloud_in_env_frame" in obs
     assert "def get_tool2_pointcloud_in_env_frame" in obs
     assert "def bimanual_object_goal_distance_tanh" in rewards
+    assert "def bimanual_link_proximity_penalty" in rewards
     assert "class ActorCriticTGBimanual" in actor
     assert "class BimanualTCEPointCloudEncoder" in actor
     assert "expanded[1] = type_embed[0]" in actor

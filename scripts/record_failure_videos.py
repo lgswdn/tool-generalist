@@ -306,6 +306,11 @@ from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool 
     get_object_index_for_env,
     get_tool_index_for_env,
 )
+from scripts.video_diagnostics import (
+    format_recording_diagnostics,
+    overlay_recording_diagnostics,
+    recording_debug_metrics,
+)
 
 
 def _tool_names_from_loaded_data() -> list[str]:
@@ -374,8 +379,8 @@ def _make_record_camera_cfg() -> TiledCameraCfg:
     return TiledCameraCfg(
         prim_path="{ENV_REGEX_NS}/EvalRecordCamera",
         offset=TiledCameraCfg.OffsetCfg(
-            pos=(0.5, -1.45, 0.85),
-            rot=(0.5557194, -0.8313699, 0.0, 0.0),
+            pos=(1.5, 0.0, 1.0),
+            rot=(-0.3337, 0.6234, 0.6234, -0.3337),
             convention="ros",
         ),
         data_types=["rgb"],
@@ -478,6 +483,7 @@ def _init_video_state(video_dir: str) -> dict:
         "failure_saved": 0,
         "success_saved": 0,
         "kept_paths": [],
+        "current_step": None,
     }
 
 
@@ -617,9 +623,25 @@ def _capture_video_frames(env, video_state: dict, env_ids: set[int] | None = Non
         frame_tensor = rgb_all[env_id, ..., :3].detach().cpu()
         if frame_tensor.dtype != torch.uint8:
             frame_tensor = torch.clamp(frame_tensor * 255.0, 0.0, 255.0).to(torch.uint8)
-        frame = frame_tensor.contiguous().numpy()
+        frame = frame_tensor.contiguous().numpy().copy()
+        metrics = recording_debug_metrics(
+            env.unwrapped,
+            env_id,
+            runtime_spec.get("reward_params", {}),
+        )
+        step = video_state.get("current_step")
+        record["last_diag"] = format_recording_diagnostics(metrics, step=step)
+        frame = overlay_recording_diagnostics(frame, metrics, step=step)
         writer.stdin.write(frame.tobytes())
         record["frames"] = int(record["frames"]) + 1
+
+
+def _active_diag_summary(video_state: dict) -> str:
+    for record in video_state["active"].values():
+        diag = record.get("last_diag")
+        if diag:
+            return str(diag)
+    return "pending"
 
 
 def _discard_video_tmp(path: str) -> None:
@@ -862,6 +884,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
             while _any_rank_needs_videos(video_state) and simulation_app.is_running():
                 start_time = time.time()
+                video_state["current_step"] = cycle_steps + 1
                 with torch.inference_mode():
                     actions = inference_policy(obs)
                     obs, _, dones, _ = env.step(actions)
@@ -925,7 +948,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     f"saved_success_videos={video_state['success_saved']}/{args_cli.num_success_videos} "
                     f"episodes_seen={total_episodes} failures_seen={failures_seen} "
                     f"successes_seen={successes_seen} active_recordings={len(video_state['active'])} "
-                    f"waiting_recordings={len(video_state['waiting'])} step_time={elapsed:.4f}s",
+                    f"waiting_recordings={len(video_state['waiting'])} "
+                    f"diag={_active_diag_summary(video_state)} "
+                    f"step_time={elapsed:.4f}s",
                     flush=True,
                 )
 

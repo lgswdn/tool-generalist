@@ -4,7 +4,7 @@ from copy import deepcopy
 
 from configs.config_exp import ExpCfg
 from utils.artifacts.manifest import ArtifactManifest, write_manifest
-from utils.artifacts.naming import _pretrain_model_hash_payload
+from utils.artifacts.naming import _pretrain_model_hash_payload, encoder_artifact_name
 from utils.config.hash import config_hash
 from utils.artifacts.resolver import resolve_artifacts
 from utils.experiment.runner import _stage_action
@@ -57,6 +57,43 @@ def test_inactive_icp_backend_does_not_change_tce_pretrain_hash():
 
     cfg.model.encoder_backend = "icp"
     assert "icp" in _pretrain_model_hash_payload(cfg)
+
+
+def test_inactive_unicorn_defaults_do_not_change_non_unicorn_hashes():
+    cfg = ExpCfg(name="inactive_unicorn_hash_unit")
+    cfg.pretrain.enabled = True
+    cfg.model.encoder_backend = "tce"
+
+    baseline_config_hash = config_hash(cfg)
+    baseline_encoder_name = encoder_artifact_name(cfg)
+
+    changed = deepcopy(cfg)
+    changed.model.unicorn.num_patches += 1
+    changed.pretrain.unicorn.num_patches += 1
+    changed.pretrain.optimizer.sam_rho = 0.2
+    changed.pretrain.tasks.contact = True
+
+    assert config_hash(changed) == baseline_config_hash
+    assert encoder_artifact_name(changed) == baseline_encoder_name
+
+
+def test_unicorn_hashes_include_unicorn_settings():
+    cfg = ExpCfg(name="active_unicorn_hash_unit")
+    cfg.pretrain.enabled = True
+    cfg.pretrain.mode = "unicorn_contact"
+    cfg.pretrain.enabled_heads = ["contact"]
+    cfg.model.encoder_backend = "unicorn"
+    cfg.model.pretrained_encoder.adapter = "unicorn_strict"
+
+    baseline_config_hash = config_hash(cfg)
+    baseline_encoder_name = encoder_artifact_name(cfg)
+
+    changed = deepcopy(cfg)
+    changed.model.unicorn.num_patches += 1
+    changed.pretrain.unicorn.num_patches += 1
+
+    assert config_hash(changed) != baseline_config_hash
+    assert encoder_artifact_name(changed) != baseline_encoder_name
 
 
 def test_contact_stage_reuses_existing_outputs_when_top_manifest_is_incomplete(tmp_path):

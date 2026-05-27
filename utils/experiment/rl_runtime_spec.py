@@ -278,6 +278,16 @@ def validate_runtime_spec(spec: Mapping[str, Any], path: str | Path = "<runtime-
 def runtime_spec_contract(spec: Mapping[str, Any]) -> SimpleNamespace:
     """Return attr-style config used by legacy Isaac cfg declarations."""
 
+    reward = dict(spec["reward_params"])
+    reward.setdefault("object_goal_threshold_term_weight", 6.0)
+    reward.setdefault("bimanual_arm_proximity_penalty_weight", -20.0)
+    reward.setdefault("bimanual_arm_proximity_warning_distance", 0.20)
+    reward.setdefault("bimanual_arm_proximity_failure_distance", 0.15)
+    reward["stable_success_dwell_steps"] = max(
+        10,
+        int(reward.get("stable_success_dwell_steps", 10)),
+    )
+
     return _to_namespace(
         {
             "action": spec["action_params"],
@@ -297,7 +307,7 @@ def runtime_spec_contract(spec: Mapping[str, Any]) -> SimpleNamespace:
             ),
             "asset_assignment": spec["asset_assignment_params"],
             "env": spec["env_params"],
-            "reward": spec["reward_params"],
+            "reward": reward,
             "domain_randomization": spec["domain_randomization_params"],
             "physics_observation_fields": tuple(spec["physics_observation_fields"]),
             "seed": spec["seed"],

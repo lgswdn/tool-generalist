@@ -21,4 +21,5 @@ EXP_CFG.pretrain.retrain = False
 EXP_CFG.rl.enabled = True
 EXP_CFG.rl.name = "bimanual_unstable_full_tool_diff_post"
 EXP_CFG.rl.launch.run_name = "bimanual_unstable_full_tool_diff_post"
-EXP_CFG.rl.reward.object_stillness_at_goal_term_weight = 50.0
+EXP_CFG.rl.reward.object_goal_threshold_term_weight = 6.0
+EXP_CFG.rl.reward.stable_success_dwell_steps = 10

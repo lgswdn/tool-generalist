@@ -91,3 +91,40 @@ def bimanual_joint_power_penalty(
         power = torch.sum(torch.abs(robot.data.applied_torque * robot.data.joint_vel), dim=1)
         total = power if total is None else total + power
     return float(k_e) * total
+
+
+def bimanual_link_min_distance(
+    env: "ManagerBasedRLEnv",
+    robot1_cfg: SceneEntityCfg = SceneEntityCfg("robot_1"),
+    robot2_cfg: SceneEntityCfg = SceneEntityCfg("robot_2"),
+) -> torch.Tensor:
+    """Minimum pairwise distance between selected bodies on the two bimanual arms."""
+
+    robot1 = env.scene[robot1_cfg.name]
+    robot2 = env.scene[robot2_cfg.name]
+    pos1 = robot1.data.body_pos_w[:, robot1_cfg.body_ids, :]
+    pos2 = robot2.data.body_pos_w[:, robot2_cfg.body_ids, :]
+    distances = torch.cdist(pos1, pos2)
+    return torch.amin(distances, dim=(1, 2))
+
+
+def bimanual_link_proximity_penalty(
+    env: "ManagerBasedRLEnv",
+    warning_distance: float = 0.20,
+    failure_distance: float = 0.15,
+    robot1_cfg: SceneEntityCfg = SceneEntityCfg("robot_1"),
+    robot2_cfg: SceneEntityCfg = SceneEntityCfg("robot_2"),
+) -> torch.Tensor:
+    """Penalty that starts below warning distance and steepens at the failure distance."""
+
+    warning_distance = float(warning_distance)
+    failure_distance = float(failure_distance)
+    if warning_distance <= failure_distance:
+        raise ValueError("warning_distance must be greater than failure_distance")
+
+    min_distance = bimanual_link_min_distance(env, robot1_cfg=robot1_cfg, robot2_cfg=robot2_cfg)
+    normalized_violation = torch.clamp(
+        (warning_distance - min_distance) / (warning_distance - failure_distance),
+        min=0.0,
+    )
+    return torch.square(normalized_violation)

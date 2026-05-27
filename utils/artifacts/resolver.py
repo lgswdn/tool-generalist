@@ -6,20 +6,28 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from configs.config_contact_gen import strip_contact_gen_hash_defaults
 from configs.config_exp import ExpCfg
 from utils.artifacts.naming import (
-    CONTACT_ARTIFACT_GENERAL_NAME,
     artifact_dir,
     contact_artifact_name,
     encoder_artifact_name,
     experiment_artifact_name,
     rl_artifact_name,
-    _pretrain_model_hash_payload,
 )
 from utils.artifacts.paths import artifact_root, manifest_path
 from utils.config.hash import config_hash
-from utils.io import to_plain_data
+from utils.config.hash_payloads import (
+    normalize_artifact_root as _normalize_artifact_root,
+    semantic_contact_general_payload as _semantic_contact_general_payload,
+    semantic_contact_gen_payload as _semantic_contact_gen_payload,
+    semantic_exp_payload as _semantic_exp_payload,
+    semantic_pretrain_model_payload as _semantic_pretrain_model_payload,
+    semantic_pretrain_payload as _semantic_pretrain_payload,
+    strip_contact_runtime_fields as _strip_contact_runtime_fields,
+    strip_default_condition_normalization as _strip_default_condition_normalization,
+    strip_default_sdf_relative_loss as _strip_default_sdf_relative_loss,
+    strip_pretrain_runtime_fields as _strip_pretrain_runtime_fields,
+)
 from utils.experiment.stages import StageSpec, all_stages
 
 
@@ -108,86 +116,6 @@ def _stage_artifact_name_and_payload(
             "timestamp": timestamp,
         }
     return stage_name, {"stage": stage_name, "config": cfg}
-
-
-def _semantic_exp_payload(cfg: ExpCfg) -> dict:
-    payload = to_plain_data(cfg)
-    payload.pop("pretrain_reuse", None)
-    payload.pop("num_gpus", None)
-    _normalize_artifact_root(payload)
-    if "contact_gen" in payload:
-        payload["contact_gen"] = _strip_contact_runtime_fields(payload["contact_gen"])
-    if "pretrain" in payload:
-        payload["pretrain"] = _strip_pretrain_runtime_fields(payload["pretrain"])
-    return payload
-
-
-def _normalize_artifact_root(payload: dict) -> None:
-    general = payload.get("general")
-    if isinstance(general, dict):
-        general["artifact_root"] = "artifacts"
-
-
-def _semantic_contact_general_payload(cfg: ExpCfg) -> dict:
-    payload = to_plain_data(cfg.general)
-    payload["artifact_root"] = "artifacts"
-    payload["name"] = CONTACT_ARTIFACT_GENERAL_NAME
-    return payload
-
-
-def _semantic_contact_gen_payload(contact_cfg) -> dict:
-    return _strip_contact_runtime_fields(to_plain_data(contact_cfg))
-
-
-def _semantic_pretrain_payload(pretrain_cfg) -> dict:
-    return _strip_pretrain_runtime_fields(to_plain_data(pretrain_cfg))
-
-
-def _semantic_pretrain_model_payload(cfg: ExpCfg) -> dict:
-    return _pretrain_model_hash_payload(cfg)
-
-
-def _strip_contact_runtime_fields(payload: dict) -> dict:
-    cleaned = dict(payload)
-    cleaned["enabled"] = True
-    physics = dict(cleaned.get("physics") or {})
-    physics.pop("num_workers", None)
-    cleaned["physics"] = physics
-    return strip_contact_gen_hash_defaults(cleaned)
-
-
-def _strip_pretrain_runtime_fields(payload: dict) -> dict:
-    cleaned = dict(payload)
-    batch = dict(cleaned.get("batch") or {})
-    batch.pop("num_workers", None)
-    cleaned["batch"] = batch
-    if isinstance(cleaned.get("loss"), dict):
-        cleaned["loss"] = dict(cleaned["loss"])
-    for key in ("logger", "wandb_project", "wandb_run_name", "wandb_entity", "wandb_mode"):
-        cleaned.pop(key, None)
-    _strip_default_sdf_relative_loss(cleaned)
-    _strip_default_condition_normalization(cleaned)
-    return cleaned
-
-
-def _strip_default_sdf_relative_loss(pretrain: dict) -> None:
-    loss = pretrain.get("loss")
-    if not isinstance(loss, dict):
-        return
-    if bool(loss.get("sdf_relative_loss", False)):
-        return
-    if float(loss.get("sdf_relative_eps", 0.005)) != 0.005:
-        return
-    loss.pop("sdf_relative_loss", None)
-    loss.pop("sdf_relative_eps", None)
-
-
-def _strip_default_condition_normalization(pretrain: dict) -> None:
-    if pretrain.get("condition_normalization") is not None:
-        return
-    pretrain.pop("condition_normalization", None)
-    pretrain.pop("condition_norm_sample_files", None)
-    pretrain.pop("condition_norm_eps", None)
 
 
 

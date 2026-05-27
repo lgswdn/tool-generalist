@@ -191,6 +191,18 @@ class ExpCfg:
             errors.append("RLCfg.separate_actor_critic_fusion must be a bool")
         if self.rl.reward.rotation_distance_divisor <= 0:
             errors.append("RewardCfg.rotation_distance_divisor must be > 0")
+        if self.rl.reward.bimanual_arm_proximity_warning_distance <= 0:
+            errors.append("RewardCfg.bimanual_arm_proximity_warning_distance must be > 0")
+        if self.rl.reward.bimanual_arm_proximity_failure_distance <= 0:
+            errors.append("RewardCfg.bimanual_arm_proximity_failure_distance must be > 0")
+        if (
+            self.rl.reward.bimanual_arm_proximity_warning_distance
+            <= self.rl.reward.bimanual_arm_proximity_failure_distance
+        ):
+            errors.append(
+                "RewardCfg.bimanual_arm_proximity_warning_distance must be greater than "
+                "bimanual_arm_proximity_failure_distance"
+            )
         if self.pretrain.optimizer.learning_rate <= 0:
             errors.append("PretrainOptimizerCfg.learning_rate must be > 0")
         if self.pretrain.loss.sdf_relative_eps <= 0:
@@ -211,10 +223,29 @@ class ExpCfg:
         if not self.pretrain.enabled_heads:
             errors.append("PretrainCfg.enabled_heads must enable at least one head")
         else:
-            allowed_heads = {"sdf", "diff", "postcontact"}
+            allowed_heads = {"sdf", "diff", "postcontact", "contact"}
             unknown = sorted(set(self.pretrain.enabled_heads).difference(allowed_heads))
             if unknown:
                 errors.append(f"PretrainCfg.enabled_heads contains unknown heads: {unknown}")
+        if self.pretrain.mode not in {"tce_multitask", "unicorn_contact"}:
+            errors.append("PretrainCfg.mode must be tce_multitask or unicorn_contact")
+        if self.pretrain.mode == "unicorn_contact" and self.pretrain.enabled_heads != ["contact"]:
+            errors.append("PretrainCfg.mode=unicorn_contact requires enabled_heads=['contact']")
+        if self.pretrain.optimizer.name not in {"adamw", "sam"}:
+            errors.append("PretrainOptimizerCfg.name must be adamw or sam")
+        if self.pretrain.optimizer.sam_rho <= 0:
+            errors.append("PretrainOptimizerCfg.sam_rho must be > 0")
+        if (
+            self.pretrain.unicorn.positive_patch_fraction <= 0
+            or self.pretrain.unicorn.positive_patch_fraction >= 1
+        ):
+            errors.append("UnicornPretrainCfg.positive_patch_fraction must be in (0, 1)")
+        if self.pretrain.unicorn.num_patches <= 0:
+            errors.append("UnicornPretrainCfg.num_patches must be > 0")
+        if self.pretrain.unicorn.label.contact_eps < 0:
+            errors.append("UnicornLabelCfg.contact_eps must be >= 0")
+        if self.pretrain.unicorn.label.patch_positive_rule not in {"any", "count"}:
+            errors.append("UnicornLabelCfg.patch_positive_rule must be any or count")
         if self.pretrain.noise_schedule_mode not in {"interpolation", "slerp", "random_walk"}:
             errors.append(
                 "PretrainCfg.noise_schedule_mode must be interpolation, slerp, or random_walk"
@@ -304,16 +335,8 @@ class ExpCfg:
                 errors.append(f"RLCurriculumCfg.{field_name} must be in [0, 1]")
         if self.rl.observation.object_velocity_dim < 0:
             errors.append("ObservationCfg.object_velocity_dim must be >= 0")
-        if self.rl.reward.stable_success_linear_velocity_threshold <= 0:
-            errors.append("RewardCfg.stable_success_linear_velocity_threshold must be > 0")
-        if self.rl.reward.stable_success_angular_velocity_threshold <= 0:
-            errors.append("RewardCfg.stable_success_angular_velocity_threshold must be > 0")
         if self.rl.reward.stable_success_dwell_steps < 1:
             errors.append("RewardCfg.stable_success_dwell_steps must be >= 1")
-        if self.rl.reward.object_stillness_linear_velocity_std <= 0:
-            errors.append("RewardCfg.object_stillness_linear_velocity_std must be > 0")
-        if self.rl.reward.object_stillness_angular_velocity_std <= 0:
-            errors.append("RewardCfg.object_stillness_angular_velocity_std must be > 0")
         _require_range(errors, "ActionCfg.clip", self.rl.action.clip)
         if self.rl.action.clip[0] < -1.0 or self.rl.action.clip[1] > 1.0:
             errors.append("ActionCfg.clip must stay within [-1, 1]")
@@ -339,9 +362,9 @@ class ExpCfg:
             encoder_backend = "point2vec"
         if encoder_backend in {"corn"}:
             encoder_backend = "icp"
-        if encoder_backend not in {"tce", "point2vec", "icp"}:
-            errors.append("ModelCfg.encoder_backend must be tce, point2vec, or icp")
-        allowed_adapters = {"tce_strict", "point2vec_native", "icp_legacy"}
+        if encoder_backend not in {"tce", "point2vec", "icp", "unicorn"}:
+            errors.append("ModelCfg.encoder_backend must be tce, point2vec, icp, or unicorn")
+        allowed_adapters = {"tce_strict", "point2vec_native", "icp_legacy", "unicorn_strict"}
         if self.model.pretrained_encoder.adapter not in allowed_adapters:
             errors.append(
                 "ModelCfg.pretrained_encoder.adapter must be one of "
@@ -395,8 +418,16 @@ class ExpCfg:
                 errors.append("ActorCriticICP requires ObservationCfg.include_tool_cloud=False")
             if self.rl.observation.include_bbox_centers:
                 errors.append("ActorCriticICP requires ObservationCfg.include_bbox_centers=False")
+        if encoder_backend == "unicorn" and self.model.pretrained_encoder.adapter != "unicorn_strict":
+            errors.append("encoder_backend=unicorn requires pretrained_encoder.adapter=unicorn_strict")
+        if self.pretrain.enabled and self.pretrain.mode == "unicorn_contact" and encoder_backend != "unicorn":
+            errors.append("PretrainCfg.mode=unicorn_contact requires ModelCfg.encoder_backend=unicorn")
         if self.pretrain.enabled and (
-            encoder_backend != "tce" or self.rl.actor_critic_class not in {"ActorCriticTG", "ActorCriticTGBimanual"}
+            self.pretrain.mode != "unicorn_contact"
+            and (
+                encoder_backend != "tce"
+                or self.rl.actor_critic_class not in {"ActorCriticTG", "ActorCriticTGBimanual"}
+            )
         ):
             errors.append("PretrainCfg.enabled currently supports only TCE with ActorCriticTG/ActorCriticTGBimanual")
         if self.rl.algorithm_class != "PPO":

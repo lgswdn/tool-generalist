@@ -17,6 +17,7 @@ class PretrainTaskCfg:
     sdf: bool = False
     diffusion: bool = True
     postcontact: bool = True
+    contact: bool = False
 
 
 @dataclass
@@ -36,6 +37,7 @@ class PretrainOptimizerCfg:
     eps: float = 1e-8
     scheduler: str = "cosine"
     min_learning_rate: float = 1e-6
+    sam_rho: float = 0.05
 
 
 @dataclass
@@ -61,6 +63,32 @@ class SDFTargetCfg:
 
 
 @dataclass
+class UnicornLabelCfg:
+    backend: str = "kaolin"
+    contact_eps: float = 0.002
+    patch_positive_rule: str = "any"
+    positive_min_points: int = 1
+    chunk_size: int = 8192
+
+
+@dataclass
+class UnicornAugmentCfg:
+    rotation_range: tuple[float, float] = (-3.141592653589793, 3.141592653589793)
+    translation_range: tuple[float, float] = (-0.1, 0.1)
+    log_scale_range: tuple[float, float] = (-1.0, 1.0)
+    noise_std: float = 0.01
+
+
+@dataclass
+class UnicornPretrainCfg:
+    num_patches: int = 16
+    decoder_hidden_dims: list[int] = field(default_factory=lambda: [128, 128])
+    positive_patch_fraction: float = 0.5
+    label: UnicornLabelCfg = field(default_factory=UnicornLabelCfg)
+    augment: UnicornAugmentCfg = field(default_factory=UnicornAugmentCfg)
+
+
+@dataclass
 class CheckpointPolicyCfg:
     save_best: bool = True
     save_last: bool = True
@@ -80,6 +108,7 @@ class CheckpointPolicyCfg:
 @dataclass
 class PretrainCfg:
     name: str = "pretrain_default"
+    mode: str = "tce_multitask"
     enabled: bool = False
     retrain: bool = False
     enabled_heads: list[str] = field(default_factory=lambda: ["diff", "postcontact"])
@@ -116,6 +145,7 @@ class PretrainCfg:
     fixed_validation_sampling: bool = True
     batch: PretrainBatchCfg = field(default_factory=PretrainBatchCfg)
     epochs: int = 20
+    device: Optional[str] = None
     optimizer: PretrainOptimizerCfg = field(default_factory=PretrainOptimizerCfg)
     log_interval: int = 10
     logger: str = "none"
@@ -125,6 +155,7 @@ class PretrainCfg:
     wandb_mode: str = "online"
     loss: PretrainLossCfg = field(default_factory=PretrainLossCfg)
     sdf_target: SDFTargetCfg = field(default_factory=SDFTargetCfg)
+    unicorn: UnicornPretrainCfg = field(default_factory=UnicornPretrainCfg)
     checkpoint_policy: CheckpointPolicyCfg = field(default_factory=CheckpointPolicyCfg)
     tasks: PretrainTaskCfg = field(default_factory=PretrainTaskCfg)
 
@@ -275,5 +306,30 @@ DIFF_CFG: PretrainCfg = PretrainCfg(
         sdf=False,
         diffusion=True,
         postcontact=False,
+    ),
+)
+
+UNICORN_CONTACT_CFG: PretrainCfg = PretrainCfg(
+    name="unicorn_contact",
+    mode="unicorn_contact",
+    enabled=True,
+    enabled_heads=["contact"],
+    augment=True,
+    num_precontact_steps=0,
+    batch=PretrainBatchCfg(batch_size=1024, num_workers=0),
+    epochs=20,
+    optimizer=PretrainOptimizerCfg(
+        name="sam",
+        learning_rate=2e-4,
+        weight_decay=0.001,
+        scheduler="cosine",
+        min_learning_rate=1e-6,
+        sam_rho=0.05,
+    ),
+    tasks=PretrainTaskCfg(
+        sdf=False,
+        diffusion=False,
+        postcontact=False,
+        contact=True,
     ),
 )

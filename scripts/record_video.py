@@ -131,6 +131,34 @@ import torch
 from isaaclab.envs import ManagerBasedRLEnvCfg
 import IsaacLab_nonPrehensile.tasks
 from isaaclab_tasks.utils.hydra import hydra_task_config
+from scripts.video_diagnostics import (
+    format_recording_diagnostics,
+    overlay_recording_diagnostics,
+    recording_debug_metrics,
+)
+
+
+class DiagnosticsRenderWrapper(gym.Wrapper):
+    def __init__(self, env, reward_params: dict):
+        super().__init__(env)
+        self._reward_params = reward_params
+        self._diagnostic_step = 0
+
+    def step(self, action):
+        result = self.env.step(action)
+        self._diagnostic_step += 1
+        return result
+
+    def reset(self, **kwargs):
+        self._diagnostic_step = 0
+        return self.env.reset(**kwargs)
+
+    def render(self):
+        frame = self.env.render()
+        if frame is None:
+            return frame
+        metrics = recording_debug_metrics(self.unwrapped, 0, self._reward_params)
+        return overlay_recording_diagnostics(frame.copy(), metrics, step=self._diagnostic_step)
 
 
 def _make_actions(env) -> torch.Tensor:
@@ -140,6 +168,9 @@ def _make_actions(env) -> torch.Tensor:
 
 
 def _print_distance_debug(base_env, step: int) -> None:
+    metrics = recording_debug_metrics(base_env, 0, runtime_spec.get("reward_params", {}))
+    print(f"[DEBUG] Step {step} | {format_recording_diagnostics(metrics, step=step)}", flush=True)
+
     obj_pos_w = base_env.scene["object"].data.root_pos_w
     if getattr(base_env.cfg, "bimanual", False):
         from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.mdp import (
@@ -213,9 +244,10 @@ def _print_layout_debug(base_env) -> None:
 def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg):
     env_cfg.scene.num_envs = args_cli.num_envs
     if getattr(env_cfg, "bimanual", False):
-        env_cfg.viewer.eye = (0.5, -1.45, 0.85)
-        env_cfg.viewer.lookat = (0.5, 0.0, 0.25)
+        env_cfg.viewer.eye = (2.5, 0.5, 0.8)
+        env_cfg.viewer.lookat = (0.0, 0.0, 0.0)
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array")
+    env = DiagnosticsRenderWrapper(env, runtime_spec.get("reward_params", {}))
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     video_kwargs = {
