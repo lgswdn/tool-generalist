@@ -14,3 +14,4 @@ EXP_CFG.general.objects_manifest = FULL_YES_MANIFEST
 
 EXP_CFG.rl.name = "bimanual_unstable_nc1f"
 EXP_CFG.rl.launch.run_name = "bimanual_unstable_nc1f"
+EXP_CFG.rl.reward.object_goal_threshold_term_weight *= 2.0

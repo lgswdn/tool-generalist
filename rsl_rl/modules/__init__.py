@@ -30,6 +30,7 @@ def _try_import(module_attr, from_module, names):
 
 _optional = {}
 _optional.update(_try_import(globals(), "actor_critic_tg", ["ActorCriticTG"]))
+_optional.update(_try_import(globals(), "actor_critic_tg_unicorn", ["ActorCriticTGUnicorn"]))
 _optional.update(_try_import(globals(), "actor_critic_tg_bimanual", ["ActorCriticTGBimanual"]))
 _optional.update(_try_import(globals(), "actor_critic_point2vec", ["ActorCriticPoint2Vec"]))
 _optional.update(_try_import(globals(), "actor_critic_icp", ["ActorCriticICP"]))
@@ -40,6 +41,7 @@ globals().update({k: v for k, v in _optional.items() if v is not None})
 
 # Convenience aliases
 ActorCriticTG = _optional.get("ActorCriticTG")
+ActorCriticTGUnicorn = _optional.get("ActorCriticTGUnicorn")
 ActorCriticTGBimanual = _optional.get("ActorCriticTGBimanual")
 ActorCriticPoint2Vec = _optional.get("ActorCriticPoint2Vec")
 ActorCriticICP = _optional.get("ActorCriticICP")
@@ -47,6 +49,7 @@ RandomNetworkDistillation = _optional.get("RandomNetworkDistillation")
 
 POLICY_REGISTRY = {
     "ActorCriticTG": ActorCriticTG,
+    "ActorCriticTGUnicorn": ActorCriticTGUnicorn,
     "ActorCriticTGBimanual": ActorCriticTGBimanual,
     "ActorCriticPoint2Vec": ActorCriticPoint2Vec,
     "ActorCriticICP": ActorCriticICP,
@@ -76,6 +79,7 @@ __all__ = [
     "ActorCriticRecurrent",
     "ActorCriticToolUnicorn",
     "ActorCriticTG",
+    "ActorCriticTGUnicorn",
     "ActorCriticTGBimanual",
     "EmpiricalNormalization",
     "RandomNetworkDistillation",

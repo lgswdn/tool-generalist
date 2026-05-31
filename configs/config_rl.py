@@ -178,6 +178,13 @@ class RewardCfg:
     bimanual_arm_proximity_penalty_weight: float = -20.0
     bimanual_arm_proximity_warning_distance: float = 0.20
     bimanual_arm_proximity_failure_distance: float = 0.15
+    bimanual_wrist_surface_penalty_weight: float = -5.0
+    bimanual_wrist_surface_warning_height: float = 0.12
+    bimanual_wrist_surface_contact_height: float = 0.06
+    bimanual_tool_proximity_penalty_weight: float = -10.0
+    bimanual_tool_proximity_warning_clearance: float = 0.02
+    bimanual_tool_proximity_contact_clearance: float = 0.005
+    bimanual_tool_proximity_num_points: int = 128
 
 
 @dataclass

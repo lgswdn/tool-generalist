@@ -15,4 +15,5 @@ EXP_CFG.rl.name = "bimanual_unstable_ncff"
 EXP_CFG.rl.launch.run_name = "bimanual_unstable_ncff"
 
 EXP_CFG.model.policy_fusion.cross_attn_heads = 2
+EXP_CFG.rl.reward.object_goal_threshold_term_weight = 12.0
 EXP_CFG.rl.curriculum.enabled = False

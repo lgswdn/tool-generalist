@@ -11,7 +11,13 @@ from typing import Any, Mapping
 
 RUNTIME_SPEC_ENV_VAR = "TOOL_GENERALIST_RL_RUNTIME_SPEC"
 RUNTIME_SPEC_FILENAME = "rl_runtime_spec.json"
-SUPPORTED_POLICY_CLASSES = {"ActorCriticTG", "ActorCriticTGBimanual", "ActorCriticPoint2Vec", "ActorCriticICP"}
+SUPPORTED_POLICY_CLASSES = {
+    "ActorCriticTG",
+    "ActorCriticTGUnicorn",
+    "ActorCriticTGBimanual",
+    "ActorCriticPoint2Vec",
+    "ActorCriticICP",
+}
 
 
 def load_runtime_spec_from_env() -> dict[str, Any]:
@@ -210,7 +216,7 @@ def validate_runtime_spec(spec: Mapping[str, Any], path: str | Path = "<runtime-
             "noise_std_type",
         }
 
-    if spec["actor_critic_class"] in {"ActorCriticTG", "ActorCriticTGBimanual"}:
+    if spec["actor_critic_class"] in {"ActorCriticTG", "ActorCriticTGUnicorn", "ActorCriticTGBimanual"}:
         required_policy.update(
             {
                 "patch_size",
@@ -219,6 +225,8 @@ def validate_runtime_spec(spec: Mapping[str, Any], path: str | Path = "<runtime-
                 "vit_heads",
             }
         )
+        if spec["actor_critic_class"] == "ActorCriticTGUnicorn":
+            required_policy.add("num_patches")
     elif spec["actor_critic_class"] == "ActorCriticPoint2Vec":
         required_policy.update(
             {
@@ -283,6 +291,13 @@ def runtime_spec_contract(spec: Mapping[str, Any]) -> SimpleNamespace:
     reward.setdefault("bimanual_arm_proximity_penalty_weight", -20.0)
     reward.setdefault("bimanual_arm_proximity_warning_distance", 0.20)
     reward.setdefault("bimanual_arm_proximity_failure_distance", 0.15)
+    reward.setdefault("bimanual_wrist_surface_penalty_weight", -5.0)
+    reward.setdefault("bimanual_wrist_surface_warning_height", 0.12)
+    reward.setdefault("bimanual_wrist_surface_contact_height", 0.06)
+    reward.setdefault("bimanual_tool_proximity_penalty_weight", -10.0)
+    reward.setdefault("bimanual_tool_proximity_warning_clearance", 0.02)
+    reward.setdefault("bimanual_tool_proximity_contact_clearance", 0.005)
+    reward.setdefault("bimanual_tool_proximity_num_points", 128)
     reward["stable_success_dwell_steps"] = max(
         10,
         int(reward.get("stable_success_dwell_steps", 10)),

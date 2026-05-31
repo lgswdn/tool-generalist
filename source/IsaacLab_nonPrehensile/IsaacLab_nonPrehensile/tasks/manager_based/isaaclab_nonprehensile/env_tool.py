@@ -875,7 +875,7 @@ class NonPrehensileEnvCfg(ManagerBasedRLEnvCfg):
         self.episode_length_s = _RL_CONTRACT.env.episode_length_s
         
         # Viewer settings
-        self.viewer.eye = (2.5, 0.5, 0.8)
+        self.viewer.eye = (2.0, 0.4, 0.65)
         # self.viewer.eye = (6, 0, 6)
         
         # Simulation settings - match reference config dt

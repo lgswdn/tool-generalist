@@ -76,6 +76,8 @@ if _USE_BARE_FRANKA:
 _BIMANUAL_BASE_HALF_SPACING_Y = 0.35
 _BIMANUAL_GOAL_XY_OFFSET_RANGE = min(float(_RL_CONTRACT.object_pose_sampling.xy_offset_range), 0.075)
 _BIMANUAL_ARM_PROXIMITY_BODY_NAMES = ("panda_link5", "panda_link6", "panda_link7")
+_BIMANUAL_WRIST_SURFACE_BODY_NAMES = ("panda_link6", "panda_link7")
+_BIMANUAL_TOOL_BODY_NAMES = ("link_coacd_convex_piece_0",)
 
 ROBOT1_BASE_POS = (0.0, -_BIMANUAL_BASE_HALF_SPACING_Y, 0.0)
 ROBOT1_BASE_ROT = (1.0, 0.0, 0.0, 0.0)
@@ -528,6 +530,30 @@ class RewardsCfg:
         weight=_RL_CONTRACT.reward.bimanual_arm_proximity_penalty_weight,
     )
 
+    tool_proximity_penalty = RewTerm(
+        func=mdp.bimanual_tool_proximity_penalty,
+        params={
+            "warning_clearance": _RL_CONTRACT.reward.bimanual_tool_proximity_warning_clearance,
+            "contact_clearance": _RL_CONTRACT.reward.bimanual_tool_proximity_contact_clearance,
+            "num_points": _RL_CONTRACT.reward.bimanual_tool_proximity_num_points,
+            "robot1_cfg": SceneEntityCfg("robot_1", body_names=list(_BIMANUAL_TOOL_BODY_NAMES)),
+            "robot2_cfg": SceneEntityCfg("robot_2", body_names=list(_BIMANUAL_TOOL_BODY_NAMES)),
+        },
+        weight=_RL_CONTRACT.reward.bimanual_tool_proximity_penalty_weight,
+    )
+
+    wrist_surface_penalty = RewTerm(
+        func=mdp.bimanual_wrist_surface_proximity_penalty,
+        params={
+            "surface_z": _table_top_z(),
+            "warning_height": _RL_CONTRACT.reward.bimanual_wrist_surface_warning_height,
+            "contact_height": _RL_CONTRACT.reward.bimanual_wrist_surface_contact_height,
+            "robot1_cfg": SceneEntityCfg("robot_1", body_names=list(_BIMANUAL_WRIST_SURFACE_BODY_NAMES)),
+            "robot2_cfg": SceneEntityCfg("robot_2", body_names=list(_BIMANUAL_WRIST_SURFACE_BODY_NAMES)),
+        },
+        weight=_RL_CONTRACT.reward.bimanual_wrist_surface_penalty_weight,
+    )
+
     energy_penalty = RewTerm(
         func=mdp.bimanual_joint_power_penalty,
         params={"k_e": 0.0001},
@@ -627,7 +653,7 @@ class BimanualUnstableEnvCfg(ManagerBasedRLEnvCfg):
 
         self.decimation = _RL_CONTRACT.env.decimation
         self.episode_length_s = _RL_CONTRACT.env.episode_length_s
-        self.viewer.eye = (2.5, 0.5, 0.8)
+        self.viewer.eye = (2.0, 0.4, 0.65)
         self.viewer.lookat = (0.0, 0.0, 0.0)
         self.sim.dt = _RL_CONTRACT.env.sim_dt
         self.sim.render_interval = self.decimation

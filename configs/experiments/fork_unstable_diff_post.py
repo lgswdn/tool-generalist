@@ -18,16 +18,16 @@ EXP_CFG.rl.isaac_task_id = "tool-unstable-v0"
 EXP_CFG.rl.env.num_envs = 1024
 EXP_CFG.rl.launch.distributed = True
 EXP_CFG.rl.launch.run_name = "fork_unstable_diff_post"
-EXP_CFG.rl.launch.wandb_project = "fork"
+EXP_CFG.rl.launch.wandb_project = "single_unstable"
 
 EXP_CFG.rl.reward.rotation_threshold = 0.2
 EXP_CFG.rl.separate_actor_critic_fusion = True
 EXP_CFG.rl.reward.object_goal_tracking_term_weight = 2.5
 EXP_CFG.rl.reward.object_goal_tracking_fine_term_weight = 4.5
-EXP_CFG.rl.reward.object_goal_threshold_term_weight = 6.0
+EXP_CFG.rl.reward.object_goal_threshold_term_weight = 12.0
 EXP_CFG.rl.reward.stable_success_dwell_steps = 10
 
-EXP_CFG.rl.curriculum.enabled = True
+EXP_CFG.rl.curriculum.enabled = False
 EXP_CFG.rl.curriculum.start_step = 1000 * 8
 EXP_CFG.rl.curriculum.end_step = 9000 * 8
 EXP_CFG.rl.curriculum.start_stable_pose_probability = 1.0

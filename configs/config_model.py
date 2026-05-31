@@ -201,6 +201,8 @@ class ModelCfg:
             return "ActorCriticPoint2Vec"
         if self._normalized_encoder_backend() == "icp":
             return "ActorCriticICP"
+        if self._normalized_encoder_backend() == "unicorn":
+            return "ActorCriticTGUnicorn"
         return "ActorCriticTG"
 
     def _normalized_encoder_backend(self) -> str:

@@ -244,7 +244,7 @@ def _print_layout_debug(base_env) -> None:
 def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg):
     env_cfg.scene.num_envs = args_cli.num_envs
     if getattr(env_cfg, "bimanual", False):
-        env_cfg.viewer.eye = (2.5, 0.5, 0.8)
+        env_cfg.viewer.eye = (2.0, 0.4, 0.65)
         env_cfg.viewer.lookat = (0.0, 0.0, 0.0)
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array")
     env = DiagnosticsRenderWrapper(env, runtime_spec.get("reward_params", {}))

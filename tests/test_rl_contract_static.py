@@ -58,6 +58,7 @@ def test_runtime_spec_allows_tg_point2vec_and_legacy_icp_with_policy_specific_fi
     launcher = _source("utils/experiment/isaac_rl_launcher.py")
 
     assert "\"ActorCriticTG\"" in runtime_loader
+    assert "\"ActorCriticTGUnicorn\"" in runtime_loader
     assert "\"ActorCriticTGBimanual\"" in runtime_loader
     assert "\"ActorCriticPoint2Vec\"" in runtime_loader
     assert "\"ActorCriticICP\"" in runtime_loader
@@ -339,6 +340,7 @@ def test_tg_policy_heads_share_mixin_noise_and_layout_helpers():
     }
     actors = {
         "rsl_rl/modules/actor_critic_tg.py": "ActorCriticTG",
+        "rsl_rl/modules/actor_critic_tg_unicorn.py": "ActorCriticTGUnicorn",
         "rsl_rl/modules/actor_critic_point2vec.py": "ActorCriticPoint2Vec",
         "rsl_rl/modules/actor_critic_tg_bimanual.py": "ActorCriticTGBimanual",
     }
@@ -400,6 +402,7 @@ def test_train_policy_params_payload_shapes_are_stable():
         "noise_std_type",
     ]
     tce_keys = shared_tg_keys + ["patch_size", "encoder_channel", "vit_depth", "vit_heads"]
+    unicorn_keys = shared_tg_keys + ["num_patches", "patch_size", "encoder_channel", "vit_depth", "vit_heads"]
     p2v_keys = shared_tg_keys + [
         "token_dim",
         "point2vec_ckpt_path",
@@ -469,6 +472,10 @@ def test_train_policy_params_payload_shapes_are_stable():
             cfg.model.pretrained_encoder.name = "icp"
             cfg.model.pretrained_encoder.schema = "icp_legacy"
             cfg.model.pretrained_encoder.adapter = "icp_legacy"
+        elif class_name == "ActorCriticTGUnicorn":
+            cfg.model.encoder_backend = "unicorn"
+            cfg.model.pretrained_encoder.name = "unicorn"
+            cfg.model.pretrained_encoder.adapter = "unicorn_strict"
         return _build_policy_params(cfg, checkpoint)
 
     for class_name in ("ActorCriticTG", "ActorCriticTGBimanual"):
@@ -477,6 +484,11 @@ def test_train_policy_params_payload_shapes_are_stable():
         assert params["class_name"] == class_name
         assert params["encoder_weights_path"] == checkpoint
         assert params["freeze_point2vec"] is params["freeze_encoder"]
+    unicorn = params_for("ActorCriticTGUnicorn")
+    assert list(unicorn) == unicorn_keys
+    assert unicorn["class_name"] == "ActorCriticTGUnicorn"
+    assert unicorn["encoder_weights_path"] == checkpoint
+    assert unicorn["num_patches"] == 16
     p2v = params_for("ActorCriticPoint2Vec")
     assert list(p2v) == p2v_keys
     assert p2v["class_name"] == "ActorCriticPoint2Vec"
@@ -531,7 +543,31 @@ def test_unstable_task_adds_random_pose_dwell_success_and_velocity_observation()
     assert "def object_reached_goal_dwell" in terminations
     assert "EXP_CFG.pretrain_reuse = \"multitools_diff_post.py\"" in cfg
     assert "EXP_CFG.rl.isaac_task_id = \"tool-unstable-v0\"" in cfg
+    assert "EXP_CFG.rl.curriculum.enabled = False" in cfg
     assert "\"object_velocity\"" in cfg
+
+    any_tools_cfg = _source("configs/experiments/single_unstable_diff_post.py")
+    assert "from configs.experiments.fork_unstable_diff_post import EXP_CFG as _BASE_EXP_CFG" in any_tools_cfg
+    assert "EXP_CFG.rl.isaac_task_id = \"tool-unstable-v0\"" not in any_tools_cfg
+    assert "EXP_CFG.general.tools_selected_json = \"/mnt/project/world_model/tool_generalist/eef_new/tools_selected.json\"" in any_tools_cfg
+    assert "EXP_CFG.rl.curriculum.enabled = False" in any_tools_cfg
+
+    single_unicorn_cfg = _source("configs/experiments/single_unstable_unicorn.py")
+    assert "from configs.experiments.single_unstable_diff_post import EXP_CFG as _BASE_EXP_CFG" in single_unicorn_cfg
+    assert "EXP_CFG.model.encoder_backend = \"unicorn\"" in single_unicorn_cfg
+    assert "EXP_CFG.model.pretrained_encoder.adapter = \"unicorn_strict\"" in single_unicorn_cfg
+    assert "EXP_CFG.rl.actor_critic_class = \"ActorCriticTGUnicorn\"" in single_unicorn_cfg
+    assert "EXP_CFG.pretrain_reuse = None" in single_unicorn_cfg
+
+    single_post_cfg = _source("configs/experiments/single_unstable_post.py")
+    assert "from configs.experiments.single_unstable_diff_post import EXP_CFG as _BASE_EXP_CFG" in single_post_cfg
+    assert "EXP_CFG.pretrain_reuse = \"multitools_post.py\"" in single_post_cfg
+    assert "EXP_CFG.model.name = \"multitool_post_only\"" in single_post_cfg
+
+    single_diff_cfg = _source("configs/experiments/single_unstable_diff.py")
+    assert "from configs.experiments.single_unstable_diff_post import EXP_CFG as _BASE_EXP_CFG" in single_diff_cfg
+    assert "EXP_CFG.pretrain_reuse = \"multitools_diff.py\"" in single_diff_cfg
+    assert "EXP_CFG.model.name = \"multitool_diff_only\"" in single_diff_cfg
 
 
 def test_bimanual_unstable_task_is_additive_and_uses_three_cloud_layout():
@@ -566,10 +602,20 @@ def test_bimanual_unstable_task_is_additive_and_uses_three_cloud_layout():
     assert "func=mdp.object_reached_goal_dwell" in env
     assert "func=mdp.bimanual_links_too_close" in env
     assert "func=mdp.bimanual_link_proximity_penalty" in env
+    assert "func=mdp.bimanual_tool_proximity_penalty" in env
+    assert "func=mdp.bimanual_wrist_surface_proximity_penalty" in env
+    assert "_BIMANUAL_TOOL_BODY_NAMES" in env
+    assert "_BIMANUAL_WRIST_SURFACE_BODY_NAMES" in env
+    assert "bimanual_tool_proximity_penalty_weight" in env
+    assert "bimanual_wrist_surface_penalty_weight" in env
     assert "def get_tool1_pointcloud_in_env_frame" in obs
     assert "def get_tool2_pointcloud_in_env_frame" in obs
     assert "def bimanual_object_goal_distance_tanh" in rewards
     assert "def bimanual_link_proximity_penalty" in rewards
+    assert "def bimanual_tool_pointcloud_min_distance" in rewards
+    assert "def bimanual_tool_proximity_penalty" in rewards
+    assert "num_points: int = 128" in rewards
+    assert "def bimanual_wrist_surface_proximity_penalty" in rewards
     assert "class ActorCriticTGBimanual" in actor
     assert "class BimanualTCEPointCloudEncoder" in actor
     assert "expanded[1] = type_embed[0]" in actor
@@ -591,15 +637,18 @@ def test_policy_registry_and_isaac_bridge_are_whitelist_driven():
     )
 
     assert "\"ActorCriticTG\": ActorCriticTG" in modules
+    assert "\"ActorCriticTGUnicorn\": ActorCriticTGUnicorn" in modules
     assert "\"ActorCriticTGBimanual\": ActorCriticTGBimanual" in modules
     assert "\"ActorCriticPoint2Vec\": ActorCriticPoint2Vec" in modules
     assert "\"ActorCriticICP\": ActorCriticICP" in modules
     assert "policy_class = eval" not in _source("rsl_rl/runners/on_policy_runner.py")
     assert "if _POLICY_CLASS_NAME == \"ActorCriticTG\"" in agent_cfg
+    assert "if _POLICY_CLASS_NAME == \"ActorCriticTGUnicorn\"" in agent_cfg
     assert "if _POLICY_CLASS_NAME == \"ActorCriticTGBimanual\"" in agent_cfg
     assert "if _POLICY_CLASS_NAME == \"ActorCriticPoint2Vec\"" in agent_cfg
     assert "if _POLICY_CLASS_NAME == \"ActorCriticICP\"" in agent_cfg
     assert "class TGActorCriticCfg" in agent_cfg
+    assert "class TGUnicornActorCriticCfg" in agent_cfg
     assert "class TGBimanualActorCriticCfg" in agent_cfg
     assert "class Point2VecActorCriticCfg" in agent_cfg
     assert "class ICPActorCriticCfg" in agent_cfg

@@ -235,6 +235,21 @@ def _append_tce_policy_params(params: dict[str, Any], exp_cfg: ExpCfg) -> dict[s
     return params
 
 
+def _append_unicorn_policy_params(params: dict[str, Any], exp_cfg: ExpCfg) -> dict[str, Any]:
+    _append_tg_shared_policy_params(params, exp_cfg)
+    unicorn = exp_cfg.model.unicorn
+    params.update(
+        {
+            "num_patches": unicorn.num_patches,
+            "patch_size": unicorn.patch_size,
+            "encoder_channel": unicorn.encoder_channel,
+            "vit_depth": unicorn.vit_depth,
+            "vit_heads": unicorn.vit_heads,
+        }
+    )
+    return params
+
+
 def _append_point2vec_policy_params(
     params: dict[str, Any],
     exp_cfg: ExpCfg,
@@ -286,6 +301,8 @@ def _build_policy_params(exp_cfg: ExpCfg, checkpoint: str | None) -> dict[str, A
     )
     if rl.actor_critic_class in {"ActorCriticTG", "ActorCriticTGBimanual"}:
         return _append_tce_policy_params(common, exp_cfg)
+    if rl.actor_critic_class == "ActorCriticTGUnicorn":
+        return _append_unicorn_policy_params(common, exp_cfg)
     if rl.actor_critic_class == "ActorCriticPoint2Vec":
         return _append_point2vec_policy_params(common, exp_cfg, checkpoint)
     raise ValueError(f"Unsupported RLCfg.actor_critic_class: {rl.actor_critic_class!r}")

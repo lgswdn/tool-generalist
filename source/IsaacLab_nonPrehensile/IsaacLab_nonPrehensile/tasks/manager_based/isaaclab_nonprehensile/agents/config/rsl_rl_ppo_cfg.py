@@ -111,6 +111,14 @@ class TGBimanualActorCriticCfg(TGActorCriticCfg):
 
 
 @configclass
+class TGUnicornActorCriticCfg(TGActorCriticCfg):
+    """Single-arm UniCORN policy config sourced from rl_runtime_spec.json."""
+
+    class_name: str = "ActorCriticTGUnicorn"
+    num_patches: int = int(_policy("num_patches", 16))
+
+
+@configclass
 class Point2VecActorCriticCfg:
     """Point2Vec policy config sourced from rl_runtime_spec.json."""
 
@@ -187,6 +195,8 @@ class ICPActorCriticCfg:
 def _policy_cfg():
     if _POLICY_CLASS_NAME == "ActorCriticTG":
         return TGActorCriticCfg()
+    if _POLICY_CLASS_NAME == "ActorCriticTGUnicorn":
+        return TGUnicornActorCriticCfg()
     if _POLICY_CLASS_NAME == "ActorCriticTGBimanual":
         return TGBimanualActorCriticCfg()
     if _POLICY_CLASS_NAME == "ActorCriticPoint2Vec":

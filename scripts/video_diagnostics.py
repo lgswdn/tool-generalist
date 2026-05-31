@@ -8,10 +8,12 @@ import torch
 
 
 WRIST_DISTANCE_BODY_NAMES = ("panda_link5", "panda_link6", "panda_link7")
+WRIST_SURFACE_BODY_NAMES = ("panda_link6", "panda_link7")
 
 
 def _body_ids_for_names(base_env: Any, robot_name: str, body_names: tuple[str, ...]) -> tuple[list[int], list[str]]:
-    cache_name = f"_recording_diag_{robot_name}_wrist_body_ids"
+    cache_key = "_".join(body_names)
+    cache_name = f"_recording_diag_{robot_name}_{cache_key}_body_ids"
     cached = getattr(base_env, cache_name, None)
     if cached is not None:
         return cached
@@ -52,6 +54,40 @@ def _bimanual_wrist_min_distance(base_env: Any, env_i: int) -> tuple[float | Non
     return float(distances[index1, index2].detach().cpu()), pair_name
 
 
+def _surface_z(base_env: Any) -> float:
+    if bool(getattr(base_env.cfg, "table_enabled", False)):
+        table_pose = getattr(base_env.cfg, "table_pose_xyz", (0.0, 0.0, -0.02))
+        table_size = getattr(base_env.cfg, "table_size_xyz", (1.5, 1.5, 0.04))
+        return float(table_pose[2]) + 0.5 * float(table_size[2])
+    return 0.0
+
+
+def _bimanual_wrist_surface_clearance(
+    base_env: Any,
+    env_i: int,
+) -> tuple[float | None, str | None, float | None]:
+    try:
+        robot_names = ("robot_1", "robot_2")
+        robots = [base_env.scene[name] for name in robot_names]
+    except (KeyError, AttributeError):
+        return None, None, None
+
+    surface_z = _surface_z(base_env)
+    best_clearance: float | None = None
+    best_name: str | None = None
+    for robot_name, robot in zip(robot_names, robots, strict=True):
+        ids, names = _body_ids_for_names(base_env, robot_name, WRIST_SURFACE_BODY_NAMES)
+        if not ids:
+            continue
+        clearances = robot.data.body_pos_w[env_i, ids, 2] - surface_z
+        local_index = int(torch.argmin(clearances).detach().cpu())
+        clearance = float(clearances[local_index].detach().cpu())
+        if best_clearance is None or clearance < best_clearance:
+            best_clearance = clearance
+            best_name = f"{robot_name}:{names[local_index]}"
+    return best_clearance, best_name, surface_z
+
+
 def recording_debug_metrics(
     base_env: Any,
     env_id: int,
@@ -79,6 +115,8 @@ def recording_debug_metrics(
     rot_threshold = float(reward_params.get("rotation_threshold", 0.1))
     wrist_warning_distance = float(reward_params.get("bimanual_arm_proximity_warning_distance", 0.20))
     wrist_failure_distance = float(reward_params.get("bimanual_arm_proximity_failure_distance", 0.15))
+    wrist_surface_warning_height = float(reward_params.get("bimanual_wrist_surface_warning_height", 0.12))
+    wrist_surface_contact_height = float(reward_params.get("bimanual_wrist_surface_contact_height", 0.06))
     dwell_steps = max(10, int(reward_params.get("stable_success_dwell_steps", 10)))
     dwell_counter = getattr(base_env, "_goal_pose_success_count", None)
     dwell_count = 0
@@ -89,6 +127,7 @@ def recording_debug_metrics(
     rot_value = float(rot_distance.detach().cpu())
     pose_ok = pos_value < pos_threshold and rot_value < rot_threshold
     wrist_min_distance, wrist_min_pair = _bimanual_wrist_min_distance(base_env, env_i)
+    wrist_surface_clearance, wrist_surface_link, surface_z = _bimanual_wrist_surface_clearance(base_env, env_i)
 
     return {
         "env_id": env_i,
@@ -104,6 +143,11 @@ def recording_debug_metrics(
         "wrist_min_pair": wrist_min_pair,
         "wrist_warning_distance": wrist_warning_distance,
         "wrist_failure_distance": wrist_failure_distance,
+        "wrist_surface_clearance": wrist_surface_clearance,
+        "wrist_surface_link": wrist_surface_link,
+        "wrist_surface_z": surface_z,
+        "wrist_surface_warning_height": wrist_surface_warning_height,
+        "wrist_surface_contact_height": wrist_surface_contact_height,
     }
 
 
@@ -123,6 +167,13 @@ def format_recording_diagnostics(metrics: dict[str, Any], *, step: int | None = 
             f" wrist_min={wrist_min_distance:.4f}/"
             f"{metrics.get('wrist_warning_distance', 0.20):.4f}/"
             f"{metrics.get('wrist_failure_distance', 0.15):.4f}"
+        )
+    wrist_surface_clearance = metrics.get("wrist_surface_clearance")
+    if wrist_surface_clearance is not None:
+        text += (
+            f" wrist_surface={wrist_surface_clearance:.4f}/"
+            f"{metrics.get('wrist_surface_warning_height', 0.12):.4f}/"
+            f"{metrics.get('wrist_surface_contact_height', 0.06):.4f}"
         )
     return text
 
@@ -149,6 +200,17 @@ def overlay_recording_diagnostics(frame: Any, metrics: dict[str, Any], *, step: 
         lines.append(
             f"wrist/forearm min {wrist_min_distance:.3f} m  "
             f"warn {wrist_warning_distance:.3f} fail {wrist_failure_distance:.3f}  pair {wrist_min_pair}"
+        )
+    wrist_surface_clearance = metrics.get("wrist_surface_clearance")
+    if wrist_surface_clearance is not None:
+        wrist_surface_link = metrics.get("wrist_surface_link") or "unknown"
+        wrist_surface_z = float(metrics.get("wrist_surface_z", 0.0))
+        wrist_surface_warning_height = float(metrics.get("wrist_surface_warning_height", 0.12))
+        wrist_surface_contact_height = float(metrics.get("wrist_surface_contact_height", 0.06))
+        lines.append(
+            f"wrist surface {wrist_surface_clearance:.3f} m above z={wrist_surface_z:.3f}  "
+            f"warn {wrist_surface_warning_height:.3f} contact {wrist_surface_contact_height:.3f}  "
+            f"link {wrist_surface_link}"
         )
     lines.append(
         (

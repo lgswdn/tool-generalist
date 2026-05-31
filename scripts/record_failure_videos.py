@@ -379,14 +379,14 @@ def _make_record_camera_cfg() -> TiledCameraCfg:
     return TiledCameraCfg(
         prim_path="{ENV_REGEX_NS}/EvalRecordCamera",
         offset=TiledCameraCfg.OffsetCfg(
-            pos=(1.5, 0.0, 1.0),
+            pos=(1.25, 0.0, 0.85),
             rot=(-0.3337, 0.6234, 0.6234, -0.3337),
             convention="ros",
         ),
         data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=18.0,
-            focus_distance=1.55,
+            focus_distance=1.50,
             horizontal_aperture=28.0,
             clipping_range=(0.05, 20.0),
         ),

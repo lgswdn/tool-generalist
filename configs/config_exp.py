@@ -203,6 +203,35 @@ class ExpCfg:
                 "RewardCfg.bimanual_arm_proximity_warning_distance must be greater than "
                 "bimanual_arm_proximity_failure_distance"
             )
+        if self.rl.reward.bimanual_wrist_surface_warning_height <= 0:
+            errors.append("RewardCfg.bimanual_wrist_surface_warning_height must be > 0")
+        if self.rl.reward.bimanual_wrist_surface_contact_height < 0:
+            errors.append("RewardCfg.bimanual_wrist_surface_contact_height must be >= 0")
+        if (
+            self.rl.reward.bimanual_wrist_surface_warning_height
+            <= self.rl.reward.bimanual_wrist_surface_contact_height
+        ):
+            errors.append(
+                "RewardCfg.bimanual_wrist_surface_warning_height must be greater than "
+                "bimanual_wrist_surface_contact_height"
+            )
+        if self.rl.reward.bimanual_tool_proximity_warning_clearance <= 0:
+            errors.append("RewardCfg.bimanual_tool_proximity_warning_clearance must be > 0")
+        if self.rl.reward.bimanual_tool_proximity_contact_clearance < 0:
+            errors.append("RewardCfg.bimanual_tool_proximity_contact_clearance must be >= 0")
+        if (
+            self.rl.reward.bimanual_tool_proximity_warning_clearance
+            <= self.rl.reward.bimanual_tool_proximity_contact_clearance
+        ):
+            errors.append(
+                "RewardCfg.bimanual_tool_proximity_warning_clearance must be greater than "
+                "bimanual_tool_proximity_contact_clearance"
+            )
+        _require_positive_int(
+            errors,
+            "RewardCfg.bimanual_tool_proximity_num_points",
+            self.rl.reward.bimanual_tool_proximity_num_points,
+        )
         if self.pretrain.optimizer.learning_rate <= 0:
             errors.append("PretrainOptimizerCfg.learning_rate must be > 0")
         if self.pretrain.loss.sdf_relative_eps <= 0:
@@ -370,7 +399,13 @@ class ExpCfg:
                 "ModelCfg.pretrained_encoder.adapter must be one of "
                 f"{sorted(allowed_adapters)}"
             )
-        allowed_actors = {"ActorCriticTG", "ActorCriticTGBimanual", "ActorCriticPoint2Vec", "ActorCriticICP"}
+        allowed_actors = {
+            "ActorCriticTG",
+            "ActorCriticTGUnicorn",
+            "ActorCriticTGBimanual",
+            "ActorCriticPoint2Vec",
+            "ActorCriticICP",
+        }
         if self.rl.actor_critic_class not in allowed_actors:
             errors.append(
                 "RLCfg.actor_critic_class must be one of "
@@ -418,8 +453,11 @@ class ExpCfg:
                 errors.append("ActorCriticICP requires ObservationCfg.include_tool_cloud=False")
             if self.rl.observation.include_bbox_centers:
                 errors.append("ActorCriticICP requires ObservationCfg.include_bbox_centers=False")
-        if encoder_backend == "unicorn" and self.model.pretrained_encoder.adapter != "unicorn_strict":
-            errors.append("encoder_backend=unicorn requires pretrained_encoder.adapter=unicorn_strict")
+        if encoder_backend == "unicorn":
+            if self.rl.enabled and self.rl.actor_critic_class != "ActorCriticTGUnicorn":
+                errors.append("encoder_backend=unicorn requires RLCfg.actor_critic_class=ActorCriticTGUnicorn")
+            if self.model.pretrained_encoder.adapter != "unicorn_strict":
+                errors.append("encoder_backend=unicorn requires pretrained_encoder.adapter=unicorn_strict")
         if self.pretrain.enabled and self.pretrain.mode == "unicorn_contact" and encoder_backend != "unicorn":
             errors.append("PretrainCfg.mode=unicorn_contact requires ModelCfg.encoder_backend=unicorn")
         if self.pretrain.enabled and (

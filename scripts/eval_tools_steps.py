@@ -212,6 +212,7 @@ parser.add_argument(
     default=16,
     help="Maximum number of tools encoded concurrently per rank.",
 )
+parser.add_argument("--output_dir", type=str, default=None, help="Directory to write evaluation reports.")
 parser.add_argument("--video_dir", type=str, default=None, help="Directory to write per-tool MP4 files.")
 parser.add_argument("--real_time", action="store_true", default=False, help="Run in real-time, if possible.")
 parser.add_argument("--distributed", action="store_true", default=False, help="Run evaluation across multiple GPUs.")
@@ -380,14 +381,14 @@ def _make_record_camera_cfg() -> TiledCameraCfg:
         prim_path="{ENV_REGEX_NS}/EvalRecordCamera",
         offset=TiledCameraCfg.OffsetCfg(
             # Front oblique view from the table end, aimed at the robot base.
-            pos=(1.5, 0.0, 1.0),
+            pos=(1.25, 0.0, 0.85),
             rot=(-0.3337, 0.6234, 0.6234, -0.3337),
             convention="ros",
         ),
         data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=14.0,
-            focus_distance=1.8,
+            focus_distance=1.5,
             horizontal_aperture=28.0,
             clipping_range=(0.05, 20.0),
         ),
@@ -543,6 +544,7 @@ def _write_summary(log_dir: str, resume_path: str, rows: list[dict], completed_s
         "source_paths_yaml": paths_yaml,
         "paths_yaml_override": args_cli.paths_yaml,
         "rank_paths_yaml": rank_paths_yaml,
+        "output_dir": os.path.abspath(os.path.normpath(log_dir)),
         "world_size": world_size,
         "num_envs_per_rank": args_cli.num_envs,
         "requested_steps_per_rank": args_cli.num_steps,
@@ -607,9 +609,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             agent_cfg.seed = seed
 
     resume_path = retrieve_file_path(args_cli.checkpoint)
-    log_dir = os.path.dirname(resume_path)
+    log_dir = (
+        os.path.abspath(os.path.normpath(args_cli.output_dir))
+        if args_cli.output_dir is not None
+        else os.path.dirname(resume_path)
+    )
+    os.makedirs(log_dir, exist_ok=True)
     video_dir = (
-        args_cli.video_dir
+        os.path.abspath(os.path.normpath(args_cli.video_dir))
         if args_cli.video_dir is not None
         else os.path.join(log_dir, "videos", "eval_tools_steps_tiled")
     )

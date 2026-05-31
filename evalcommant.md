@@ -98,3 +98,27 @@ torchrun --nproc_per_node=2 scripts/record_multi_videos.py \
     --num_envs 512 \
     --num_steps 1000 \
     --headless
+
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nnodes=1 --nproc_per_node=4 scripts/eval_tools_steps.py \
+    --distributed \
+    --headless \
+    --runtime_spec /mnt/project/world_model/tool_generalist/artifacts/RL/multitools_full_tool_diff_post/contact_gen_full_tool/TCE/multitools_full_tool_diff_post/20260521T165009Z/rl_runtime_spec.json \
+    --paths_yaml /mnt/home/zhengyixin/tool-generalist/paths_test_tool_train_obj.yaml \
+    --checkpoint /mnt/project/world_model/tool_generalist/artifacts/RL/multitools_full_tool_diff_post/contact_gen_full_tool/TCE/multitools_full_tool_diff_post/20260521T165009Z/model_10000.pt \
+    --num_envs 1694 \
+    --num_steps 20000 \
+    --randomize_objects \
+    --object_random_seed 42 \
+    --output_dir /mnt/project/world_model/tool_generalist/eval_results/test_tool_train_obj
+
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nnodes=1 --nproc_per_node=4 scripts/eval_tools_steps.py \
+    --distributed \
+    --headless \
+    --runtime_spec /mnt/project/world_model/tool_generalist/artifacts/RL/multitools_full_tool_diff_post/contact_gen_full_tool/TCE/multitools_full_tool_diff_post/20260521T165009Z/rl_runtime_spec.json \
+    --paths_yaml /mnt/home/zhengyixin/tool-generalist/paths_train_tool_test_obj.yaml \
+    --checkpoint /mnt/project/world_model/tool_generalist/artifacts/RL/multitools_full_tool_diff_post/contact_gen_full_tool/TCE/multitools_full_tool_diff_post/20260521T165009Z/model_10000.pt \
+    --num_envs 1694 \
+    --num_steps 20000 \
+    --randomize_objects \
+    --object_random_seed 42 \
+    --output_dir /mnt/project/world_model/tool_generalist/eval_results/train_tool_test_obj
