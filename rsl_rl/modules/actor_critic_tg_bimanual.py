@@ -258,6 +258,7 @@ class ActorCriticTGBimanual(TGActorCriticHeadMixin, nn.Module):
         encoder_channel: int = 128,
         vit_depth: int = 12,
         vit_heads: int = 4,
+        vit_attention_mode: str | None = None,
         encoder_weights_path: Optional[str] = None,
         freeze_encoder: bool = True,
         separate_actor_critic_fusion: bool = False,
@@ -292,14 +293,19 @@ class ActorCriticTGBimanual(TGActorCriticHeadMixin, nn.Module):
         **kwargs,
     ):
         if kwargs:
-            print(
-                "ActorCriticTGBimanual.__init__ got unexpected arguments (ignored): "
-                + str([key for key in kwargs.keys()])
+            raise TypeError(
+                "ActorCriticTGBimanual received unexpected arguments: "
+                f"{sorted(kwargs)}"
             )
         super().__init__()
 
         if not encoder_weights_path:
             raise ValueError("ActorCriticTGBimanual requires encoder_weights_path")
+        if vit_attention_mode not in {"joint_self", "cross_only"}:
+            raise ValueError(
+                "ActorCriticTGBimanual requires explicit vit_attention_mode="
+                f"joint_self or cross_only, got {vit_attention_mode!r}"
+            )
         if hand_state_dim % 2 != 0:
             raise ValueError("ActorCriticTGBimanual hand_state_dim must be even")
         if robot_state_dim % 2 != 0:
@@ -341,6 +347,7 @@ class ActorCriticTGBimanual(TGActorCriticHeadMixin, nn.Module):
             vit_depth=int(vit_depth),
             vit_heads=int(vit_heads),
             freeze=self.freeze_encoder,
+            vit_attention_mode=vit_attention_mode,
         )
         self.encoder = BimanualTCEPointCloudEncoder(enc_cfg)
         self._load_bimanual_tce_encoder_checkpoint(
@@ -350,6 +357,7 @@ class ActorCriticTGBimanual(TGActorCriticHeadMixin, nn.Module):
                 "patch_size": int(patch_size),
                 "encoder_channel": int(encoder_channel),
             },
+            expected_vit_attention_mode=vit_attention_mode,
         )
 
         token_dim = self.encoder.feature_dim
@@ -442,7 +450,13 @@ class ActorCriticTGBimanual(TGActorCriticHeadMixin, nn.Module):
             f"context_dim={self.context_dim} fusion_input_dim={fusion_input_dim}"
         )
 
-    def _load_bimanual_tce_encoder_checkpoint(self, checkpoint_path: str, *, expected_dims: dict[str, int]) -> None:
+    def _load_bimanual_tce_encoder_checkpoint(
+        self,
+        checkpoint_path: str,
+        *,
+        expected_dims: dict[str, int],
+        expected_vit_attention_mode: str,
+    ) -> None:
         ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         metadata = ckpt.get("metadata") if isinstance(ckpt, dict) else None
         raw_state = ActorCriticTG._checkpoint_state_dict(ckpt, checkpoint_path)
@@ -451,7 +465,7 @@ class ActorCriticTGBimanual(TGActorCriticHeadMixin, nn.Module):
             metadata,
             expected_dims,
             checkpoint_path,
-            encoder_state=encoder_state,
+            expected_vit_attention_mode=expected_vit_attention_mode,
         )
         encoder_state = self._expand_legacy_type_embedding(encoder_state)
         try:

@@ -15,6 +15,11 @@ def run_rl_stage(
     artifact_dir: str | Path,
     *,
     resolved_encoder_checkpoint: str | None = None,
+    runtime_objects_manifest: str | Path | None = None,
+    runtime_num_gpus: int | None = None,
+    runtime_num_envs: int | None = None,
+    runtime_rl_resume_checkpoint: str | Path | None = None,
+    runtime_print_fine_grained_timing: bool = False,
 ) -> Any:
     """Prepare or run RL from the canonical training API.
 
@@ -29,5 +34,10 @@ def run_rl_stage(
         paths,
         artifact_dir,
         encoder_checkpoint_override=resolved_encoder_checkpoint,
+        runtime_objects_manifest=runtime_objects_manifest,
+        runtime_num_gpus=runtime_num_gpus,
+        runtime_num_envs=runtime_num_envs,
+        runtime_rl_resume_checkpoint=runtime_rl_resume_checkpoint,
+        runtime_print_fine_grained_timing=runtime_print_fine_grained_timing,
         launch=True,
     )

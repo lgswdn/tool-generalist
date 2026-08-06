@@ -21,6 +21,7 @@ from rsl_rl.modules.tg_policy_common import (
     build_context_vector,
     build_fusion_mlp,
     build_mlp,
+    center_clouds_by_bbox,
     context_dim,
     initialize_action_noise,
     split_observations,
@@ -40,9 +41,8 @@ class ActorCriticTGUnicorn(TGActorCriticHeadMixin, nn.Module):
         hand_state | robot_state | previous_action | relative_goal_pose | physics
 
     UniCORN is applied independently to object and tool clouds with shared
-    weights.  Unlike ``ActorCriticTG``, the point clouds are passed to the
-    encoder in the observation frame without bbox-center subtraction, matching
-    the UniCORN contact pretraining setup.
+    weights. The policy consumes only per-patch tokens so the downstream token
+    layout matches ``ActorCriticTG``: tool patches followed by object patches.
     """
 
     is_recurrent = False
@@ -89,17 +89,12 @@ class ActorCriticTGUnicorn(TGActorCriticHeadMixin, nn.Module):
         relative_goal_dim: int = 9,
         object_velocity_dim: int = 0,
         physics_dim: int = 7,
-        model_input_centering: str = "bbox_center",
+        model_input_centering: str = "object_center",
         activation: str = "elu",
         init_noise_std: float = 1.0,
         noise_std_type: str = "scalar",
         **kwargs,
     ):
-        if kwargs:
-            print(
-                "ActorCriticTGUnicorn.__init__ got unexpected arguments (ignored): "
-                + str([key for key in kwargs.keys()])
-            )
         super().__init__()
 
         self.point_dim = int(point_dim)
@@ -109,6 +104,11 @@ class ActorCriticTGUnicorn(TGActorCriticHeadMixin, nn.Module):
         self.freeze_encoder = bool(freeze_encoder)
         self.separate_actor_critic_fusion = bool(separate_actor_critic_fusion)
         self.model_input_centering = str(model_input_centering)
+        if self.model_input_centering not in {"bbox_center", "object_center"}:
+            raise ValueError(
+                "ActorCriticTGUnicorn model_input_centering must be 'bbox_center' "
+                f"or 'object_center', got {self.model_input_centering!r}"
+            )
         self.previous_action_dim = int(previous_action_dim) if previous_action_dim is not None else int(num_actions)
         self.object_velocity_dim = int(object_velocity_dim)
         self.physics_dim = int(physics_dim)
@@ -161,7 +161,7 @@ class ActorCriticTGUnicorn(TGActorCriticHeadMixin, nn.Module):
         P = self.encoder.num_patches
         self.token_dim = D
         self.num_patches_per_cloud = P
-        self.tokens_per_cloud = P + 1
+        self.tokens_per_cloud = P
         self.total_num_tokens = 2 * self.tokens_per_cloud
         activation_fn = resolve_nn_activation(activation)
 
@@ -179,10 +179,6 @@ class ActorCriticTGUnicorn(TGActorCriticHeadMixin, nn.Module):
         if not self.use_learnable_query_tokens:
             if sd_query_keys is None:
                 sd_query_keys = ("context",)
-            if sd_num_query_object is not None:
-                print("  - sd_num_query_object is ignored; ActorCriticTGUnicorn attends all UniCORN tokens")
-            if num_query_object_tokens is not None:
-                print("  - num_query_object_tokens is ignored; ActorCriticTGUnicorn attends all UniCORN tokens")
             if reuse_pretrain_pose_cross_attn:
                 raise ValueError(
                     "ActorCriticTGUnicorn does not support reuse_pretrain_pose_cross_attn; "
@@ -244,14 +240,6 @@ class ActorCriticTGUnicorn(TGActorCriticHeadMixin, nn.Module):
             init_noise_std=float(init_noise_std),
             noise_std_type=self.noise_std_type,
         )
-
-        print(
-            "[ActorCriticTGUnicorn] initialized "
-            f"tokens={self.total_num_tokens} patches_per_cloud={P} token_dim={D} "
-            f"context_dim={self.context_dim} fusion_input_dim={fusion_input_dim} "
-            f"separate_actor_critic_fusion={self.separate_actor_critic_fusion}"
-        )
-
     def _load_unicorn_encoder_checkpoint(self, checkpoint_path: str, *, expected_dims: dict[str, int]) -> None:
         ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         metadata = ckpt.get("metadata") if isinstance(ckpt, dict) else None
@@ -340,10 +328,26 @@ class ActorCriticTGUnicorn(TGActorCriticHeadMixin, nn.Module):
 
     def _tokenize(self, observations: torch.Tensor):
         parts = self._split_observations(observations)
-        object_res = self._encode_cloud(parts["object_cloud"])
-        tool_res = self._encode_cloud(parts["tool_cloud"])
-        tool_tokens = torch.cat((tool_res.patch_tokens, tool_res.global_token.unsqueeze(1)), dim=1)
-        object_tokens = torch.cat((object_res.patch_tokens, object_res.global_token.unsqueeze(1)), dim=1)
+        object_cloud = parts["object_cloud"]
+        tool_cloud = parts["tool_cloud"]
+        obj_bbox_center = parts["object_bbox_center"]
+        tool_bbox_center = parts["tool_bbox_center"]
+
+        if self.model_input_centering == "object_center":
+            object_cloud = object_cloud - obj_bbox_center.unsqueeze(1)
+            tool_cloud = tool_cloud - obj_bbox_center.unsqueeze(1)
+        else:
+            object_cloud, tool_cloud = center_clouds_by_bbox(
+                object_cloud,
+                tool_cloud,
+                obj_bbox_center,
+                tool_bbox_center,
+            )
+
+        object_res = self._encode_cloud(object_cloud)
+        tool_res = self._encode_cloud(tool_cloud)
+        tool_tokens = tool_res.patch_tokens
+        object_tokens = object_res.patch_tokens
         all_tokens = torch.cat((tool_tokens, object_tokens), dim=1)
         ctx_vec = build_context_vector(parts)
         return all_tokens, ctx_vec

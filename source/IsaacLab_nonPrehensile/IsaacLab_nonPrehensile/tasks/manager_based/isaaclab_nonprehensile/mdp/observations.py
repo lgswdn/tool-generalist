@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import torch
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from isaaclab.assets import RigidObject
@@ -14,87 +15,601 @@ from isaaclab.utils.math import subtract_frame_transforms, matrix_from_quat
 from scipy.spatial.transform import Rotation as R
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
-from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.cloud import Cloud
 import IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.mdp as mdp
-
-# Lightweight profiling utilities for observation functions
-import time
-from functools import wraps
-import torch
-
-def _ensure_obs_timers(env: "ManagerBasedRLEnv") -> dict:
-    if not hasattr(env, "_obs_timers"):
-        env._obs_timers = {}
-    return env._obs_timers
+from utils.assets import (
+    GeneratedGripperAsset,
+    PrismaticJointSpec,
+    RigidTransformSpec,
+)
 
 def profile_obs(fn):
-    @wraps(fn)
-    def wrapper(env, *args, **kwargs):
-        timers = _ensure_obs_timers(env)
-        name = fn.__name__
-        t0 = time.perf_counter()
-        result = fn(env, *args, **kwargs)
-        dt = time.perf_counter() - t0
-        entry = timers.get(name)
-        if entry is None:
-            timers[name] = {"time": dt, "count": 1}
-        else:
-            entry["time"] += dt
-            entry["count"] += 1
-        return result
-    return wrapper
+    return fn
 
-def print_obs_timers(env: "ManagerBasedRLEnv") -> None:
-    timers = getattr(env, "_obs_timers", {})
-    if not timers:
-        print("[obs timers] no data collected yet")
-        return
-    print("[obs timers] summary:")
-    for name, entry in timers.items():
-        total = entry["time"]
-        count = entry["count"]
-        avg = total / count if count > 0 else 0.0
-        print(f"  {name}: total={total:.6f}s count={count} avg={avg:.6f}s")
-
-# Debug: print observation stats every N calls
-DEBUG_OBS_EVERY = 10000000
+_OFFICIAL_PANDA_GRIPPER_MODE = "official_panda_gripper"
+_OFFICIAL_PANDA_FINGERTIP_BODY_NAMES = ("panda_leftfingertip", "panda_rightfingertip")
+_OFFICIAL_PANDA_FINGER_BODY_NAMES = ("panda_leftfinger", "panda_rightfinger")
+_OFFICIAL_PANDA_PALM_BODY_NAMES = ("panda_hand",)
+_OFFICIAL_PANDA_FINGER_JOINT_NAMES = ("panda_finger_joint1", "panda_finger_joint2")
+_OFFICIAL_GRIPPER_NUM_BUCKETS = 64
+_OFFICIAL_GRIPPER_OPEN_JOINT_POS = 0.04
+_OFFICIAL_GRIPPER_CLOUD_SOURCE = "official_panda_gripper_kinematic_mesh_rx90_v2"
+_OFFICIAL_GRIPPER_CLOUD_CACHE: dict[tuple[str, str, str, int], torch.Tensor] = {}
+_OFFICIAL_GRIPPER_FINGER_MOUNT_OFFSET_Y = 0.0584
+_OFFICIAL_GRIPPER_FINGER_TIP_OFFSET_XYZ = (0.0, 0.0, 0.045)
+_GENERATED_GRIPPER_MODE = "generated_gripper"
+_GENERATED_GRIPPER_CLOUD_SOURCE = "gripper_cloud_cache_v1"
+_GENERATED_GRIPPER_CLOUD_CACHE: dict[tuple[str, str], torch.Tensor] = {}
+_ONE_DOF_GRIPPER_MODE = "one_dof_gripper"
+_ONE_DOF_GRIPPER_CLOUD_SOURCE = "gripper_cloud_cache_v1"
+_ONE_DOF_GRIPPER_STATE_CLOUD_CACHE: dict[tuple[str, str, int], torch.Tensor] = {}
+_ONE_DOF_CANONICAL_CACHE: dict[tuple[str, str], torch.Tensor] = {}
+_ORACLE_MESH_SDF_CACHE: dict[tuple, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+_ORACLE_GRIPPER_LINK_MESH_CACHE: dict[tuple, dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor]]] = {}
 
 _HAND_GOAL_MEAN = torch.tensor([0.5, 0.0, 0.15, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])  # z mean = 0.15
 _HAND_GOAL_STD = torch.tensor([0.4, 0.4, 0.4, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
 
+
 def _dbg(env: "ManagerBasedRLEnv", name: str, tensor: torch.Tensor) -> torch.Tensor:
-    cnt = getattr(env, "_dbg_obs_cnt", 0)
-    if cnt % DEBUG_OBS_EVERY == 0:
-        t = tensor
-        if t.dim() >= 2:
-            mins = t.min(dim=0).values
-            maxs = t.max(dim=0).values
-            print(f"[obs] {name}: min={mins.tolist()} max={maxs.tolist()} shape={tuple(t.shape)}")
-        else:
-            print(f"[obs] {name}: min={t.min().item():.3f}, max={t.max().item():.3f}, shape={tuple(t.shape)}")
-    env._dbg_obs_cnt = cnt + 1
     return tensor
 
 
 def _dbg_cloud(env: "ManagerBasedRLEnv", name: str, cloud_env: torch.Tensor) -> None:
-    cnt = getattr(env, "_dbg_cloud_cnt", 0)
-    if cnt % DEBUG_OBS_EVERY == 0:
-        # cloud_env shape: (num_envs, num_points, 3)
-        x = cloud_env[..., 0]
-        y = cloud_env[..., 1]
-        z = cloud_env[..., 2]
-        print(
-            f"[obs] {name}: x[min={x.min().item():.3f}, max={x.max().item():.3f}] "
-            f"y[min={y.min().item():.3f}, max={y.max().item():.3f}] "
-            f"z[min={z.min().item():.3f}, max={z.max().item():.3f}], shape={tuple(cloud_env.shape)}"
-        )
-    env._dbg_cloud_cnt = cnt + 1
+    return None
 
 
 def _bbox_center_env(pointcloud_env: torch.Tensor) -> torch.Tensor:
     bbox_min = pointcloud_env.min(dim=1).values
     bbox_max = pointcloud_env.max(dim=1).values
     return (bbox_min + bbox_max) * 0.5
+
+
+def _bbox_extent_env(pointcloud_env: torch.Tensor) -> torch.Tensor:
+    bbox_min = pointcloud_env.min(dim=1).values
+    bbox_max = pointcloud_env.max(dim=1).values
+    return bbox_max - bbox_min
+
+
+def _is_official_panda_gripper(env: "ManagerBasedRLEnv") -> bool:
+    return getattr(env.cfg, "robot_mode", "tool") == _OFFICIAL_PANDA_GRIPPER_MODE
+
+
+def _is_generated_gripper(env: "ManagerBasedRLEnv") -> bool:
+    return getattr(env.cfg, "robot_mode", "tool") == _GENERATED_GRIPPER_MODE
+
+
+def _is_one_dof_gripper(env: "ManagerBasedRLEnv") -> bool:
+    return getattr(env.cfg, "robot_mode", "tool") == _ONE_DOF_GRIPPER_MODE
+
+
+def _resolve_robot_bodies(
+    env: "ManagerBasedRLEnv",
+    *,
+    attr_name: str,
+    body_names: tuple[str, ...],
+) -> SceneEntityCfg:
+    cfg = getattr(env, attr_name, None)
+    if cfg is not None:
+        return cfg
+
+    cfg = SceneEntityCfg("robot", body_names=list(body_names))
+    try:
+        cfg.resolve(env.scene)
+    except Exception as exc:
+        robot = env.scene["robot"]
+        available = tuple(getattr(robot.data, "body_names", ()))
+        raise RuntimeError(
+            f"{_OFFICIAL_PANDA_GRIPPER_MODE} requires official Panda bodies "
+            f"{body_names!r}; available robot bodies are {available!r}"
+        ) from exc
+
+    setattr(env, attr_name, cfg)
+    return cfg
+
+
+def _resolve_generated_robot_bodies(
+    env: "ManagerBasedRLEnv",
+    *,
+    body_names: tuple[str, ...],
+    expected_count: int,
+) -> SceneEntityCfg:
+    cache = getattr(env, "_generated_gripper_body_cfg_cache", None)
+    if cache is None:
+        cache = {}
+        env._generated_gripper_body_cfg_cache = cache
+    key = tuple(body_names)
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+
+    cfg = SceneEntityCfg("robot", body_names=list(body_names))
+    try:
+        cfg.resolve(env.scene)
+    except Exception as exc:
+        robot = env.scene["robot"]
+        available = tuple(getattr(robot.data, "body_names", ()))
+        raise RuntimeError(
+            f"{_GENERATED_GRIPPER_MODE} requires manifest robot bodies "
+            f"{body_names!r}; available robot bodies are {available!r}"
+        ) from exc
+
+    if len(cfg.body_ids) != expected_count:
+        raise RuntimeError(
+            f"{_GENERATED_GRIPPER_MODE} expected {expected_count} bodies for "
+            f"{body_names!r}, resolved {len(cfg.body_ids)}: {cfg.body_names!r}"
+        )
+    cache[key] = cfg
+    return cfg
+
+
+def _resolve_generated_robot_joints(
+    env: "ManagerBasedRLEnv",
+    *,
+    joint_names: tuple[str, ...],
+    expected_count: int,
+) -> SceneEntityCfg:
+    cache = getattr(env, "_generated_gripper_joint_cfg_cache", None)
+    if cache is None:
+        cache = {}
+        env._generated_gripper_joint_cfg_cache = cache
+    key = tuple(joint_names)
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+
+    cfg = SceneEntityCfg("robot", joint_names=list(joint_names))
+    try:
+        cfg.resolve(env.scene)
+    except Exception as exc:
+        robot = env.scene["robot"]
+        available = tuple(getattr(robot.data, "joint_names", ()))
+        raise RuntimeError(
+            f"{_GENERATED_GRIPPER_MODE} requires manifest robot joints "
+            f"{joint_names!r}; available robot joints are {available!r}"
+        ) from exc
+
+    if len(cfg.joint_ids) != expected_count:
+        raise RuntimeError(
+            f"{_GENERATED_GRIPPER_MODE} expected {expected_count} joints for "
+            f"{joint_names!r}, resolved {len(cfg.joint_ids)}: {cfg.joint_names!r}"
+        )
+    cache[key] = cfg
+    return cfg
+
+
+def _resolve_one_dof_robot_bodies(
+    env: "ManagerBasedRLEnv", *, body_names: tuple[str, ...]
+) -> SceneEntityCfg:
+    cache = getattr(env, "_one_dof_gripper_body_cfg_cache", None)
+    if cache is None:
+        cache = {}
+        env._one_dof_gripper_body_cfg_cache = cache
+    key = tuple(body_names)
+    if key not in cache:
+        cfg = SceneEntityCfg("robot", body_names=list(body_names))
+        try:
+            cfg.resolve(env.scene)
+        except Exception as exc:
+            available = tuple(getattr(env.scene["robot"].data, "body_names", ()))
+            raise RuntimeError(
+                f"one_dof_gripper requires bodies {body_names!r}; available={available!r}"
+            ) from exc
+        if len(cfg.body_ids) != len(body_names):
+            raise RuntimeError(f"one_dof_gripper could not resolve bodies exactly: {body_names!r}")
+        cache[key] = cfg
+    return cache[key]
+
+
+def _resolve_one_dof_robot_joints(
+    env: "ManagerBasedRLEnv", *, joint_names: tuple[str, ...]
+) -> SceneEntityCfg:
+    cache = getattr(env, "_one_dof_gripper_joint_cfg_cache", None)
+    if cache is None:
+        cache = {}
+        env._one_dof_gripper_joint_cfg_cache = cache
+    key = tuple(joint_names)
+    if key not in cache:
+        cfg = SceneEntityCfg("robot", joint_names=list(joint_names))
+        try:
+            cfg.resolve(env.scene)
+        except Exception as exc:
+            available = tuple(getattr(env.scene["robot"].data, "joint_names", ()))
+            raise RuntimeError(
+                f"one_dof_gripper requires joints {joint_names!r}; available={available!r}"
+            ) from exc
+        if len(cfg.joint_ids) != len(joint_names):
+            raise RuntimeError(f"one_dof_gripper could not resolve joints exactly: {joint_names!r}")
+        cache[key] = cfg
+    return cache[key]
+
+
+def _try_resolve_robot_bodies(
+    env: "ManagerBasedRLEnv",
+    *,
+    attr_name: str,
+    missing_attr_name: str,
+    body_names: tuple[str, ...],
+) -> SceneEntityCfg | None:
+    cfg = getattr(env, attr_name, None)
+    if cfg is not None:
+        return cfg
+    if getattr(env, missing_attr_name, False):
+        return None
+
+    cfg = SceneEntityCfg("robot", body_names=list(body_names))
+    try:
+        cfg.resolve(env.scene)
+    except Exception:
+        setattr(env, missing_attr_name, True)
+        return None
+
+    setattr(env, attr_name, cfg)
+    return cfg
+
+
+def _resolve_robot_joints(
+    env: "ManagerBasedRLEnv",
+    *,
+    attr_name: str,
+    joint_names: tuple[str, ...] | list[str],
+    expected_count: int | None = None,
+) -> SceneEntityCfg:
+    cfg = getattr(env, attr_name, None)
+    if cfg is not None:
+        return cfg
+
+    cfg = SceneEntityCfg("robot", joint_names=list(joint_names))
+    try:
+        cfg.resolve(env.scene)
+    except Exception as exc:
+        robot = env.scene["robot"]
+        available = tuple(getattr(robot.data, "joint_names", ()))
+        raise RuntimeError(
+            f"{_OFFICIAL_PANDA_GRIPPER_MODE} requires official Panda joints "
+            f"{tuple(joint_names)!r}; available robot joints are {available!r}"
+        ) from exc
+
+    if expected_count is not None and len(cfg.joint_ids) != expected_count:
+        raise RuntimeError(
+            f"{_OFFICIAL_PANDA_GRIPPER_MODE} expected {expected_count} joints for "
+            f"{tuple(joint_names)!r}, resolved {len(cfg.joint_ids)}: {cfg.joint_names!r}"
+        )
+
+    setattr(env, attr_name, cfg)
+    return cfg
+
+
+def get_official_panda_fingertip_center_pos_w(env: "ManagerBasedRLEnv") -> torch.Tensor:
+    """Return midpoint of the official Panda fingertip positions."""
+
+    robot = env.scene["robot"]
+    fingertip_cfg = _try_resolve_robot_bodies(
+        env,
+        attr_name="_official_panda_fingertip_body_cfg",
+        missing_attr_name="_official_panda_fingertip_body_cfg_missing",
+        body_names=_OFFICIAL_PANDA_FINGERTIP_BODY_NAMES,
+    )
+    if fingertip_cfg is not None:
+        if len(fingertip_cfg.body_ids) != 2:
+            raise RuntimeError(
+                f"{_OFFICIAL_PANDA_GRIPPER_MODE} expected two fingertip bodies "
+                f"{_OFFICIAL_PANDA_FINGERTIP_BODY_NAMES!r}, resolved {fingertip_cfg.body_ids!r}"
+            )
+        fingertip_pos_w = robot.data.body_state_w[:, fingertip_cfg.body_ids, :3]
+        return fingertip_pos_w.mean(dim=1)
+
+    finger_pos_w, finger_quat_w = _get_official_panda_finger_poses_w(env)
+    tip_offset = torch.tensor(
+        _OFFICIAL_GRIPPER_FINGER_TIP_OFFSET_XYZ,
+        dtype=finger_pos_w.dtype,
+        device=finger_pos_w.device,
+    )
+    num_envs = finger_pos_w.shape[0]
+    finger_rot_w = matrix_from_quat(finger_quat_w.reshape(-1, 4)).reshape(num_envs, 2, 3, 3)
+    fingertip_pos_w = (
+        finger_pos_w
+        + torch.bmm(
+            finger_rot_w.reshape(-1, 3, 3),
+            tip_offset.view(1, 3, 1).expand(num_envs * 2, -1, -1),
+        ).reshape(num_envs, 2, 3)
+    )
+    return fingertip_pos_w.mean(dim=1)
+
+
+def _get_official_panda_finger_poses_w(env: "ManagerBasedRLEnv") -> tuple[torch.Tensor, torch.Tensor]:
+    robot = env.scene["robot"]
+    fingers_cfg = _resolve_robot_bodies(
+        env,
+        attr_name="_official_panda_finger_body_cfg",
+        body_names=_OFFICIAL_PANDA_FINGER_BODY_NAMES,
+    )
+    if len(fingers_cfg.body_ids) != 2:
+        raise RuntimeError(
+            f"{_OFFICIAL_PANDA_GRIPPER_MODE} expected two finger bodies "
+            f"{_OFFICIAL_PANDA_FINGER_BODY_NAMES!r}, resolved {fingers_cfg.body_ids!r}"
+        )
+    state_w = robot.data.body_state_w[:, fingers_cfg.body_ids, :]
+    return state_w[..., :3], state_w[..., 3:7]
+
+
+def _get_official_panda_palm_pose_w(env: "ManagerBasedRLEnv") -> tuple[torch.Tensor, torch.Tensor]:
+    robot = env.scene["robot"]
+    palm_cfg = _resolve_robot_bodies(
+        env,
+        attr_name="_official_panda_palm_body_cfg",
+        body_names=_OFFICIAL_PANDA_PALM_BODY_NAMES,
+    )
+    palm_id = palm_cfg.body_ids[0]
+    return robot.data.body_state_w[:, palm_id, :3], robot.data.body_state_w[:, palm_id, 3:7]
+
+
+def _generated_gripper_env_groups(env: "ManagerBasedRLEnv") -> dict[int, list[int]]:
+    cached = getattr(env, "_generated_gripper_env_groups_cache", None)
+    if cached is not None:
+        return cached
+
+    from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
+        get_generated_gripper_index_for_env,
+    )
+
+    groups: dict[int, list[int]] = {}
+    for env_id in range(env.num_envs):
+        gripper_index = get_generated_gripper_index_for_env(env_id)
+        groups.setdefault(gripper_index, []).append(env_id)
+    env._generated_gripper_env_groups_cache = groups
+    return groups
+
+
+def _generated_gripper_runtime_metadata(env: "ManagerBasedRLEnv") -> dict[str, object]:
+    """Materialize immutable per-env generated-gripper metadata on the GPU once."""
+
+    cached = getattr(env, "_generated_gripper_runtime_metadata_cache", None)
+    if cached is not None:
+        return cached
+
+    from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
+        GENERATED_GRIPPER_ASSET_INDICES_BY_ENV,
+        GENERATED_GRIPPER_DATA,
+    )
+
+    num_envs = int(env.num_envs)
+    if len(GENERATED_GRIPPER_ASSET_INDICES_BY_ENV) != num_envs:
+        raise RuntimeError(
+            "Generated-gripper assignment length does not match the active environment: "
+            f"{len(GENERATED_GRIPPER_ASSET_INDICES_BY_ENV)} != {num_envs}"
+        )
+    if not GENERATED_GRIPPER_DATA:
+        raise RuntimeError("Generated-gripper runtime metadata is empty")
+
+    assigned_asset_indices = [
+        int(value) for value in GENERATED_GRIPPER_ASSET_INDICES_BY_ENV
+    ]
+    if any(
+        value < 0 or value >= len(GENERATED_GRIPPER_DATA)
+        for value in assigned_asset_indices
+    ):
+        raise RuntimeError(
+            "Generated-gripper assignment contains an out-of-range asset index"
+        )
+    active_asset_indices = sorted(set(assigned_asset_indices))
+    compact_index_by_asset = {
+        asset_index: compact_index
+        for compact_index, asset_index in enumerate(active_asset_indices)
+    }
+    assets = tuple(
+        GENERATED_GRIPPER_DATA[asset_index]
+        for asset_index in active_asset_indices
+    )
+    compact_assignment = [
+        compact_index_by_asset[asset_index]
+        for asset_index in assigned_asset_indices
+    ]
+
+    palm_body_ids: list[int] = []
+    finger_body_ids: list[list[int]] = []
+    fingertip_body_ids: list[list[int]] = []
+    finger_joint_ids: list[list[int]] = []
+    fingertip_local_offsets: list[tuple[tuple[float, float, float], ...]] = []
+    fingertip_from_body: list[bool] = []
+    open_joint_positions: list[float] = []
+
+    for gripper in assets:
+        palm_cfg = _resolve_generated_robot_bodies(
+            env,
+            body_names=(gripper.palm_body_name,),
+            expected_count=1,
+        )
+        finger_cfg = _resolve_generated_robot_bodies(
+            env,
+            body_names=gripper.finger_body_names,
+            expected_count=2,
+        )
+        joint_cfg = _resolve_generated_robot_joints(
+            env,
+            joint_names=gripper.finger_joint_names,
+            expected_count=2,
+        )
+        palm_body_ids.append(int(palm_cfg.body_ids[0]))
+        finger_body_ids.append([int(value) for value in finger_cfg.body_ids])
+        finger_joint_ids.append([int(value) for value in joint_cfg.joint_ids])
+        open_joint_positions.append(float(gripper.open_joint_pos))
+
+        if gripper.fingertip_body_names is not None:
+            tip_cfg = _resolve_generated_robot_bodies(
+                env,
+                body_names=gripper.fingertip_body_names,
+                expected_count=2,
+            )
+            fingertip_body_ids.append([int(value) for value in tip_cfg.body_ids])
+            fingertip_local_offsets.append(((0.0, 0.0, 0.0), (0.0, 0.0, 0.0)))
+            fingertip_from_body.append(True)
+        else:
+            if gripper.fingertip_local_offsets is None:
+                raise RuntimeError(
+                    f"{_GENERATED_GRIPPER_MODE} gripper {gripper.gripper_id!r} must provide "
+                    "fingertip_body_names or fingertip_local_offsets"
+                )
+            # Valid placeholder ids keep the mixed-metadata gather branch tensor-only.
+            fingertip_body_ids.append([int(value) for value in finger_cfg.body_ids])
+            fingertip_local_offsets.append(gripper.fingertip_local_offsets)
+            fingertip_from_body.append(False)
+
+    device = env.device
+    asset_indices = torch.as_tensor(
+        compact_assignment,
+        dtype=torch.long,
+        device=device,
+    )
+    env_indices = torch.arange(num_envs, dtype=torch.long, device=device)
+
+    def per_env(values, *, dtype):
+        by_asset = torch.as_tensor(values, dtype=dtype, device=device)
+        return by_asset[asset_indices].contiguous()
+
+    fingertip_from_body_by_env = per_env(fingertip_from_body, dtype=torch.bool)
+    cached = {
+        "assets": assets,
+        "asset_indices": asset_indices,
+        "env_indices": env_indices,
+        "palm_body_ids": per_env(palm_body_ids, dtype=torch.long),
+        "finger_body_ids": per_env(finger_body_ids, dtype=torch.long),
+        "fingertip_body_ids": per_env(fingertip_body_ids, dtype=torch.long),
+        "finger_joint_ids": per_env(finger_joint_ids, dtype=torch.long),
+        "fingertip_local_offsets": per_env(
+            fingertip_local_offsets,
+            dtype=torch.float32,
+        ),
+        "fingertip_from_body": fingertip_from_body_by_env,
+        "has_body_fingertips": bool(any(fingertip_from_body)),
+        "all_body_fingertips": bool(all(fingertip_from_body)),
+        "open_joint_positions": per_env(open_joint_positions, dtype=torch.float32),
+    }
+    env._generated_gripper_runtime_metadata_cache = cached
+    return cached
+
+
+def _one_dof_gripper_env_groups(env: "ManagerBasedRLEnv") -> dict[int, list[int]]:
+    from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
+        get_one_dof_gripper_index_for_env,
+    )
+
+    groups: dict[int, list[int]] = {}
+    for env_id in range(env.num_envs):
+        index = get_one_dof_gripper_index_for_env(env_id)
+        groups.setdefault(index, []).append(env_id)
+    return groups
+
+
+def get_one_dof_gripper_interaction_center_pos_w(env: "ManagerBasedRLEnv") -> torch.Tensor:
+    """Return the physical interaction center for every one-DoF gripper."""
+
+    from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
+        get_one_dof_gripper_data_for_env,
+    )
+
+    robot = env.scene["robot"]
+    out = torch.empty((env.num_envs, 3), device=env.device, dtype=robot.data.body_state_w.dtype)
+    for _, env_ids in _one_dof_gripper_env_groups(env).items():
+        asset = get_one_dof_gripper_data_for_env(env_ids[0])
+        indices = torch.tensor(env_ids, dtype=torch.long, device=env.device)
+        if asset.category == "two_finger_revolute":
+            body_cfg = _resolve_one_dof_robot_bodies(
+                env, body_names=("left_top_link", "right_top_link")
+            )
+            states = robot.data.body_state_w[indices][:, body_cfg.body_ids, :]
+            tip_length = (
+                float(asset.params["tip_length"])
+                if asset.params["tip_shape"] != "none"
+                else 0.0
+            )
+            local_tip = torch.tensor(
+                [0.0, 0.0, float(asset.params["top_size"][2]) + tip_length],
+                dtype=states.dtype,
+                device=env.device,
+            )
+            rotations = matrix_from_quat(states[..., 3:7].reshape(-1, 4)).reshape(
+                len(env_ids), 2, 3, 3
+            )
+            tips_w = states[..., :3] + torch.matmul(
+                rotations,
+                local_tip.view(1, 1, 3, 1),
+            ).squeeze(-1)
+            out[indices] = tips_w.mean(dim=1)
+            continue
+        body_cfg = _resolve_one_dof_robot_bodies(
+            env, body_names=(asset.grasp_frame_body_name,)
+        )
+        state = robot.data.body_state_w[indices, body_cfg.body_ids[0], :]
+        offset = torch.tensor(
+            asset.grasp_frame_offset.translation,
+            dtype=state.dtype,
+            device=env.device,
+        )
+        rotation = matrix_from_quat(state[:, 3:7])
+        out[indices] = state[:, :3] + torch.bmm(
+            rotation, offset.view(1, 3, 1).expand(len(env_ids), -1, -1)
+        ).squeeze(-1)
+    return out
+
+
+def _get_generated_gripper_palm_pose_w(
+    env: "ManagerBasedRLEnv",
+    gripper: GeneratedGripperAsset,
+    env_indices: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    robot = env.scene["robot"]
+    palm_cfg = _resolve_generated_robot_bodies(
+        env,
+        body_names=(gripper.palm_body_name,),
+        expected_count=1,
+    )
+    palm_id = palm_cfg.body_ids[0]
+    state_w = robot.data.body_state_w[env_indices, palm_id, :]
+    return state_w[:, :3], state_w[:, 3:7]
+
+
+def get_generated_gripper_fingertip_center_pos_w(env: "ManagerBasedRLEnv") -> torch.Tensor:
+    """Return midpoint of generated gripper fingertips from explicit metadata."""
+
+    robot = env.scene["robot"]
+    metadata = _generated_gripper_runtime_metadata(env)
+    env_indices = metadata["env_indices"]
+
+    if metadata["all_body_fingertips"]:
+        fingertip_state_w = robot.data.body_state_w[
+            env_indices.unsqueeze(1),
+            metadata["fingertip_body_ids"],
+        ]
+        return fingertip_state_w[..., :3].mean(dim=1)
+
+    finger_state_w = robot.data.body_state_w[
+        env_indices.unsqueeze(1),
+        metadata["finger_body_ids"],
+    ]
+    finger_pos_w = finger_state_w[..., :3]
+    finger_rot_w = matrix_from_quat(
+        finger_state_w[..., 3:7].reshape(-1, 4)
+    ).reshape(env.num_envs, 2, 3, 3)
+    offsets = metadata["fingertip_local_offsets"].to(dtype=finger_pos_w.dtype)
+    local_fingertip_pos_w = finger_pos_w + torch.matmul(
+        finger_rot_w,
+        offsets.unsqueeze(-1),
+    ).squeeze(-1)
+    local_center_w = local_fingertip_pos_w.mean(dim=1)
+
+    if not metadata["has_body_fingertips"]:
+        return local_center_w
+
+    fingertip_state_w = robot.data.body_state_w[
+        env_indices.unsqueeze(1),
+        metadata["fingertip_body_ids"],
+    ]
+    body_center_w = fingertip_state_w[..., :3].mean(dim=1)
+    return torch.where(
+        metadata["fingertip_from_body"].unsqueeze(1),
+        body_center_w,
+        local_center_w,
+    )
 
 
 def get_head_area_pos_w(env: "ManagerBasedRLEnv") -> torch.Tensor:
@@ -107,6 +622,22 @@ def get_head_area_pos_w(env: "ManagerBasedRLEnv") -> torch.Tensor:
     Returns:
         torch.Tensor: Shape (num_envs, 3) – world-space positions.
     """
+    if _is_official_panda_gripper(env):
+        fingertip_center_w = get_official_panda_fingertip_center_pos_w(env)
+        if getattr(env.cfg, "visualize_head_area_center", True):
+            _visualize_head_area_center(env, fingertip_center_w)
+        return fingertip_center_w
+    if _is_generated_gripper(env):
+        fingertip_center_w = get_generated_gripper_fingertip_center_pos_w(env)
+        if getattr(env.cfg, "visualize_head_area_center", True):
+            _visualize_head_area_center(env, fingertip_center_w)
+        return fingertip_center_w
+    if _is_one_dof_gripper(env):
+        center_w = get_one_dof_gripper_interaction_center_pos_w(env)
+        if getattr(env.cfg, "visualize_head_area_center", True):
+            _visualize_head_area_center(env, center_w)
+        return center_w
+
     ee_frame = env.scene["ee_frame"]
     tool_pos_w = ee_frame.data.target_pos_w[..., 0, :]   # (N, 3)
 
@@ -118,8 +649,8 @@ def get_head_area_pos_w(env: "ManagerBasedRLEnv") -> torch.Tensor:
     offset = env._head_area_offsets                         # (N, 3)
     head_pos_w = tool_pos_w + torch.bmm(R, offset.unsqueeze(-1)).squeeze(-1)
 
-    # --- Debug visualization: red sphere at head area center ---
-    _visualize_head_area_center(env, head_pos_w)
+    if getattr(env.cfg, "visualize_head_area_center", True):
+        _visualize_head_area_center(env, head_pos_w)
 
     return head_pos_w
 
@@ -187,17 +718,217 @@ def hand_state(
     return _dbg(env, "hand_state", hand_state_9d)
 
 
+def _cross_embodiment_generated_robot_state(env, asset) -> torch.Tensor:
+    """Return the same 14D arm + 4D semantic gripper state used by Robotiq ranks."""
+
+    from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
+        GENERATED_GRIPPER_FINGER_JOINT_NAMES,
+        GENERATED_GRIPPER_OPEN_JOINT_POS,
+    )
+
+    arm_cfg = _resolve_robot_joints(
+        env,
+        attr_name="_cross_embodiment_generated_arm_joint_cfg",
+        joint_names=["panda_joint.*"],
+        expected_count=7,
+    )
+    finger_cfg = _resolve_generated_robot_joints(
+        env,
+        joint_names=GENERATED_GRIPPER_FINGER_JOINT_NAMES,
+        expected_count=2,
+    )
+    arm_pos = asset.data.joint_pos[:, arm_cfg.joint_ids]
+    arm_vel = asset.data.joint_vel[:, arm_cfg.joint_ids]
+    if getattr(env.cfg, "normalize_observations", True):
+        defaults = asset.data.default_joint_pos[:, arm_cfg.joint_ids]
+        limits = asset.data.soft_joint_pos_limits[:, arm_cfg.joint_ids, :]
+        half_ranges = torch.clamp((limits[..., 1] - limits[..., 0]) * 0.5, min=1e-6)
+        arm_pos = torch.clamp((arm_pos - defaults) / half_ranges, -1.0, 1.0)
+        velocity_limits = torch.clamp(
+            asset.data.soft_joint_vel_limits[:, arm_cfg.joint_ids], min=1e-6
+        )
+        arm_vel = (torch.clamp(arm_vel / velocity_limits, -1.0, 1.0) + 1.0) * 0.5
+
+    finger_ids = finger_cfg.joint_ids
+    span = max(float(GENERATED_GRIPPER_OPEN_JOINT_POS), 1e-6)
+    mean_pos = asset.data.joint_pos[:, finger_ids].mean(dim=1)
+    mean_vel = asset.data.joint_vel[:, finger_ids].mean(dim=1)
+    closure = torch.clamp(
+        (float(GENERATED_GRIPPER_OPEN_JOINT_POS) - mean_pos) / span, 0.0, 1.0
+    )
+    closure_vel = torch.clamp(-mean_vel / span, -1.0, 1.0)
+    commanded = getattr(env, "_generated_gripper_commanded_closure", None)
+    target = closure if commanded is None else commanded[:, 0]
+    tracking_error = torch.clamp(target - closure, -1.0, 1.0)
+    mean_effort = asset.data.applied_torque[:, finger_ids].mean(dim=1)
+    effort_limit = torch.clamp(
+        asset.data.joint_effort_limits[:, finger_ids].mean(dim=1), min=1e-6
+    )
+    effort = torch.clamp(mean_effort / effort_limit, -1.0, 1.0)
+    semantic = torch.stack(
+        (closure, (closure_vel + 1.0) * 0.5, tracking_error, effort), dim=1
+    )
+    return torch.cat((arm_pos, arm_vel, semantic), dim=1)
+
+
 @profile_obs
 def robot_state(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Robot state observation (14D: joint_positions[7] + joint_velocities[7]).
+    """Robot state observation.
+
+    Tool-only robots use 14D arm state. Gripper robots use 18D arm+finger state.
     
     Returns:
-        torch.Tensor: Shape (num_envs, 14)
+        torch.Tensor: Shape (num_envs, 14) or (num_envs, 18)
     """
     asset = env.scene[asset_cfg.name]
+
+    if (
+        _is_generated_gripper(env)
+        and getattr(env.cfg, "requested_robot_mode", "") == "cross_embodiment_gripper"
+    ):
+        return _dbg(
+            env,
+            "robot_state",
+            _cross_embodiment_generated_robot_state(env, asset),
+        )
+
+    if _is_one_dof_gripper(env):
+        from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
+            get_one_dof_gripper_data_for_env,
+        )
+
+        arm_cfg = _resolve_one_dof_robot_joints(env, joint_names=tuple(f"panda_joint{i}" for i in range(1, 8)))
+        arm_pos = asset.data.joint_pos[:, arm_cfg.joint_ids]
+        arm_vel = asset.data.joint_vel[:, arm_cfg.joint_ids]
+        normalize = getattr(env.cfg, "normalize_observations", True)
+        if normalize:
+            defaults = asset.data.default_joint_pos[:, arm_cfg.joint_ids]
+            limits = asset.data.soft_joint_pos_limits[:, arm_cfg.joint_ids, :]
+            half_ranges = torch.clamp((limits[..., 1] - limits[..., 0]) * 0.5, min=1e-6)
+            arm_pos = torch.clamp((arm_pos - defaults) / half_ranges, -1.0, 1.0)
+            velocity_limits = torch.clamp(asset.data.soft_joint_vel_limits[:, arm_cfg.joint_ids], min=1e-6)
+            arm_vel = (torch.clamp(arm_vel / velocity_limits, -1.0, 1.0) + 1.0) * 0.5
+
+        semantic = torch.empty((env.num_envs, 4), dtype=arm_pos.dtype, device=env.device)
+        commanded = getattr(env, "_one_dof_gripper_commanded_closure", None)
+        for _, env_ids in _one_dof_gripper_env_groups(env).items():
+            gripper = get_one_dof_gripper_data_for_env(env_ids[0])
+            indices = torch.tensor(env_ids, dtype=torch.long, device=env.device)
+            gripper_cfg = _resolve_one_dof_robot_joints(
+                env, joint_names=gripper.actuated_joint_names
+            )
+            open_pos = torch.tensor(
+                gripper.open_joint_positions,
+                dtype=arm_pos.dtype,
+                device=env.device,
+            )
+            closed_pos = torch.tensor(
+                gripper.closed_joint_positions,
+                dtype=arm_pos.dtype,
+                device=env.device,
+            )
+            span = closed_pos - open_pos
+            joint_pos = asset.data.joint_pos[indices][:, gripper_cfg.joint_ids]
+            joint_vel = asset.data.joint_vel[indices][:, gripper_cfg.joint_ids]
+            joint_closure = torch.clamp(
+                (joint_pos - open_pos.unsqueeze(0)) / span.unsqueeze(0),
+                0.0,
+                1.0,
+            )
+            closure = joint_closure.mean(dim=1)
+            closure_vel = torch.clamp(
+                (joint_vel / span.unsqueeze(0)).mean(dim=1),
+                -1.0,
+                1.0,
+            )
+            target = closure if commanded is None else commanded[indices, 0]
+            tracking_error = torch.clamp(target - closure, -1.0, 1.0)
+            applied = asset.data.applied_torque[indices][:, gripper_cfg.joint_ids]
+            effort_limit = torch.clamp(
+                asset.data.joint_effort_limits[indices][:, gripper_cfg.joint_ids],
+                min=1e-6,
+            )
+            effort = torch.clamp(applied / effort_limit, -1.0, 1.0).mean(dim=1)
+            semantic[indices] = torch.stack(
+                (closure, (closure_vel + 1.0) * 0.5, tracking_error, effort), dim=1
+            )
+        return _dbg(env, "robot_state", torch.cat((arm_pos, arm_vel, semantic), dim=1))
+
+    if _is_official_panda_gripper(env):
+        arm_cfg = _resolve_robot_joints(
+            env,
+            attr_name="_official_panda_arm_joint_cfg",
+            joint_names=["panda_joint.*"],
+            expected_count=7,
+        )
+        finger_cfg = _resolve_robot_joints(
+            env,
+            attr_name="_official_panda_finger_joint_cfg",
+            joint_names=_OFFICIAL_PANDA_FINGER_JOINT_NAMES,
+            expected_count=2,
+        )
+        joint_ids = list(arm_cfg.joint_ids) + list(finger_cfg.joint_ids)
+
+        joint_pos = asset.data.joint_pos[:, joint_ids]
+        joint_vel = asset.data.joint_vel[:, joint_ids]
+
+        normalize = getattr(env.cfg, 'normalize_observations', True)
+        if normalize:
+            default_pos = asset.data.default_joint_pos[:, joint_ids]
+            soft_limits = asset.data.soft_joint_pos_limits[:, joint_ids, :]
+            mins = soft_limits[..., 0]
+            maxs = soft_limits[..., 1]
+            centers = default_pos
+            half_ranges = torch.clamp((maxs - mins) * 0.5, min=1e-6)
+            pos_norm = torch.clamp((joint_pos - centers) / half_ranges, -1.0, 1.0)
+
+            vel_limits = torch.clamp(asset.data.soft_joint_vel_limits[:, joint_ids], min=1e-6)
+            vel_norm = torch.clamp(joint_vel / vel_limits, -1.0, 1.0)
+            vel_norm = (vel_norm + 1.0) * 0.5
+            return _dbg(env, "robot_state", torch.cat([pos_norm, vel_norm], dim=1))
+
+        return _dbg(env, "robot_state", torch.cat([joint_pos, joint_vel], dim=1))
+
+    if _is_generated_gripper(env):
+        from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
+            GENERATED_GRIPPER_FINGER_JOINT_NAMES,
+        )
+
+        arm_cfg = _resolve_robot_joints(
+            env,
+            attr_name="_generated_gripper_arm_joint_cfg",
+            joint_names=["panda_joint.*"],
+            expected_count=7,
+        )
+        finger_cfg = _resolve_generated_robot_joints(
+            env,
+            joint_names=GENERATED_GRIPPER_FINGER_JOINT_NAMES,
+            expected_count=2,
+        )
+        joint_ids = list(arm_cfg.joint_ids) + list(finger_cfg.joint_ids)
+
+        joint_pos = asset.data.joint_pos[:, joint_ids]
+        joint_vel = asset.data.joint_vel[:, joint_ids]
+
+        normalize = getattr(env.cfg, 'normalize_observations', True)
+        if normalize:
+            default_pos = asset.data.default_joint_pos[:, joint_ids]
+            soft_limits = asset.data.soft_joint_pos_limits[:, joint_ids, :]
+            mins = soft_limits[..., 0]
+            maxs = soft_limits[..., 1]
+            centers = default_pos
+            half_ranges = torch.clamp((maxs - mins) * 0.5, min=1e-6)
+            pos_norm = torch.clamp((joint_pos - centers) / half_ranges, -1.0, 1.0)
+
+            vel_limits = torch.clamp(asset.data.soft_joint_vel_limits[:, joint_ids], min=1e-6)
+            vel_norm = torch.clamp(joint_vel / vel_limits, -1.0, 1.0)
+            vel_norm = (vel_norm + 1.0) * 0.5
+            return _dbg(env, "robot_state", torch.cat([pos_norm, vel_norm], dim=1))
+
+        return _dbg(env, "robot_state", torch.cat([joint_pos, joint_vel], dim=1))
     
     # Get joint positions and velocities
     joint_pos = asset.data.joint_pos[:, :7]
@@ -344,64 +1075,88 @@ PHYS_PARAM_FIELD_NAMES = (
 )
 
 
-@profile_obs
-def phys_params(
+def _compute_phys_params_tensor(
     env: ManagerBasedRLEnv,
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
     hand_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     field_names: tuple[str, ...] | list[str] | None = None,
 ) -> torch.Tensor:
-    """Physical parameter observation assembled from explicit sampled fields."""
+    """Read the requested physical parameters from PhysX/configuration."""
+
     device = env.scene[object_cfg.name].data.root_pos_w.device
     object: RigidObject = env.scene[object_cfg.name]
-    hand: RigidObject = env.scene[hand_cfg.name]
     if field_names is None:
         field_names = getattr(env.cfg, "physics_observation_fields", ())
     field_names = tuple(field_names)
     env._phys_param_field_names = field_names
+    reference = object.data.root_pos_w[:, 0]
+    values: dict[str, torch.Tensor] = {}
 
-    # 1. Get object mass from IsaacLab's built-in interface
-    object_mass = object.root_physx_view.get_masses().squeeze(-1)  # Shape: (num_envs,)
+    # PhysX view reads can synchronize/copy large buffers, so only request the
+    # groups that are actually part of this policy's observation contract.
+    if "object_mass" in field_names:
+        object_mass = object.root_physx_view.get_masses().squeeze(-1)
+        values["object_mass"] = object_mass.to(device=device)
 
-    # 2. Get object material properties from PhysX view
-    # Material properties format: [static_friction, dynamic_friction, restitution]
-    object_material_props = object.root_physx_view.get_material_properties()  # Shape: (num_envs, num_bodies, 3)
-    object_static_friction = object_material_props[:, :, 0].mean(dim=1)
-    object_dynamic_friction = object_material_props[:, :, 1].mean(dim=1)
-    object_restitution = object_material_props[:, :, 2].mean(dim=1)
+    object_material_fields = {
+        "object_static_friction",
+        "object_dynamic_friction",
+        "object_restitution",
+    }
+    if object_material_fields.intersection(field_names):
+        object_material_props = object.root_physx_view.get_material_properties()
+        values.update(
+            {
+                "object_static_friction": object_material_props[:, :, 0].mean(dim=1).to(device=device),
+                "object_dynamic_friction": object_material_props[:, :, 1].mean(dim=1).to(device=device),
+                "object_restitution": object_material_props[:, :, 2].mean(dim=1).to(device=device),
+            }
+        )
 
-    # 3. Get tool mass and friction only when the runtime spec requests them.
     tool_fields_requested = any(name.startswith("tool_") for name in field_names)
     if tool_fields_requested:
-        if getattr(env.cfg, "robot_mode", "tool") == "bare_franka":
-            raise ValueError("phys_params requested tool_* fields, but robot_mode=bare_franka")
+        if getattr(env.cfg, "robot_mode", "tool") != "tool":
+            raise ValueError("phys_params requested tool_* fields, but robot_mode is not tool")
+        hand: RigidObject = env.scene[hand_cfg.name]
         if not hasattr(env, "_tool_body_idx"):
             tool_body_cfg = SceneEntityCfg(hand_cfg.name, body_names=["link_coacd_convex_piece_0"])
             tool_body_cfg.resolve(env.scene)
             env._tool_body_idx = tool_body_cfg.body_ids[0]
 
         tool_idx = env._tool_body_idx
-        robot_masses = hand.root_physx_view.get_masses()  # (num_envs, num_bodies)
-        tool_mass = robot_masses[:, tool_idx]  # (num_envs,)
+        robot_masses = None
+        if "tool_mass" in field_names:
+            robot_masses = hand.root_physx_view.get_masses()
+            values["tool_mass"] = robot_masses[:, tool_idx].to(device=device)
 
-        # Tool friction from robot's material properties
-        robot_material_props = hand.root_physx_view.get_material_properties()  # (num_envs, num_shapes, 3)
-        num_shapes = robot_material_props.shape[1]
-        num_bodies = robot_masses.shape[1]
-        shapes_per_body = num_shapes // num_bodies
-        tool_shape_start = tool_idx * shapes_per_body
-        tool_shape_end = min((tool_idx + 1) * shapes_per_body, num_shapes)
-        tool_material = robot_material_props[:, tool_shape_start:tool_shape_end, :]
-        tool_static_friction = tool_material[:, :, 0].mean(dim=1)
-        tool_dynamic_friction = tool_material[:, :, 1].mean(dim=1)
-        tool_restitution = tool_material[:, :, 2].mean(dim=1)
+        tool_material_fields = {
+            "tool_static_friction",
+            "tool_dynamic_friction",
+            "tool_restitution",
+        }
+        if tool_material_fields.intersection(field_names):
+            if robot_masses is None:
+                robot_masses = hand.root_physx_view.get_masses()
+            robot_material_props = hand.root_physx_view.get_material_properties()
+            num_shapes = robot_material_props.shape[1]
+            num_bodies = robot_masses.shape[1]
+            shapes_per_body = num_shapes // num_bodies
+            tool_shape_start = tool_idx * shapes_per_body
+            tool_shape_end = min((tool_idx + 1) * shapes_per_body, num_shapes)
+            tool_material = robot_material_props[:, tool_shape_start:tool_shape_end, :]
+            values.update(
+                {
+                    "tool_static_friction": tool_material[:, :, 0].mean(dim=1).to(device=device),
+                    "tool_dynamic_friction": tool_material[:, :, 1].mean(dim=1).to(device=device),
+                    "tool_restitution": tool_material[:, :, 2].mean(dim=1).to(device=device),
+                }
+            )
 
-    # 4. Get ground/terrain material only when runtime spec requests ground fields.
-    ground_static_value = None
-    ground_dynamic_value = None
-    ground_restitution_value = None
     ground_fields_requested = any(name.startswith("ground_") for name in field_names)
     if ground_fields_requested:
+        ground_static_value = None
+        ground_dynamic_value = None
+        ground_restitution_value = None
         if bool(getattr(env.cfg, "table_enabled", False)):
             raise ValueError(
                 "phys_params requested ground_* fields, but table is enabled and "
@@ -429,52 +1184,44 @@ def phys_params(
             ground_static_value = physics_material.GetStaticFrictionAttr().Get()
             ground_dynamic_value = physics_material.GetDynamicFrictionAttr().Get()
             ground_restitution_value = physics_material.GetRestitutionAttr().Get()
-    ground_static_friction = torch.full_like(object_mass, 1.0 if ground_static_value is None else float(ground_static_value))
-    ground_dynamic_friction = torch.full_like(object_mass, 1.0 if ground_dynamic_value is None else float(ground_dynamic_value))
-    ground_restitution = torch.full_like(object_mass, 0.0 if ground_restitution_value is None else float(ground_restitution_value))
-
-    # 5. Table material fields are configured explicitly by RLCfg.  If a future
-    # table material randomizer stores sampled values on env, those values take
-    # precedence over the config defaults here.
-    table_material = getattr(env.cfg, "table_material", None)
-    sampled_table = getattr(env, "_sampled_table_material", None)
-    table_static_default = getattr(table_material, "static_friction", 0.8)
-    table_dynamic_default = getattr(table_material, "dynamic_friction", 0.8)
-    table_restitution_default = getattr(table_material, "restitution", 0.0)
-    table_static_friction = torch.full_like(
-        object_mass,
-        float(getattr(sampled_table, "static_friction", table_static_default)),
-    )
-    table_dynamic_friction = torch.full_like(
-        object_mass,
-        float(getattr(sampled_table, "dynamic_friction", table_dynamic_default)),
-    )
-    table_restitution = torch.full_like(
-        object_mass,
-        float(getattr(sampled_table, "restitution", table_restitution_default)),
-    )
-
-    values = {
-        "object_mass": object_mass.to(device=device),
-        "object_static_friction": object_static_friction.to(device=device),
-        "object_dynamic_friction": object_dynamic_friction.to(device=device),
-        "object_restitution": object_restitution.to(device=device),
-        "ground_static_friction": ground_static_friction.to(device=device),
-        "ground_dynamic_friction": ground_dynamic_friction.to(device=device),
-        "ground_restitution": ground_restitution.to(device=device),
-        "table_static_friction": table_static_friction.to(device=device),
-        "table_dynamic_friction": table_dynamic_friction.to(device=device),
-        "table_restitution": table_restitution.to(device=device),
-    }
-    if tool_fields_requested:
         values.update(
             {
-                "tool_mass": tool_mass.to(device=device),
-                "tool_static_friction": tool_static_friction.to(device=device),
-                "tool_dynamic_friction": tool_dynamic_friction.to(device=device),
-                "tool_restitution": tool_restitution.to(device=device),
+                "ground_static_friction": torch.full_like(
+                    reference, 1.0 if ground_static_value is None else float(ground_static_value)
+                ),
+                "ground_dynamic_friction": torch.full_like(
+                    reference, 1.0 if ground_dynamic_value is None else float(ground_dynamic_value)
+                ),
+                "ground_restitution": torch.full_like(
+                    reference, 0.0 if ground_restitution_value is None else float(ground_restitution_value)
+                ),
             }
         )
+
+    table_fields_requested = any(name.startswith("table_") for name in field_names)
+    if table_fields_requested:
+        table_material = getattr(env.cfg, "table_material", None)
+        sampled_table = getattr(env, "_sampled_table_material", None)
+        table_static_default = getattr(table_material, "static_friction", 0.8)
+        table_dynamic_default = getattr(table_material, "dynamic_friction", 0.8)
+        table_restitution_default = getattr(table_material, "restitution", 0.0)
+        values.update(
+            {
+                "table_static_friction": torch.full_like(
+                    reference,
+                    float(getattr(sampled_table, "static_friction", table_static_default)),
+                ),
+                "table_dynamic_friction": torch.full_like(
+                    reference,
+                    float(getattr(sampled_table, "dynamic_friction", table_dynamic_default)),
+                ),
+                "table_restitution": torch.full_like(
+                    reference,
+                    float(getattr(sampled_table, "restitution", table_restitution_default)),
+                ),
+            }
+        )
+
     missing = [name for name in field_names if name not in values]
     if missing:
         raise ValueError(f"Unknown phys_params fields: {missing}")
@@ -482,9 +1229,92 @@ def phys_params(
     if not field_names:
         phys_params_tensor = torch.empty((env.num_envs, 0), device=device)
     else:
-        phys_params_tensor = torch.stack([values[name] for name in field_names], dim=1)
+        phys_params_tensor = torch.stack(
+            [values[name].to(device=device) for name in field_names], dim=1
+        )
 
-    return _dbg(env, "phys_params", phys_params_tensor)
+    return phys_params_tensor
+
+
+def refresh_phys_params_cache(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor | list[int] | None = None,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    hand_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    field_names: tuple[str, ...] | list[str] | None = None,
+) -> torch.Tensor:
+    """Refresh all or selected rows of the physical-parameter cache."""
+
+    if field_names is None:
+        field_names = getattr(env.cfg, "physics_observation_fields", ())
+    field_names = tuple(field_names)
+    cache_key = (object_cfg.name, hand_cfg.name, field_names)
+    fresh = _compute_phys_params_tensor(
+        env,
+        object_cfg=object_cfg,
+        hand_cfg=hand_cfg,
+        field_names=field_names,
+    ).detach()
+
+    cache = getattr(env, "_phys_params_cache", None)
+    if (
+        env_ids is None
+        or getattr(env, "_phys_params_cache_key", None) != cache_key
+        or cache is None
+        or cache.shape != fresh.shape
+    ):
+        env._phys_params_cache = fresh
+        env._phys_params_cache_key = cache_key
+        return fresh
+
+    indices = torch.as_tensor(env_ids, device=fresh.device, dtype=torch.long)
+    if indices.numel() > 0:
+        cache[indices] = fresh[indices]
+    return cache
+
+
+@profile_obs
+def phys_params(
+    env: ManagerBasedRLEnv,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    hand_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    field_names: tuple[str, ...] | list[str] | None = None,
+) -> torch.Tensor:
+    """Return physical parameters cached until the corresponding env resets."""
+
+    if field_names is None:
+        field_names = getattr(env.cfg, "physics_observation_fields", ())
+    field_names = tuple(field_names)
+    cache_key = (object_cfg.name, hand_cfg.name, field_names)
+    cache = getattr(env, "_phys_params_cache", None)
+    if (
+        cache is None
+        or getattr(env, "_phys_params_cache_key", None) != cache_key
+        or cache.shape != (env.num_envs, len(field_names))
+    ):
+        cache = refresh_phys_params_cache(
+            env,
+            object_cfg=object_cfg,
+            hand_cfg=hand_cfg,
+            field_names=field_names,
+        )
+
+    return _dbg(env, "phys_params", cache)
+
+
+@profile_obs
+def target_pose_task_embedding(
+    env: ManagerBasedRLEnv,
+    command_name: str = "target_object_pose",
+) -> torch.Tensor:
+    """Two-way task label for the sampled target pose: [stable, secondary]."""
+
+    command_term = env.command_manager.get_term(command_name)
+    task_index = getattr(command_term, "target_pose_task_index", None)
+    if task_index is None:
+        task_index = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
+    task_index = task_index.to(device=env.device, dtype=torch.long).clamp_(0, 1)
+    return torch.nn.functional.one_hot(task_index, num_classes=2).to(dtype=torch.float32)
 
 
 def object_pose_in_env_frame(
@@ -719,62 +1549,27 @@ def get_object_pointcloud(
 ) -> torch.Tensor:
     """Get object point cloud in world coordinates.
 
-    Uses per-env Cloud instances with baked-in scale and pose caching.
+    Canonical point clouds are initialized once, scaled per environment, and
+    transformed for all environments in one batched GPU operation.
 
     Returns:
         torch.Tensor: shape (num_envs, num_points*3) in world coordinates.
     """
     object: RigidObject = env.scene[object_cfg.name]
 
-    # Initialize per-env Cloud instances on first call
-    if not hasattr(env, "_object_clouds"):
-        from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
-            get_object_asset_cfg_for_env,
+    if not hasattr(env, "_object_pointcloud_points_l"):
+        raise RuntimeError(
+            "Object point clouds were not preloaded. The prestartup "
+            "preload_object_pointclouds event must run before observations are initialized."
         )
 
-        num_envs = object.data.root_pos_w.shape[0]
-        device = object.data.root_pos_w.device
-        scales = mdp.get_rigid_body_scale(
-            env, SceneEntityCfg("object"), list(range(num_envs))
-        )
-
-        env._object_clouds = []
-        for env_idx in range(num_envs):
-            obj_path = get_object_asset_cfg_for_env(env_idx).obj_path
-            initial_scale = scales[env_idx].detach().cpu().numpy()
-            cloud = Cloud(
-                obj_path,
-                target_num_points=512,
-                device=device,
-                dtype=torch.float16,
-                initial_scale=initial_scale,
-                trans_cache_threshold=0.01,
-                rot_cache_threshold=0.01,
-            )
-            env._object_clouds.append(cloud)
-
-        print(
-            f"[INFO] Initialized {num_envs} Cloud instances for objects on device: {device}"
-        )
-
-    device = object.data.root_pos_w.device
     num_envs = object.data.root_pos_w.shape[0]
-
-    # Process each environment using its own Cloud instance
-    pointclouds = []
-    for env_idx in range(num_envs):
-        cloud = env._object_clouds[env_idx]
-
-        # Get pose for this environment
-        pos_w = object.data.root_pos_w[env_idx : env_idx + 1, :3].contiguous()
-        quat_w = object.data.root_quat_w[env_idx : env_idx + 1].contiguous()
-
-        # Get pointcloud (will use cache if pose unchanged)
-        pc = cloud.get_pointcloud(translation=pos_w, rotation=quat_w, use_cache=True)
-        pointclouds.append(pc)
-
-    # Stack all pointclouds and flatten
-    all_pointclouds = torch.cat(pointclouds, dim=0).view(num_envs, -1)
+    all_pointclouds_w = _transform_local_cloud(
+        env._object_pointcloud_points_l,
+        object.data.root_pos_w[:, :3],
+        object.data.root_quat_w,
+    )
+    all_pointclouds = all_pointclouds_w.reshape(num_envs, -1)
 
     # Optional visualization for debugging
     if env.cfg.visualize_object_pointcloud:
@@ -801,6 +1596,7 @@ def get_object_pointcloud_in_env_frame(
     pointcloud_w_reshaped = pointcloud_w.view(num_envs, num_points, 3)
     # Convert to env frame (subtract world env origin)
     pointcloud_env = pointcloud_w_reshaped - env.scene.env_origins.unsqueeze(1)  # (N, P, 3)
+    env._obs_object_cloud_E = pointcloud_env.detach()
 
     obj_bbox_center = _bbox_center_env(pointcloud_env)
     env._obs_obj_bbox_center = obj_bbox_center.detach()
@@ -885,6 +1681,829 @@ def visualize_tool_pointcloud(
     )
 
 
+def _deterministic_resample_points(points: torch.Tensor, target_count: int) -> torch.Tensor:
+    if target_count <= 0:
+        return points.new_zeros((0, 3))
+    if points.shape[0] == target_count:
+        return points
+    if points.shape[0] > target_count:
+        indices = torch.linspace(
+            0,
+            points.shape[0] - 1,
+            target_count,
+            device=points.device,
+        ).round().long()
+        return points[indices]
+
+    repeats = target_count // points.shape[0] + 1
+    return points.repeat((repeats, 1))[:target_count]
+
+
+def _parse_obj_face_index(token: str, num_vertices: int) -> int:
+    raw = token.split("/", 1)[0]
+    idx = int(raw)
+    if idx < 0:
+        return num_vertices + idx
+    return idx - 1
+
+
+def _load_obj_surface_points(
+    path: Path,
+    *,
+    target_count: int,
+    device: torch.device,
+    label: str = _OFFICIAL_PANDA_GRIPPER_MODE,
+) -> torch.Tensor:
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"{label} gripper cloud mesh not found: {path}"
+        )
+    if target_count <= 0:
+        return torch.zeros((0, 3), dtype=torch.float32, device=device)
+
+    vertices: list[list[float]] = []
+    triangles: list[tuple[int, int, int]] = []
+    with path.open("r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            if line.startswith("v "):
+                parts = line.split()
+                if len(parts) >= 4:
+                    vertices.append([float(parts[1]), float(parts[2]), float(parts[3])])
+                continue
+            if not line.startswith("f "):
+                continue
+            parts = line.split()[1:]
+            if len(parts) < 3:
+                continue
+            face_indices = [_parse_obj_face_index(token, len(vertices)) for token in parts]
+            for i in range(1, len(face_indices) - 1):
+                triangles.append((face_indices[0], face_indices[i], face_indices[i + 1]))
+
+    if not vertices:
+        raise RuntimeError(f"{label} mesh has no OBJ vertices: {path}")
+
+    verts = torch.tensor(vertices, dtype=torch.float32)
+    if not triangles:
+        return _deterministic_resample_points(verts, target_count).to(device=device)
+
+    tri_indices = torch.tensor(triangles, dtype=torch.long)
+    valid = (tri_indices >= 0).all(dim=1) & (tri_indices < verts.shape[0]).all(dim=1)
+    tri_indices = tri_indices[valid]
+    if tri_indices.numel() == 0:
+        return _deterministic_resample_points(verts, target_count).to(device=device)
+
+    tris = verts[tri_indices]
+    edge_a = tris[:, 1] - tris[:, 0]
+    edge_b = tris[:, 2] - tris[:, 0]
+    areas = 0.5 * torch.linalg.norm(torch.cross(edge_a, edge_b, dim=1), dim=1)
+    nonzero = areas > 1e-12
+    tris = tris[nonzero]
+    areas = areas[nonzero]
+    if tris.shape[0] == 0:
+        return _deterministic_resample_points(verts, target_count).to(device=device)
+
+    cumulative = torch.cumsum(areas, dim=0)
+    total_area = cumulative[-1]
+    quantiles = (torch.arange(target_count, dtype=torch.float32) + 0.5) / float(target_count)
+    face_ids = torch.searchsorted(cumulative, quantiles * total_area)
+    face_ids = torch.clamp(face_ids, 0, tris.shape[0] - 1)
+    selected = tris[face_ids]
+
+    sample_ids = torch.arange(target_count, dtype=torch.float32) + 1.0
+    r1 = torch.remainder(sample_ids * 0.7548776662466927, 1.0).clamp(1e-6, 1.0 - 1e-6)
+    r2 = torch.remainder(sample_ids * 0.5698402909980532, 1.0)
+    sqrt_r1 = torch.sqrt(r1)
+    w0 = 1.0 - sqrt_r1
+    w1 = sqrt_r1 * (1.0 - r2)
+    w2 = sqrt_r1 * r2
+    points = (
+        selected[:, 0] * w0.unsqueeze(1)
+        + selected[:, 1] * w1.unsqueeze(1)
+        + selected[:, 2] * w2.unsqueeze(1)
+    )
+    return points.to(device=device)
+
+
+def _transform_points_by_spec(
+    points: torch.Tensor,
+    transform: RigidTransformSpec,
+    *,
+    device: torch.device,
+) -> torch.Tensor:
+    if points.shape[0] == 0:
+        return points.to(device=device)
+    quat = torch.tensor(transform.quat_wxyz, dtype=points.dtype, device=device).view(1, 4)
+    pos = torch.tensor(transform.translation, dtype=points.dtype, device=device)
+    rot = matrix_from_quat(quat)[0]
+    return points.to(device=device) @ rot.T + pos
+
+
+def _rpy_matrix(
+    rpy: tuple[float, float, float],
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    rot_np = R.from_euler("xyz", list(rpy)).as_matrix()
+    return torch.tensor(rot_np, dtype=dtype, device=device)
+
+
+def _apply_generated_joint_pose(
+    points_child: torch.Tensor,
+    joint: PrismaticJointSpec,
+    opening: float,
+    *,
+    device: torch.device,
+) -> torch.Tensor:
+    if points_child.shape[0] == 0:
+        return points_child.to(device=device)
+    rot = _rpy_matrix(joint.origin_rpy, device=device, dtype=points_child.dtype)
+    origin = torch.tensor(joint.origin_xyz, dtype=points_child.dtype, device=device)
+    axis = torch.tensor(joint.axis_xyz, dtype=points_child.dtype, device=device)
+    translation = origin + rot @ (axis * float(opening))
+    return points_child.to(device=device) @ rot.T + translation
+
+
+def _official_panda_mesh_points_to_hand_frame(points_mesh: torch.Tensor) -> torch.Tensor:
+    """Map eef_panda OBJ mesh coordinates into official Panda hand coordinates."""
+
+    return torch.stack(
+        [
+            points_mesh[..., 0],
+            -points_mesh[..., 2],
+            points_mesh[..., 1],
+        ],
+        dim=-1,
+    )
+
+
+def _get_official_panda_gripper_bucket_clouds(
+    env: ManagerBasedRLEnv,
+) -> torch.Tensor:
+    from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
+        OFFICIAL_PANDA_GRIPPER_PROPS_DIR,
+    )
+
+    num_points = int(getattr(env.cfg, "num_points", 512))
+    mesh_dir = Path(OFFICIAL_PANDA_GRIPPER_PROPS_DIR)
+    cache_key = (_OFFICIAL_GRIPPER_CLOUD_SOURCE, str(mesh_dir), str(env.device), num_points)
+    cached = _OFFICIAL_GRIPPER_CLOUD_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    hand_count = num_points // 2
+    left_count = (num_points - hand_count) // 2
+    right_count = num_points - hand_count - left_count
+
+    hand = _load_obj_surface_points(
+        mesh_dir / "panda_hand.obj",
+        target_count=hand_count,
+        device=env.device,
+    )
+    left_base = _load_obj_surface_points(
+        mesh_dir / "panda_leftfinger.obj",
+        target_count=left_count,
+        device=env.device,
+    )
+    right_base = _load_obj_surface_points(
+        mesh_dir / "panda_rightfinger.obj",
+        target_count=right_count,
+        device=env.device,
+    )
+
+    bucket_clouds = []
+    for bucket_id in range(_OFFICIAL_GRIPPER_NUM_BUCKETS):
+        opening = _OFFICIAL_GRIPPER_OPEN_JOINT_POS * bucket_id / float(_OFFICIAL_GRIPPER_NUM_BUCKETS - 1)
+        left_offset = torch.tensor(
+            [0.0, _OFFICIAL_GRIPPER_FINGER_MOUNT_OFFSET_Y, -opening],
+            dtype=torch.float32,
+            device=env.device,
+        )
+        right_offset = torch.tensor(
+            [0.0, _OFFICIAL_GRIPPER_FINGER_MOUNT_OFFSET_Y, opening],
+            dtype=torch.float32,
+            device=env.device,
+        )
+        points_mesh = torch.cat([hand, left_base + left_offset, right_base + right_offset], dim=0)
+        bucket_clouds.append(_official_panda_mesh_points_to_hand_frame(points_mesh))
+
+    clouds = torch.stack(bucket_clouds, dim=0).contiguous()
+    _OFFICIAL_GRIPPER_CLOUD_CACHE[cache_key] = clouds
+    return clouds
+
+
+def _transform_local_cloud(
+    points_l: torch.Tensor,
+    pos_w: torch.Tensor,
+    quat_w: torch.Tensor,
+) -> torch.Tensor:
+    num_envs = pos_w.shape[0]
+    rot_w = matrix_from_quat(quat_w)
+    if points_l.dim() == 3:
+        return torch.bmm(points_l, rot_w.transpose(1, 2)) + pos_w.unsqueeze(1)
+    return torch.bmm(
+        rot_w,
+        points_l.T.unsqueeze(0).expand(num_envs, -1, -1),
+    ).transpose(1, 2) + pos_w.unsqueeze(1)
+
+
+def _official_panda_gripper_bucket_ids(env: ManagerBasedRLEnv) -> torch.Tensor:
+    robot = env.scene["robot"]
+    finger_cfg = _resolve_robot_joints(
+        env,
+        attr_name="_official_panda_finger_joint_cfg",
+        joint_names=_OFFICIAL_PANDA_FINGER_JOINT_NAMES,
+        expected_count=2,
+    )
+    finger_pos = robot.data.joint_pos[:, finger_cfg.joint_ids]
+    openness = torch.clamp(
+        finger_pos.mean(dim=1) / _OFFICIAL_GRIPPER_OPEN_JOINT_POS,
+        0.0,
+        1.0,
+    )
+    return torch.clamp(
+        torch.round(openness * (_OFFICIAL_GRIPPER_NUM_BUCKETS - 1)).long(),
+        0,
+        _OFFICIAL_GRIPPER_NUM_BUCKETS - 1,
+    )
+
+
+def get_official_panda_gripper_pointcloud_in_env_frame(
+    env: ManagerBasedRLEnv,
+) -> torch.Tensor:
+    num_envs = env.num_envs
+    bucket_ids = _official_panda_gripper_bucket_ids(env)
+    env._obs_gripper_bucket_ids = bucket_ids.detach()
+
+    bucket_clouds_l = _get_official_panda_gripper_bucket_clouds(env)
+    points_l = bucket_clouds_l[bucket_ids].float()
+    palm_pos_w, palm_quat_w = _get_official_panda_palm_pose_w(env)
+    pts_world = _transform_local_cloud(points_l, palm_pos_w, palm_quat_w)
+
+    pointcloud_env = pts_world - env.scene.env_origins.unsqueeze(1)
+    env._obs_tool_bbox_center = _bbox_center_env(pointcloud_env).detach()
+    env._obs_tool_bbox_extent = _bbox_extent_env(pointcloud_env).detach()
+    env._obs_gripper_cloud_source = _OFFICIAL_GRIPPER_CLOUD_SOURCE
+
+    if getattr(env.cfg, "visualize_tool_pointcloud", False):
+        visualize_tool_pointcloud(env, pts_world.reshape(num_envs, -1).float())
+
+    return pointcloud_env.reshape(num_envs, -1)
+
+
+def _get_generated_gripper_state_clouds(
+    env: ManagerBasedRLEnv,
+    gripper: GeneratedGripperAsset,
+) -> torch.Tensor:
+    from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
+        get_generated_gripper_cloud_cache_dir,
+    )
+    from utils.geometry.gripper_cloud_cache import (
+        cache_path_for_asset,
+        load_gripper_cloud_cache,
+    )
+
+    cache_key = (gripper.gripper_id, str(env.device))
+    cached = _GENERATED_GRIPPER_CLOUD_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    cache = load_gripper_cloud_cache(
+        cache_path_for_asset(
+            gripper, get_generated_gripper_cloud_cache_dir()
+        ),
+        expected_gripper_id=gripper.gripper_id,
+        expected_source_asset_root=gripper.root_dir,
+    )
+    states = cache.state_clouds_palm.to(env.device).contiguous()
+    _GENERATED_GRIPPER_CLOUD_CACHE[cache_key] = states
+    return states
+
+
+def _get_generated_gripper_state_clouds_by_asset(
+    env: ManagerBasedRLEnv,
+    metadata: dict[str, object],
+) -> torch.Tensor:
+    """Stack canonical clouds once so per-step selection is one GPU gather."""
+
+    cached = getattr(env, "_generated_gripper_state_clouds_by_asset_cache", None)
+    if cached is not None:
+        return cached
+
+    assets = metadata["assets"]
+    state_clouds = [
+        _get_generated_gripper_state_clouds(env, gripper)
+        for gripper in assets
+    ]
+    expected_shape = tuple(state_clouds[0].shape)
+    for gripper, states in zip(assets, state_clouds):
+        if tuple(states.shape) != expected_shape:
+            raise RuntimeError(
+                "Generated-gripper cloud caches must have one uniform shape for "
+                f"vectorized lookup; {gripper.gripper_id!r} has {tuple(states.shape)}, "
+                f"expected {expected_shape}"
+            )
+
+    stacked = torch.stack(state_clouds, dim=0).contiguous()
+    # Replace the individual allocations with views into the stacked tensor.
+    # This keeps legacy callers working without retaining a second full copy.
+    device_key = str(env.device)
+    for asset_index, gripper in enumerate(assets):
+        _GENERATED_GRIPPER_CLOUD_CACHE[(gripper.gripper_id, device_key)] = stacked[asset_index]
+    env._generated_gripper_state_clouds_by_asset_cache = stacked
+    return stacked
+
+
+def _generated_gripper_cache_bin_ids(
+    env: ManagerBasedRLEnv,
+    gripper: GeneratedGripperAsset,
+    env_indices: torch.Tensor,
+) -> torch.Tensor:
+    robot = env.scene["robot"]
+    finger_cfg = _resolve_generated_robot_joints(
+        env,
+        joint_names=gripper.finger_joint_names,
+        expected_count=2,
+    )
+    finger_pos = robot.data.joint_pos[env_indices][:, finger_cfg.joint_ids]
+    openness = torch.clamp(
+        finger_pos.mean(dim=1) / gripper.open_joint_pos,
+        0.0,
+        1.0,
+    )
+    return torch.clamp(
+        torch.round(openness * 127).long(),
+        0,
+        127,
+    )
+
+
+def get_generated_gripper_pointcloud_in_env_frame(
+    env: ManagerBasedRLEnv,
+) -> torch.Tensor:
+    num_envs = env.num_envs
+    num_points = int(getattr(env.cfg, "num_points", 512))
+    robot = env.scene["robot"]
+    metadata = _generated_gripper_runtime_metadata(env)
+    env_indices = metadata["env_indices"]
+
+    finger_pos = robot.data.joint_pos[
+        env_indices.unsqueeze(1),
+        metadata["finger_joint_ids"],
+    ]
+    openness = torch.clamp(
+        finger_pos.mean(dim=1) / metadata["open_joint_positions"],
+        0.0,
+        1.0,
+    )
+    state_clouds_by_asset = _get_generated_gripper_state_clouds_by_asset(env, metadata)
+    num_buckets = int(state_clouds_by_asset.shape[1])
+    all_bucket_ids = torch.clamp(
+        torch.round(openness * (num_buckets - 1)).long(),
+        0,
+        num_buckets - 1,
+    )
+    points_l = state_clouds_by_asset[
+        metadata["asset_indices"],
+        all_bucket_ids,
+    ].float()
+    if tuple(points_l.shape[1:]) != (num_points, 3):
+        raise RuntimeError(
+            "Generated-gripper point cloud has invalid vectorized shape "
+            f"{tuple(points_l.shape)}; expected ({num_envs}, {num_points}, 3)"
+        )
+
+    palm_state_w = robot.data.body_state_w[
+        env_indices,
+        metadata["palm_body_ids"],
+    ]
+    out_world = _transform_local_cloud(
+        points_l,
+        palm_state_w[:, :3],
+        palm_state_w[:, 3:7],
+    )
+
+    pointcloud_env = out_world - env.scene.env_origins.unsqueeze(1)
+    env._obs_tool_cloud_E = pointcloud_env.detach()
+    env._obs_gripper_bucket_ids = all_bucket_ids.detach()
+    env._obs_tool_bbox_center = _bbox_center_env(pointcloud_env).detach()
+    env._obs_tool_bbox_extent = _bbox_extent_env(pointcloud_env).detach()
+    env._obs_gripper_cloud_source = _GENERATED_GRIPPER_CLOUD_SOURCE
+
+    if getattr(env.cfg, "visualize_tool_pointcloud", False):
+        visualize_tool_pointcloud(env, out_world.reshape(num_envs, -1).float())
+
+    return pointcloud_env.reshape(num_envs, -1)
+
+
+def get_generated_gripper_kinematic_state_clouds(
+    env: ManagerBasedRLEnv,
+) -> torch.Tensor:
+    """Return strict closed, half-open, and open clouds for either generated family."""
+
+    if _is_one_dof_gripper(env):
+        from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
+            get_one_dof_gripper_data_for_env,
+        )
+        from utils.geometry.gripper_cloud_cache import (
+            cache_path_for_asset,
+            load_gripper_cloud_cache,
+        )
+
+        num_points = int(getattr(env.cfg, "num_points", 512))
+        out = torch.empty(
+            (env.num_envs, 3, num_points, 3),
+            device=env.device,
+            dtype=torch.float32,
+        )
+        for _, env_ids_list in _one_dof_gripper_env_groups(env).items():
+            gripper = get_one_dof_gripper_data_for_env(env_ids_list[0])
+            key = (gripper.gripper_id, str(env.device), num_points)
+            states = _ONE_DOF_GRIPPER_STATE_CLOUD_CACHE.get(key)
+            if states is None:
+                cache = load_gripper_cloud_cache(
+                    cache_path_for_asset(gripper),
+                    expected_gripper_id=gripper.gripper_id,
+                    expected_source_manifest=gripper.manifest_path,
+                    expected_source_asset_root=gripper.root_dir,
+                )
+                states = torch.stack(
+                    [
+                        cache.cloud_at_fraction(fraction)
+                        for fraction in (0.0, 0.5, 1.0)
+                    ]
+                ).to(env.device)
+                if states.shape != (3, num_points, 3):
+                    raise RuntimeError(
+                        "One-DoF kinematic cloud has invalid shape "
+                        f"{tuple(states.shape)} for {gripper.gripper_id}"
+                    )
+                _ONE_DOF_GRIPPER_STATE_CLOUD_CACHE[key] = states
+            indices = torch.tensor(
+                env_ids_list, device=env.device, dtype=torch.long
+            )
+            out[indices] = states.unsqueeze(0)
+        return out.reshape(env.num_envs, -1)
+
+    if not _is_generated_gripper(env):
+        raise RuntimeError(
+            "Kinematic gripper clouds require generated_gripper or one_dof_gripper "
+            f"runtime mode, got {getattr(env.cfg, 'robot_mode', None)!r}"
+        )
+
+    from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
+        get_generated_gripper_data_for_env,
+    )
+
+    num_points = int(getattr(env.cfg, "num_points", 512))
+    out = torch.empty(
+        (env.num_envs, 3, num_points, 3),
+        device=env.device,
+        dtype=torch.float32,
+    )
+    for _, env_ids_list in _generated_gripper_env_groups(env).items():
+        gripper = get_generated_gripper_data_for_env(env_ids_list[0])
+        env_indices = torch.tensor(
+            env_ids_list, device=env.device, dtype=torch.long
+        )
+        buckets = _get_generated_gripper_state_clouds(env, gripper).float()
+        states = torch.stack(
+            (buckets[0], buckets[64], buckets[-1]),
+            dim=0,
+        )
+        out[env_indices] = states.unsqueeze(0)
+    return out.reshape(env.num_envs, -1)
+
+
+def get_one_dof_gripper_pointcloud_in_env_frame(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Select the nearest canonical cache bin from the measured joint state."""
+
+    from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
+        get_one_dof_gripper_data_for_env,
+    )
+    from utils.geometry.gripper_cloud_cache import (
+        cache_path_for_asset,
+        load_gripper_cloud_cache,
+    )
+
+    robot = env.scene["robot"]
+    num_points = int(getattr(env.cfg, "num_points", 512))
+    out_world = torch.empty((env.num_envs, num_points, 3), dtype=torch.float32, device=env.device)
+    all_bin_ids = torch.empty(
+        (env.num_envs,), dtype=torch.long, device=env.device
+    )
+    for _, env_ids in _one_dof_gripper_env_groups(env).items():
+        gripper = get_one_dof_gripper_data_for_env(env_ids[0])
+        indices = torch.tensor(env_ids, dtype=torch.long, device=env.device)
+        cache_key = (gripper.gripper_id, str(env.device))
+        states = _ONE_DOF_CANONICAL_CACHE.get(cache_key)
+        if states is None:
+            cache = load_gripper_cloud_cache(
+                cache_path_for_asset(gripper),
+                expected_gripper_id=gripper.gripper_id,
+                expected_source_manifest=gripper.manifest_path,
+                expected_source_asset_root=gripper.root_dir,
+            )
+            states = cache.state_clouds_palm.to(env.device).contiguous()
+            _ONE_DOF_CANONICAL_CACHE[cache_key] = states
+        if states.shape != (128, num_points, 3):
+            raise RuntimeError(
+                "Canonical gripper cache does not match the RL observation: "
+                f"cache={tuple(states.shape)} "
+                f"expected=(128, {num_points}, 3) asset={gripper.gripper_id}"
+            )
+        joint_cfg = _resolve_one_dof_robot_joints(
+            env, joint_names=gripper.actuated_joint_names
+        )
+        open_pos = torch.tensor(
+            gripper.open_joint_positions,
+            device=env.device,
+            dtype=robot.data.joint_pos.dtype,
+        )
+        closed_pos = torch.tensor(
+            gripper.closed_joint_positions,
+            device=env.device,
+            dtype=robot.data.joint_pos.dtype,
+        )
+        joint_pos = robot.data.joint_pos[indices][:, joint_cfg.joint_ids]
+        opening = torch.clamp(
+            ((joint_pos - closed_pos) / (open_pos - closed_pos)).mean(dim=1),
+            0.0,
+            1.0,
+        )
+        bin_ids = torch.round(opening * 127).long()
+        all_bin_ids[indices] = bin_ids
+        points_palm = states[bin_ids]
+        palm_cfg = _resolve_one_dof_robot_bodies(
+            env, body_names=(gripper.palm_body_name,)
+        )
+        palm_state = robot.data.body_state_w[
+            indices, palm_cfg.body_ids[0], :
+        ]
+        out_world[indices] = _transform_local_cloud(
+            points_palm, palm_state[:, :3], palm_state[:, 3:7]
+        )
+
+    pointcloud_env = out_world - env.scene.env_origins.unsqueeze(1)
+    env._obs_tool_cloud_E = pointcloud_env.detach()
+    env._obs_gripper_bucket_ids = all_bin_ids.detach()
+    env._obs_tool_bbox_center = _bbox_center_env(pointcloud_env).detach()
+    env._obs_tool_bbox_extent = _bbox_extent_env(pointcloud_env).detach()
+    env._obs_gripper_cloud_source = _ONE_DOF_GRIPPER_CLOUD_SOURCE
+    if getattr(env.cfg, "visualize_tool_pointcloud", False):
+        visualize_tool_pointcloud(env, out_world.reshape(env.num_envs, -1))
+    return pointcloud_env.reshape(env.num_envs, -1)
+
+
+def _load_oracle_prepared_mesh(path: Path, *, device: torch.device):
+    key = ("mesh", str(path.resolve()), str(device))
+    cached = _ORACLE_MESH_SDF_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        import trimesh
+    except Exception as exc:
+        raise RuntimeError("oracle_patch exact mesh SDF requires trimesh") from exc
+    loaded = trimesh.load(str(path), force="mesh", process=False)
+    if isinstance(loaded, trimesh.Scene):
+        geometries = tuple(loaded.geometry.values())
+        if not geometries:
+            raise RuntimeError(f"oracle_patch mesh scene is empty: {path}")
+        loaded = trimesh.util.concatenate(geometries)
+    vertices = torch.as_tensor(loaded.vertices, dtype=torch.float32, device=device).contiguous()
+    faces = torch.as_tensor(loaded.faces, dtype=torch.long, device=device).contiguous()
+    if vertices.ndim != 2 or vertices.shape[1] != 3 or faces.ndim != 2 or faces.shape[1] != 3:
+        raise RuntimeError(f"oracle_patch requires a triangular mesh: {path}")
+    # Warp builds and caches its own BVH; no dense face-vertex expansion is needed.
+    prepared = (vertices, faces, None)
+    _ORACLE_MESH_SDF_CACHE[key] = prepared
+    return prepared
+
+
+def _prepare_oracle_component(
+    path: Path,
+    *,
+    device: torch.device,
+    body_transform: RigidTransformSpec,
+    joint: PrismaticJointSpec | None = None,
+    opening: float = 0.0,
+    post_body_transform: RigidTransformSpec | None = None,
+):
+    raw_v, faces, _ = _load_oracle_prepared_mesh(path, device=device)
+    vertices = _transform_points_by_spec(raw_v, body_transform, device=device)
+    if post_body_transform is not None:
+        vertices = _transform_points_by_spec(vertices, post_body_transform, device=device)
+    if joint is not None:
+        vertices = _apply_generated_joint_pose(vertices, joint, opening, device=device)
+    return vertices, faces, None
+
+
+def _get_oracle_generated_gripper_link_meshes(
+    env: "ManagerBasedRLEnv",
+    gripper: GeneratedGripperAsset,
+):
+    key = (gripper.gripper_id, str(env.device))
+    cached = _ORACLE_GRIPPER_LINK_MESH_CACHE.get(key)
+    if cached is not None:
+        return cached
+    meshes = {
+        "plank": _prepare_oracle_component(
+            gripper.plank_mesh,
+            device=env.device,
+            body_transform=gripper.mesh_to_body_frame["plank"],
+        ),
+        "finger": _prepare_oracle_component(
+            gripper.finger_mesh,
+            device=env.device,
+            body_transform=gripper.mesh_to_body_frame["finger"],
+        ),
+    }
+    if gripper.has_tip:
+        if gripper.finger_tip_mesh is None or gripper.finger_tip_to_finger_frame is None:
+            raise RuntimeError(f"generated gripper {gripper.gripper_id!r} has invalid tip metadata")
+        meshes["tip_body"] = _prepare_oracle_component(
+            gripper.finger_tip_mesh,
+            device=env.device,
+            body_transform=gripper.mesh_to_body_frame["finger_tip"],
+        )
+        meshes["tip_in_finger"] = _prepare_oracle_component(
+            gripper.finger_tip_mesh,
+            device=env.device,
+            body_transform=gripper.mesh_to_body_frame["finger_tip"],
+            post_body_transform=gripper.finger_tip_to_finger_frame,
+        )
+    _ORACLE_GRIPPER_LINK_MESH_CACHE[key] = meshes
+    return meshes
+
+
+def _query_oracle_prepared_mesh(
+    points: torch.Tensor,
+    prepared,
+    *,
+    signed: bool,
+) -> torch.Tensor:
+    from utils.geometry.warp_sdf import (
+        signed_distance_points_to_prepared_mesh_warp,
+        unsigned_distance_points_to_prepared_mesh_warp,
+    )
+
+    vertices, faces, _ = prepared
+    query = (
+        signed_distance_points_to_prepared_mesh_warp
+        if signed
+        else unsigned_distance_points_to_prepared_mesh_warp
+    )
+    return query(
+        points,
+        mesh_v=vertices,
+        mesh_f=faces,
+    )
+
+
+def _get_oracle_mesh_distance(
+    env: "ManagerBasedRLEnv",
+    *,
+    signed: bool,
+) -> torch.Tensor:
+    """Exact privileged mesh distance for every object/tool cloud point.
+
+    Output order is ``object-points-to-gripper`` followed by
+    ``tool-points-to-object``. Negative is inside the opposite mesh. There is
+    deliberately no point-cloud-distance or unsigned fallback.
+    """
+    if not _is_generated_gripper(env):
+        raise RuntimeError("oracle_patch exact mesh SDF currently requires generated_gripper mode")
+    if not hasattr(env, "_obs_object_cloud_E") or not hasattr(env, "_obs_tool_cloud_E"):
+        raise RuntimeError("oracle mesh SDF observation must run after object_cloud and tool_cloud")
+
+    from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
+        get_generated_gripper_data_for_env,
+        get_object_asset_cfg_for_env,
+        get_object_index_for_env,
+    )
+
+    object_points_E = env._obs_object_cloud_E
+    tool_points_E = env._obs_tool_cloud_E
+    batch_size, num_points, _ = object_points_E.shape
+    if tool_points_E.shape != (batch_size, num_points, 3):
+        raise RuntimeError("oracle mesh SDF requires matching object/tool point counts")
+    object_points_W = object_points_E + env.scene.env_origins.unsqueeze(1)
+    tool_points_W = tool_points_E + env.scene.env_origins.unsqueeze(1)
+
+    # Tool points queried against each environment's exact object mesh.
+    object_asset = env.scene["object"]
+    object_pos_W = object_asset.data.root_pos_w[:, :3]
+    object_rot_W = matrix_from_quat(object_asset.data.root_quat_w)
+    object_scales = env._object_pointcloud_scales
+    if not bool(torch.allclose(object_scales, object_scales[:, :1].expand_as(object_scales), atol=1e-6, rtol=1e-6)):
+        raise RuntimeError("oracle mesh SDF currently requires uniform object scale")
+    object_groups: dict[int, list[int]] = {}
+    for env_id in range(batch_size):
+        object_groups.setdefault(get_object_index_for_env(env_id), []).append(env_id)
+    tool_sdf = torch.empty((batch_size, num_points), device=env.device, dtype=torch.float32)
+    for env_ids in object_groups.values():
+        indices = torch.tensor(env_ids, device=env.device, dtype=torch.long)
+        scale = object_scales[indices, 0]
+        query_scaled_local = torch.matmul(
+            tool_points_W[indices] - object_pos_W[indices].unsqueeze(1),
+            object_rot_W[indices],
+        )
+        query_raw_local = query_scaled_local / scale[:, None, None]
+        mesh_path = Path(get_object_asset_cfg_for_env(env_ids[0]).obj_path)
+        prepared = _load_oracle_prepared_mesh(mesh_path, device=env.device)
+        distance_raw = _query_oracle_prepared_mesh(
+            query_raw_local.reshape(-1, 3), prepared, signed=signed
+        )
+        tool_sdf[indices] = distance_raw.reshape(len(env_ids), num_points) * scale.unsqueeze(1)
+
+    # Object points queried against the exact union of live articulated link meshes.
+    # Every query uses current body poses; no openness bucket approximation is used.
+    object_sdf = torch.empty_like(tool_sdf)
+    robot = env.scene["robot"]
+    for _, env_ids in _generated_gripper_env_groups(env).items():
+        gripper = get_generated_gripper_data_for_env(env_ids[0])
+        indices = torch.tensor(env_ids, device=env.device, dtype=torch.long)
+        meshes = _get_oracle_generated_gripper_link_meshes(env, gripper)
+        component_queries = []
+
+        palm_pos_W, palm_quat_W = _get_generated_gripper_palm_pose_w(env, gripper, indices)
+        component_queries.append((meshes["plank"], palm_pos_W, palm_quat_W))
+
+        finger_cfg = _resolve_generated_robot_bodies(
+            env,
+            body_names=gripper.finger_body_names,
+            expected_count=2,
+        )
+        finger_state_W = robot.data.body_state_w[indices][:, finger_cfg.body_ids, :]
+        for finger_index in range(2):
+            component_queries.append(
+                (
+                    meshes["finger"],
+                    finger_state_W[:, finger_index, :3],
+                    finger_state_W[:, finger_index, 3:7],
+                )
+            )
+
+        if gripper.has_tip:
+            if gripper.fingertip_body_names is not None:
+                tip_cfg = _resolve_generated_robot_bodies(
+                    env,
+                    body_names=gripper.fingertip_body_names,
+                    expected_count=2,
+                )
+                tip_state_W = robot.data.body_state_w[indices][:, tip_cfg.body_ids, :]
+                for tip_index in range(2):
+                    component_queries.append(
+                        (
+                            meshes["tip_body"],
+                            tip_state_W[:, tip_index, :3],
+                            tip_state_W[:, tip_index, 3:7],
+                        )
+                    )
+            else:
+                for finger_index in range(2):
+                    component_queries.append(
+                        (
+                            meshes["tip_in_finger"],
+                            finger_state_W[:, finger_index, :3],
+                            finger_state_W[:, finger_index, 3:7],
+                        )
+                    )
+
+        component_sdf = []
+        for prepared, body_pos_W, body_quat_W in component_queries:
+            body_rot_W = matrix_from_quat(body_quat_W)
+            query_body = torch.matmul(
+                object_points_W[indices] - body_pos_W.unsqueeze(1),
+                body_rot_W,
+            )
+            component_sdf.append(
+                _query_oracle_prepared_mesh(
+                    query_body.reshape(-1, 3), prepared, signed=signed
+                ).reshape(
+                    len(env_ids), num_points
+                )
+            )
+        object_sdf[indices] = torch.stack(component_sdf, dim=0).min(dim=0).values
+
+    if not bool(torch.isfinite(object_sdf).all()) or not bool(torch.isfinite(tool_sdf).all()):
+        raise RuntimeError("oracle exact mesh SDF produced non-finite values")
+    return torch.cat((object_sdf, tool_sdf), dim=1)
+
+
+@profile_obs
+def get_oracle_mesh_signed_sdf(env: "ManagerBasedRLEnv") -> torch.Tensor:
+    """Exact signed point-to-opposite-mesh distance; negative means inside."""
+
+    return _get_oracle_mesh_distance(env, signed=True)
+
+
+@profile_obs
+def get_oracle_mesh_unsigned_distance(env: "ManagerBasedRLEnv") -> torch.Tensor:
+    """Exact unsigned closest-triangle distance to the opposite mesh."""
+
+    return _get_oracle_mesh_distance(env, signed=False)
+
+
 @profile_obs
 def get_tool_pointcloud_in_env_frame(
     env: ManagerBasedRLEnv,
@@ -901,6 +2520,13 @@ def get_tool_pointcloud_in_env_frame(
     Returns:
         torch.Tensor: shape (num_envs, num_points*3), float32
     """
+    if _is_official_panda_gripper(env):
+        return get_official_panda_gripper_pointcloud_in_env_frame(env)
+    if _is_generated_gripper(env):
+        return get_generated_gripper_pointcloud_in_env_frame(env)
+    if _is_one_dof_gripper(env):
+        return get_one_dof_gripper_pointcloud_in_env_frame(env)
+
     from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
         get_cached_cloud,
         get_tool_data_for_env,
@@ -969,27 +2595,6 @@ def get_tool_pointcloud_in_env_frame(
             pts.T.unsqueeze(0).expand(len(env_ids_list), -1, -1),
         ).transpose(1, 2)  # (B, M, 3)
         pts_world = pts_rotated + batch_pos.unsqueeze(1)
-
-        # --- Debug: print key coordinates on first call ---
-        if not hasattr(env, "_tool_pc_debug_done"):
-            env._tool_pc_debug_done = True
-            print(f"[DEBUG tool_pc] OBJ: {td['name']}")
-            print(f"[DEBUG tool_pc] Canonical pts (scaled) min: {pts.min(dim=0).values.cpu().numpy()}")
-            print(f"[DEBUG tool_pc] Canonical pts (scaled) max: {pts.max(dim=0).values.cpu().numpy()}")
-            print(f"[DEBUG tool_pc] Canonical pts (scaled) mean: {pts.mean(dim=0).cpu().numpy()}")
-            print(f"[DEBUG tool_pc] Body pos (world): {batch_pos[0].cpu().numpy()}")
-            print(f"[DEBUG tool_pc] Body quat (world): {batch_quat[0].cpu().numpy()}")
-            print(f"[DEBUG tool_pc] Rot matrix [2,:]: {batch_rot[0, 2, :].cpu().numpy()}")
-            print(f"[DEBUG tool_pc] PC world min: {pts_world[0].min(dim=0).values.cpu().numpy()}")
-            print(f"[DEBUG tool_pc] PC world max: {pts_world[0].max(dim=0).values.cpu().numpy()}")
-            print(f"[DEBUG tool_pc] PC world mean: {pts_world[0].mean(dim=0).cpu().numpy()}")
-            # Also print link7 position for reference
-            link7_names = [n for n in robot.data.body_names if "link7" in n]
-            if link7_names:
-                l7_idx = list(robot.data.body_names).index(link7_names[0])
-                l7_pos = robot.data.body_state_w[0, l7_idx, :3]
-                print(f"[DEBUG tool_pc] panda_link7 pos (world): {l7_pos.cpu().numpy()}")
-                print(f"[DEBUG tool_pc] body-link7 delta: {(batch_pos[0] - l7_pos).cpu().numpy()}")
 
         # Allocate output on first iteration
         if out_tensor is None:

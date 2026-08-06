@@ -3,7 +3,6 @@ import torch
 import meshio
 import trimesh
 from pathlib import Path
-from typing import Optional
 
 
 class Cloud:
@@ -11,26 +10,118 @@ class Cloud:
         self,
         obj_path,
         target_num_points=512,
-        trans_cache_threshold=0.1,
-        rot_cache_threshold=0.2,
         device=None,
         dtype=torch.float16,
         initial_scale=None,
+        pointcloud_source="mesh_sampled",
+        preprocessed_pointcloud_path=None,
     ):
-        """Initialize point cloud from OBJ file.
+        """Initialize an object geometry handle with lazily loaded sampled points.
 
         Args:
             obj_path: Path to OBJ file
             target_num_points: Target number of points (default: 512)
-            trans_cache_threshold: Translation threshold in meters (default: 0.1)
-            rot_cache_threshold: Rotation threshold in radians for quaternions (default: 0.2)
             device: Device to store point cloud (default: None, auto-detect)
             dtype: Data type (default: torch.float16)
             initial_scale: Optional initial scale (default: None)
+            pointcloud_source: ``mesh_sampled`` or ``preprocessed``.
+            preprocessed_pointcloud_path: Required sampled-point NPY path when
+                ``pointcloud_source`` is ``preprocessed``.
         """
         obj_path = Path(obj_path)
-        cache_dir = obj_path.parent / "pc_npy_cache"
-        cache_path = cache_dir / f"{obj_path.stem}.npy"
+        if pointcloud_source not in {"mesh_sampled", "preprocessed"}:
+            raise ValueError(
+                "pointcloud_source must be 'mesh_sampled' or 'preprocessed', got "
+                f"{pointcloud_source!r}"
+            )
+        if pointcloud_source == "preprocessed" and preprocessed_pointcloud_path is None:
+            raise ValueError(
+                "preprocessed_pointcloud_path is required when "
+                "pointcloud_source='preprocessed'"
+            )
+
+        self.target_num_points = int(target_num_points)
+        if self.target_num_points <= 0:
+            raise ValueError(
+                f"target_num_points must be positive, got {self.target_num_points}"
+            )
+        self.device = torch.device(device) if isinstance(device, (str, int)) else device
+        self.dtype = dtype
+        self.pointcloud_source = pointcloud_source
+        self.preprocessed_pointcloud_path = (
+            Path(preprocessed_pointcloud_path).expanduser()
+            if preprocessed_pointcloud_path is not None
+            else None
+        )
+        self._initial_scale = (
+            np.asarray(initial_scale, dtype=np.float32).reshape(1, 3)
+            if initial_scale is not None
+            else None
+        )
+        self._obj_path = str(obj_path)
+        self._mesh_point_cache_path = obj_path.parent / "pc_npy_cache" / f"{obj_path.stem}.npy"
+
+        # Sampled points, full vertices, and stable poses are independent lazy
+        # resources. Geometry-only command/reset paths therefore do not read a
+        # sampled point-cloud file.
+        self._points = None
+        self._points_torch = {}
+        self._vertices_torch = {}
+        self._stable_poses_cache = None
+
+    @property
+    def points(self) -> torch.Tensor:
+        """Return sampled local-frame points, loading the configured source once."""
+        if self._points is None:
+            points_np = self._load_points_np()
+            if self._initial_scale is not None:
+                points_np = points_np * self._initial_scale
+            self._points = torch.tensor(
+                points_np,
+                dtype=self.dtype,
+                device=self.device,
+            )
+        return self._points
+
+    def _load_points_np(self) -> np.ndarray:
+        if self.pointcloud_source == "preprocessed":
+            return self._load_preprocessed_points_np()
+        return self._load_mesh_sampled_points_np()
+
+    def _load_preprocessed_points_np(self) -> np.ndarray:
+        path = self.preprocessed_pointcloud_path
+        if path is None or not path.is_file():
+            raise FileNotFoundError(
+                f"Preprocessed point-cloud file does not exist: {path}"
+            )
+        try:
+            points_np = np.load(path, allow_pickle=False)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to load preprocessed point cloud: {path}"
+            ) from exc
+        points_np = np.asarray(points_np)
+        expected_shape = (self.target_num_points, 3)
+        if points_np.shape != expected_shape:
+            raise RuntimeError(
+                f"Preprocessed point cloud has invalid shape: {path} has "
+                f"{points_np.shape}, expected {expected_shape}"
+            )
+        if not np.issubdtype(points_np.dtype, np.number) or not np.isfinite(points_np).all():
+            raise RuntimeError(
+                f"Preprocessed point cloud contains non-numeric or non-finite data: {path}"
+            )
+        print(
+            "[preprocessed_cloud] load "
+            f"obj={self._obj_path} points={path} target_num_points={self.target_num_points}",
+            flush=True,
+        )
+        return points_np.astype(np.float32, copy=False)
+
+    def _load_mesh_sampled_points_np(self) -> np.ndarray:
+        obj_path = Path(self._obj_path)
+        cache_path = self._mesh_point_cache_path
+        target_num_points = self.target_num_points
 
         if cache_path.exists():
             try:
@@ -44,7 +135,7 @@ class Cloud:
                 flush=True,
             )
             try:
-                points_np = np.load(cache_path)
+                points_np = np.load(cache_path, allow_pickle=False)
             except Exception as exc:
                 raise RuntimeError(
                     "Point-cloud cache load failed. "
@@ -65,10 +156,14 @@ class Cloud:
                     f"target_num_points={target_num_points}",
                     flush=True,
                 )
-                indices = np.random.choice(
-                    points_np.shape[0], target_num_points, replace=False
-                )
-                points_np = points_np[indices]
+                if points_np.shape[0] > target_num_points:
+                    indices = np.random.choice(
+                        points_np.shape[0], target_num_points, replace=False
+                    )
+                    points_np = points_np[indices]
+                else:
+                    repeats = target_num_points // points_np.shape[0] + 1
+                    points_np = np.tile(points_np, (repeats, 1))[:target_num_points]
         else:
             print(
                 "[cloud_cache] miss "
@@ -97,41 +192,14 @@ class Cloud:
                 tiled = np.tile(points, (repeats, 1))
                 points_np = tiled[:target_num_points]
 
-            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
             np.save(cache_path, points_np.astype(np.float32))
             print(
                 "[cloud_cache] saved "
                 f"obj={obj_path} cache={cache_path} points={points_np.shape[0]}",
                 flush=True,
             )
-
-        if initial_scale is not None:
-            scale_arr = np.asarray(initial_scale, dtype=np.float32).reshape(1, 3)
-            points_np = points_np * scale_arr
-
-        self.target_num_points = target_num_points
-
-        # Store points on GPU
-        self.device = torch.device(device) if isinstance(device, (str, int)) else device
-        self.dtype = dtype
-        self.points = torch.tensor(points_np, dtype=dtype, device=self.device)
-
-        # Legacy list-of-lists for backward compat (used by sample_stable_pose_trimesh)
-        self._points_list = points_np.tolist()
-
-        # Pose caching for optimization
-        self.trans_cache_threshold = trans_cache_threshold
-        self.rot_cache_threshold = rot_cache_threshold
-        self._cached_pose = None  # Store (translation, rotation)
-        self._cached_pointcloud = None  # Store transformed pointcloud
-
-        # Stable pose cache (computed lazily)
-        self._stable_poses_cache = None
-        self._obj_path = str(obj_path)
-
-        # Per-device Torch tensor cache (for backward compat with old code paths)
-        self._points_torch = {}
-        self._vertices_torch = {}
+        return np.asarray(points_np, dtype=np.float32)
 
     def _to_numpy(self, x):
         if isinstance(x, torch.Tensor):
@@ -235,28 +303,8 @@ class Cloud:
         )
         return Rm
 
-    def _pose_changed(self, translation, rotation) -> bool:
-        """Check if pose changed significantly from cache."""
-        if self._cached_pose is None:
-            return True
-
-        cached_trans, cached_rot = self._cached_pose
-
-        trans_diff = torch.norm(translation - cached_trans, dim=-1).max().item()
-        if trans_diff > self.trans_cache_threshold:
-            return True
-
-        dot = torch.sum(rotation * cached_rot, dim=-1)
-        dot = torch.clamp(torch.abs(dot), max=1.0)
-        rot_diff = (2.0 * torch.acos(dot)).max().item()
-
-        if rot_diff > self.rot_cache_threshold:
-            return True
-
-        return False
-
     def get_pointcloud(
-        self, translation=None, rotation=None, scale=None, degrees=True, order="xyz", use_cache=True
+        self, translation=None, rotation=None, scale=None, degrees=True, order="xyz"
     ):
         """Get transformed point clouds for batch processing.
 
@@ -266,8 +314,6 @@ class Cloud:
             scale: Optional (N, 3) batch scales (for backward compat). If None, uses baked-in scale.
             degrees: Whether Euler angles are in degrees (default: True)
             order: Euler rotation order (default: 'xyz')
-            use_cache: Use pose caching (default: True)
-
         Returns:
             torch.Tensor: (N, M, 3) transformed point clouds
         """
@@ -279,24 +325,6 @@ class Cloud:
                 break
         if device is None:
             device = torch.device("cpu")
-
-        if use_cache and translation is not None and rotation is not None:
-            trans_t = (
-                translation
-                if isinstance(translation, torch.Tensor)
-                else torch.as_tensor(translation, device=device)
-            )
-            rot_t = (
-                rotation
-                if isinstance(rotation, torch.Tensor)
-                else torch.as_tensor(rotation, device=device)
-            )
-
-            if (
-                not self._pose_changed(trans_t, rot_t)
-                and self._cached_pointcloud is not None
-            ):
-                return self._cached_pointcloud.to(dtype=self.dtype)
 
         base_points = self._get_points_torch(device)  # (M,3)
 
@@ -362,15 +390,6 @@ class Cloud:
             transformed = transformed + trans_t.unsqueeze(1)
 
         transformed = transformed.to(dtype=self.dtype)
-
-        # Cache pose and pointcloud
-        if use_cache and translation is not None and rotation is not None:
-            trans_cache = (
-                trans_t.clone().detach() if "trans_t" in locals() else translation
-            )
-            rot_cache = rot_t.clone().detach() if "rot_t" in locals() else rotation
-            self._cached_pose = (trans_cache, rot_cache)
-            self._cached_pointcloud = transformed.clone().detach().to(dtype=self.dtype)
 
         return transformed
 

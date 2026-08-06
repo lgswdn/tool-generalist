@@ -18,7 +18,12 @@ from .pose import (
     rotation_from_pose9d,
     rotation_from_pose9d_np,
 )
-from .sdf import mutual_signed_sdf_labels_env_frame, signed_distance_points_to_mesh
+from .sdf import (
+    mutual_signed_sdf_geometry_env_frame,
+    mutual_signed_sdf_labels_env_frame,
+    mutual_unsigned_mesh_distance_env_frame,
+    signed_distance_points_to_mesh,
+)
 
 __all__ = [
     "apply_pose_about_bbox_center",
@@ -38,5 +43,7 @@ __all__ = [
     "scale_vertices",
     "scaled_mesh_bbox",
     "mutual_signed_sdf_labels_env_frame",
+    "mutual_signed_sdf_geometry_env_frame",
+    "mutual_unsigned_mesh_distance_env_frame",
     "signed_distance_points_to_mesh",
 ]

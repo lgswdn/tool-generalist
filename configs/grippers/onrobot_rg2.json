@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "grippers": [
+    {
+      "id": "onrobot_rg2",
+      "category": "rg_like",
+      "topology_family": "onrobot_rg2",
+      "root_dir": "../../thirdparty/rpdiff/src/rpdiff/descriptions/franka_panda_table",
+      "urdf_path": "panda_rg2.urdf",
+      "usd_path": "panda_rg2.usd",
+      "palm_body_name": "onrobot_rg2_base_link",
+      "ee_body_name": "panda_grasptarget",
+      "grasp_frame": {
+        "body_name": "panda_grasptarget",
+        "offset": {"translation": [0.0, 0.0, 0.0], "quat_wxyz": [1.0, 0.0, 0.0, 0.0]}
+      },
+      "control": {
+        "command_dim": 1,
+        "adapter": "primary_joint_with_mimics",
+        "actuated_joint_names": ["finger_joint"],
+        "measured_joint_name": "finger_joint",
+        "open_joint_positions": [-0.55],
+        "closed_joint_positions": [0.70],
+        "actuator": {
+          "effort_limit": 60.0,
+          "stiffness": 800.0,
+          "damping": 50.0,
+          "armature": 0.005,
+          "velocity_limit": 2.0
+        }
+      },
+      "cloud_parts": [
+        {"body_name": "onrobot_rg2_base_link", "geometry_type": "mesh", "mesh_path": "meshes/onrobot_rg2/visual/base_link.stl"},
+        {"body_name": "left_outer_knuckle", "geometry_type": "mesh", "mesh_path": "meshes/onrobot_rg2/visual/outer_knuckle.stl"},
+        {"body_name": "left_inner_knuckle", "geometry_type": "mesh", "mesh_path": "meshes/onrobot_rg2/visual/inner_knuckle.stl"},
+        {"body_name": "left_inner_finger", "geometry_type": "mesh", "mesh_path": "meshes/onrobot_rg2/visual/inner_finger.stl"},
+        {"body_name": "right_outer_knuckle", "geometry_type": "mesh", "mesh_path": "meshes/onrobot_rg2/visual/outer_knuckle.stl"},
+        {"body_name": "right_inner_knuckle", "geometry_type": "mesh", "mesh_path": "meshes/onrobot_rg2/visual/inner_knuckle.stl"},
+        {"body_name": "right_inner_finger", "geometry_type": "mesh", "mesh_path": "meshes/onrobot_rg2/visual/inner_finger.stl"}
+      ],
+      "params": {
+        "official_model": "OnRobot RG2",
+        "policy_control_dof": 1,
+        "source_commit": "46fae3557dd3aff678adf6b3320ec1338493d84a"
+      }
+    }
+  ]
+}

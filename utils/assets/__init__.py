@@ -1,6 +1,5 @@
 """Asset contract helpers shared by contact generation, pretrain, and RL."""
 
-from .head_area import compute_head_bounds, split_head_body
 from .tool_assets import (
     ToolAsset,
     ToolAssetContractError,
@@ -8,23 +7,55 @@ from .tool_assets import (
     infer_tool_id_from_mesh_path,
     load_selected_tool_ids,
     load_tool_adjusted_entry,
+    load_tool_kinematic_cloud,
     load_tool_asset,
+    load_tool_contact_tip_mesh,
     load_tool_head_area,
     resolve_tool_mesh_path,
     validate_tool_adjusted_entry,
 )
+from .generated_gripper_assets import (
+    GeneratedGripperAsset,
+    GeneratedGripperAssetError,
+    PrismaticJointSpec,
+    RigidTransformSpec,
+    load_generated_gripper_manifest,
+    load_generated_gripper_manifest_entry,
+)
+from .one_dof_gripper_assets import (
+    GripperActuatorSpec,
+    GripperCloudPart,
+    OneDofGripperAsset,
+    OneDofGripperAssetError,
+    TransformSpec,
+    load_one_dof_gripper_manifest,
+    validate_one_dof_gripper_usd,
+)
 
 __all__ = [
+    "GeneratedGripperAsset",
+    "GeneratedGripperAssetError",
+    "GripperActuatorSpec",
+    "GripperCloudPart",
+    "OneDofGripperAsset",
+    "OneDofGripperAssetError",
+    "PrismaticJointSpec",
+    "RigidTransformSpec",
+    "TransformSpec",
     "ToolAsset",
     "ToolAssetContractError",
     "assert_adjusted_decomposed_mesh_path",
-    "compute_head_bounds",
     "infer_tool_id_from_mesh_path",
     "load_selected_tool_ids",
+    "load_generated_gripper_manifest",
+    "load_generated_gripper_manifest_entry",
+    "load_one_dof_gripper_manifest",
+    "validate_one_dof_gripper_usd",
     "load_tool_adjusted_entry",
+    "load_tool_kinematic_cloud",
     "load_tool_asset",
+    "load_tool_contact_tip_mesh",
     "load_tool_head_area",
     "resolve_tool_mesh_path",
-    "split_head_body",
     "validate_tool_adjusted_entry",
 ]

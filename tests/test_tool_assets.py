@@ -9,6 +9,7 @@ from utils.assets import (
     assert_adjusted_decomposed_mesh_path,
     load_selected_tool_ids,
     load_tool_asset,
+    load_tool_contact_tip_mesh,
     resolve_tool_mesh_path,
     validate_tool_adjusted_entry,
 )
@@ -94,6 +95,41 @@ def test_tool_adjusted_entry_rejects_bad_head_area():
 
     with pytest.raises(ToolAssetContractError, match="tolerance"):
         validate_tool_adjusted_entry({"name": "tool_a", "head_area": [[0, 0, 0], [1.2, 1, 1]]}, "tool_a")
+
+
+def test_generated_gripper_rejects_primitive_proxy():
+    entry = {
+        "name": "generated_gripper_000000",
+        "head_area": [[0, 0, 0], [1, 1, 1]],
+        "source_generated_gripper_id": "000000",
+        "proxy": "primitive",
+    }
+    with pytest.raises(ToolAssetContractError, match="exact_generated_mesh"):
+        validate_tool_adjusted_entry(entry, entry["name"])
+
+
+def test_contact_tip_mesh_is_required_and_resolved(tmp_path):
+    tool_id = "generated_gripper_000000"
+    mesh = tmp_path / tool_id / "coacd" / "decomposed.obj"
+    mesh.parent.mkdir(parents=True)
+    mesh.write_text("# exact mesh\n")
+    tip = mesh.with_name("contact_tip.obj")
+    tip.write_text("# tip mesh\n")
+    manifest = tmp_path / "tools_adjusted.json"
+    entry = {
+        "name": tool_id,
+        "head_area": [[0, 0, 0], [1, 1, 1]],
+        "source_generated_gripper_id": "000000",
+        "proxy": "exact_generated_mesh",
+        "contact_tip_mesh": str(tip),
+    }
+    _write_json(manifest, [entry])
+
+    assert load_tool_contact_tip_mesh(manifest, mesh, tool_id) == tip.resolve()
+    del entry["contact_tip_mesh"]
+    _write_json(manifest, [entry])
+    with pytest.raises(ToolAssetContractError, match="contact_tip_mesh"):
+        load_tool_contact_tip_mesh(manifest, mesh, tool_id)
 
 
 def test_legacy_paths_warn_and_map_to_new_contract(tmp_path):

@@ -38,6 +38,8 @@ class WandbSummaryWriter(SummaryWriter):
         # Initialize wandb
         wandb.init(project=project, entity=entity, name=run_name)
 
+        self.upload_files = bool(cfg.get("wandb_upload_files", False))
+
         # Add log directory to wandb
         wandb.config.update({"log_dir": log_dir})
 
@@ -72,9 +74,13 @@ class WandbSummaryWriter(SummaryWriter):
         self.store_config(env_cfg, runner_cfg, alg_cfg, policy_cfg)
 
     def save_model(self, model_path, iter):
+        if not self.upload_files:
+            return
         wandb.save(model_path, base_path=os.path.dirname(model_path))
 
     def save_file(self, path, iter=None):
+        if not self.upload_files:
+            return
         wandb.save(path, base_path=os.path.dirname(path))
 
     """

@@ -260,6 +260,26 @@
       },
       "contact_config_hash": "f8ef079ddcab3fe1f74916bcd44ba148efd3093ecdc611ef02699ed6467495bd"
     },
+    "configs/experiments/fork_full_tool_diff_post_low_penetration.py": {
+      "config_hash": {
+        "utils.config.hash": "68e289da3fa2e3c5185f6d954050d0df749e804223c764fddb0670b5d7ab5225",
+        "utils.config.serialization": "68e289da3fa2e3c5185f6d954050d0df749e804223c764fddb0670b5d7ab5225"
+      },
+      "artifact_names": {
+        "experiment": "experiment/fork_full_tool_diff_post_low_penetration/8aed9fe6cb7c03b34b6c1a3348765a5a3cb69ef3a13e1c2374ff0391dc0548e5",
+        "contact": "contact/fork_sdf/contact_gen_full_tool/a92f9b3677e6ed69a864d05e767cfadac388f3dc95e8bb982578351e7aba7d08",
+        "encoder": "encoder/fork_full_tool_diff_post_low_penetration/contact_gen_full_tool/diff_post_multitool_full_tool_diff_post/db3016f304e8cc8208a662a9fbf9372eb0034d4c1a60f8576797408b6ef2e5d9"
+      },
+      "resolve_artifacts": {
+        "experiment": "7f9a3f68641e5b8faa727260f534ebed233f743d115333ee159b00f7087d784d",
+        "stages": {
+          "contact_gen": "d763fa528e6463d2761b37e223e2d69cf40765235e6fe106676bc7feee631033",
+          "pretrain": "ca301a4e18b4b1a96d287626e4e4a79a52d9dac1eb7b04689b5290b2ee133b11",
+          "rl": "ef31cb3eb2b05db5ebdc190c8832dee715889db18c158bceeeb6b549155318c7"
+        }
+      },
+      "contact_config_hash": "f658013092e505258a44301b337fe6df782c78ccdf448c55ccf32bb5b36b82c0"
+    },
     "configs/experiments/fork_post.py": {
       "config_hash": {
         "utils.config.hash": "652b54492544d97c97551e6e701bf505227aed8ba07da9128c9fad2a5d8bf61b",
@@ -860,6 +880,26 @@
       },
       "contact_config_hash": "4fd9fa5f9fc1c088a87a929a50f0325e9eda7b3647a5aec59e97f578a2c38fe6"
     },
+    "configs/experiments/multitools_full_tool_public_unicorn.py": {
+      "config_hash": {
+        "utils.config.hash": "f5bf3c3c20d0c8648f9068d0f0e207118e211eddb34ddbdea4b62e021056d671",
+        "utils.config.serialization": "f5bf3c3c20d0c8648f9068d0f0e207118e211eddb34ddbdea4b62e021056d671"
+      },
+      "artifact_names": {
+        "experiment": "experiment/multitools_full_tool_public_unicorn/d22e158fe57ac5346a37dc67b5b921c7c11bc2b61d25df22cd9c67ed8c151bd8",
+        "contact": "contact/fork_sdf/contact_gen_full_tool/281987b90b894c5a84c97b9b0c89bca2d8711036c52e2d2b3f7f0a65f7d94535",
+        "encoder": "encoder/multitools_full_tool_public_unicorn/contact_gen_full_tool/diff_post_public_pretrained_unicorn/314cf9fe954e871717738f81ce0f26ad02e9bf0b8a0570b3c22eed44fd11758d"
+      },
+      "resolve_artifacts": {
+        "experiment": "afa66bdd026212cf4d36e1ca9d8276d20eda48973a60d35b7a79c8db3f8daeb5",
+        "stages": {
+          "contact_gen": "c569fa7177578d38d91ddc479cfbc2e6f030b170c81c99d5af10ac6d61414e86",
+          "pretrain": "47e53e8299b607091b7eed96df0fec85308ed362a0f174091618f337c798a2bd",
+          "rl": "2db8219a00f727555ead489228f64ad4dae9921f00770c3e4e80674d9b02adad"
+        }
+      },
+      "contact_config_hash": "771079176bf463dab806d477afb5975ac1e10840c0b6bccaf87917641c305e85"
+    },
     "configs/experiments/multitools_full_tool_unicorn_no_aug.py": {
       "config_hash": {
         "utils.config.hash": "dfd2c7811a84ddccb89ab7fafabbc5b8431e2b2bdd7bf0f4511c862b67014255",
@@ -999,6 +1039,46 @@
         }
       },
       "contact_config_hash": "a23899a4053e52114e7994fd4ceba730775f30f9b19d91e8863afdc49f09fc0d"
+    },
+    "configs/experiments/o2o_stable_diff_post.py": {
+      "config_hash": {
+        "utils.config.hash": "70cb077e5d19cccb8ab5d7c0c0009838099ea3e636e9155bcc69f0c37e49ac5c",
+        "utils.config.serialization": "70cb077e5d19cccb8ab5d7c0c0009838099ea3e636e9155bcc69f0c37e49ac5c"
+      },
+      "artifact_names": {
+        "experiment": "experiment/o2o_stable_diff_post/68e64992529efbbd586acf714a47f7d521f981d9a410892a3af169888d22e470",
+        "contact": "contact/fork_sdf/contact_gen_full_obj_as_tool/defdafd09677e86629006c0c3a158dba3499bc96535009b6f94003548731cebd",
+        "encoder": "encoder/o2o_stable_diff_post/contact_gen_full_obj_as_tool/diff_post_o2o_stable_diff_post/6741c383f3b1969c714b71c7114efb11d3ee80c71d29a8392ffe220fa44e6d46"
+      },
+      "resolve_artifacts": {
+        "experiment": "a2ba67604e7cb1c0a2fba340545f0e657961a127192a742d3068a518e0f3e2dc",
+        "stages": {
+          "contact_gen": "7867cd0a6d208d99c3877d0ed29f7a87c272401d117bb340efc16b3f4df0d78e",
+          "pretrain": "a205f922444e0724e0243ddc2e96248c22e153a72ac49cb458fdec6bb4d85374",
+          "rl": "a651a4a6ce53e2ee820bba440a63ee3366cd0330036a3b345eaaf111a1705511"
+        }
+      },
+      "contact_config_hash": "9ff4a10dc2f90645cd8ae4bd08e09cbc0bc539a9b4bed4f897cc5fbf365febd7"
+    },
+    "configs/experiments/o2o_stable_unicorn_no_aug.py": {
+      "config_hash": {
+        "utils.config.hash": "db7ef3f2e1e599e23fa313b75827a63e1054071a418a000c02d8c9385d1e2884",
+        "utils.config.serialization": "db7ef3f2e1e599e23fa313b75827a63e1054071a418a000c02d8c9385d1e2884"
+      },
+      "artifact_names": {
+        "experiment": "experiment/o2o_stable_unicorn_no_aug/ab152c3e46579f7eb10a6ab0b8a46e6fff272130450c267a149b4584867b0b86",
+        "contact": "contact/fork_sdf/contact_gen_full_obj_as_tool/defdafd09677e86629006c0c3a158dba3499bc96535009b6f94003548731cebd",
+        "encoder": "encoder/o2o_stable_unicorn_no_aug/contact_gen_full_obj_as_tool/unicorn_contact_no_aug_o2o_unicorn_contact_no_aug/cff94c63392668bb527bb2634e03ff7175b0da2bce6efc0dbc3275e87e564fa8"
+      },
+      "resolve_artifacts": {
+        "experiment": "d2ea503697af3bd0c5aec81c2d4d63f3fa7f482969f1d39b6c5e20feb7ea1b47",
+        "stages": {
+          "contact_gen": "7867cd0a6d208d99c3877d0ed29f7a87c272401d117bb340efc16b3f4df0d78e",
+          "pretrain": "b4f7760f7609423217c4a3aad1f3165a8416ffad1a188c44929584d2d45a16f8",
+          "rl": "921041c262b2039ac8562b91aea34249bf053e3d0f61e1e74d1c849bfa180f84"
+        }
+      },
+      "contact_config_hash": "17f73c17b5a80eab0f166d4c6275584d068d81cb5954674d16b8d5ba3187514e"
     },
     "configs/experiments/panda_hand_diff.py": {
       "config_hash": {
@@ -1202,40 +1282,20 @@
     },
     "configs/experiments/unicorn_pretrain.py": {
       "config_hash": {
-        "utils.config.hash": "0c678f3d2478aef0afc0fb2be64122e638353eb3c5c9f85a12fcddc1597885c2",
-        "utils.config.serialization": "0c678f3d2478aef0afc0fb2be64122e638353eb3c5c9f85a12fcddc1597885c2"
+        "utils.config.hash": "7ab92c418c88c2aad9fbdde171337ed4e8dd4f9cfce93e393053cefcffa20178",
+        "utils.config.serialization": "7ab92c418c88c2aad9fbdde171337ed4e8dd4f9cfce93e393053cefcffa20178"
       },
       "artifact_names": {
-        "experiment": "experiment/unicorn_pretrain/4e03f59d0e12841ca2d58d3ba07f1a1192b7c0fb3f29612aa1e747794f131695",
-        "contact": "contact/fork_sdf/contact_gen_full_tool/affb3dfef5198102bdde40220eba82a1076ed57262f9a2a5d0beca0d4b84e0cc",
-        "encoder": "encoder/unicorn_pretrain/contact_gen_full_tool/unicorn_contact_unicorn_contact/00af45fc7c8d76e520cf72414711e9c9f472d6d7bd383a8f0c7deb8bc8eb725b"
-      },
-      "resolve_artifacts": {
-        "experiment": "395f2cc6cd2edb1d81d5d243d174b271b04d0ef2fde9a2fcc2bcfd6f88786e6f",
-        "stages": {
-          "contact_gen": "8017405460ab248bea4e6b6b2a29dccf74bb4a4b0337dea08e1371993845ad9e",
-          "pretrain": "ebd61a50cb2c7914be0df86723a7c7593d04ab4a5c60c9cb52370ef953e8e34e",
-          "rl": "f3374165d42fcc32140b1adf20c63ef6bb0fe1a88b9e23d57014d6b052832a8a"
-        }
-      },
-      "contact_config_hash": "ef5018492500b84280d0eae3063c0218d4d769ccfbe0bfb817e220f8790d6555"
-    },
-    "configs/experiments/unicorn_pretrain_no_aug.py": {
-      "config_hash": {
-        "utils.config.hash": "237409234c3a9d6f2d1eef979fe40cc29d868ddc787ea827331d980721380d39",
-        "utils.config.serialization": "237409234c3a9d6f2d1eef979fe40cc29d868ddc787ea827331d980721380d39"
-      },
-      "artifact_names": {
-        "experiment": "experiment/unicorn_pretrain_no_aug/f7102f0fc5c8103e5e70d8bacea516bc1386ad9a9370a8167d7bcec8ea1916ed",
+        "experiment": "experiment/unicorn_pretrain_no_aug/1141b3bf46604c6507a1b4f8ccd3b3ba7ab62a2caa7f592d600bfb8f60138199",
         "contact": "contact/fork_sdf/contact_gen_full_tool/affb3dfef5198102bdde40220eba82a1076ed57262f9a2a5d0beca0d4b84e0cc",
         "encoder": "encoder/unicorn_pretrain_no_aug/contact_gen_full_tool/unicorn_contact_no_aug_unicorn_contact/4191daadb22dce0efb6a6112463fdde0f8ae30393eced4dc188df2753f796740"
       },
       "resolve_artifacts": {
-        "experiment": "9407cedd8abe04500ca3ef3ddfe22024b04ff853bf12b88547566d355f0b95d0",
+        "experiment": "fa54bb2d200ce150c9c383647d80d255311777536209e2700f120402694f199c",
         "stages": {
           "contact_gen": "8017405460ab248bea4e6b6b2a29dccf74bb4a4b0337dea08e1371993845ad9e",
           "pretrain": "22f9c06902f2eeb889b3c5e06e21684bd33d04c4bd57cb4185e0939e5222a2f3",
-          "rl": "bf2e58e751dc5ee21f30e43e841df164eaf4a9a7d05bc14e80f80547191b3bbd"
+          "rl": "066ef59b73e80547e32517b1a57f2eed2d0d737f956757d0128a124ab821cbf8"
         }
       },
       "contact_config_hash": "49d58c1349cb4cdebe666a7eacec9155ed7467baa0c752d7b1e26451cabcdb09"

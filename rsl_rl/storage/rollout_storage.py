@@ -104,22 +104,44 @@ class RolloutStorage:
         extra_state_shape,
         critic_encoder_features_shape=None,
         critic_extra_state_shape=None,
+        encoder_features_dtype=torch.float32,
+        extra_state_dtype=torch.float32,
+        critic_encoder_features_dtype=None,
+        critic_extra_state_dtype=None,
     ):
-        """Enable caching of encoder features for frozen encoder optimization."""
+        """Enable caching of encoder outputs or fixed preprocessing metadata."""
         self.encoder_features_shape = encoder_features_shape
         self.encoder_features = torch.zeros(
-            self.num_transitions_per_env, self.num_envs, *encoder_features_shape, device=self.device
+            self.num_transitions_per_env,
+            self.num_envs,
+            *encoder_features_shape,
+            device=self.device,
+            dtype=encoder_features_dtype,
         )
         self.extra_state = torch.zeros(
-            self.num_transitions_per_env, self.num_envs, *extra_state_shape, device=self.device
+            self.num_transitions_per_env,
+            self.num_envs,
+            *extra_state_shape,
+            device=self.device,
+            dtype=extra_state_dtype,
         )
         critic_encoder_features_shape = critic_encoder_features_shape or encoder_features_shape
         critic_extra_state_shape = critic_extra_state_shape or extra_state_shape
+        critic_encoder_features_dtype = critic_encoder_features_dtype or encoder_features_dtype
+        critic_extra_state_dtype = critic_extra_state_dtype or extra_state_dtype
         self.critic_encoder_features = torch.zeros(
-            self.num_transitions_per_env, self.num_envs, *critic_encoder_features_shape, device=self.device
+            self.num_transitions_per_env,
+            self.num_envs,
+            *critic_encoder_features_shape,
+            device=self.device,
+            dtype=critic_encoder_features_dtype,
         )
         self.critic_extra_state = torch.zeros(
-            self.num_transitions_per_env, self.num_envs, *critic_extra_state_shape, device=self.device
+            self.num_transitions_per_env,
+            self.num_envs,
+            *critic_extra_state_shape,
+            device=self.device,
+            dtype=critic_extra_state_dtype,
         )
 
     def add_transitions(self, transition: Transition):

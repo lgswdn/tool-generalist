@@ -11,6 +11,9 @@ import numpy as np
 from utils.io import read_json
 
 
+_KINEMATIC_TOOL_CLOUDS: dict[tuple[Path, str], tuple[float, Any]] = {}
+
+
 class ToolAssetContractError(ValueError):
     """Raised when a tool asset entry violates the asset contract."""
 
@@ -112,6 +115,13 @@ def validate_tool_adjusted_entry(entry: Mapping[str, Any], tool_id: str) -> np.n
         )
     if "head_area" not in entry:
         raise ToolAssetContractError(f"Tool '{tool_id}' is missing head_area")
+    if (
+        "source_generated_gripper_id" in entry
+        and entry.get("proxy") != "exact_generated_mesh"
+    ):
+        raise ToolAssetContractError(
+            f"Generated gripper '{tool_id}' must use proxy=exact_generated_mesh"
+        )
 
     head_area = np.asarray(entry["head_area"], dtype=np.float64)
     if head_area.shape != (2, 3):
@@ -133,7 +143,7 @@ def load_tool_head_area(
     tools_json_path: str | Path,
     tool_mesh_path: str | Path,
     tool_id: Optional[str] = None,
-) -> Optional[Tuple[list, list]]:
+) -> Tuple[list, list]:
     inferred_tool_id = assert_adjusted_decomposed_mesh_path(tool_mesh_path, tool_id)
     tool_stem = tool_id or inferred_tool_id
     path = Path(tools_json_path)
@@ -143,6 +153,86 @@ def load_tool_head_area(
     validate_tool_adjusted_entry(entry, tool_stem)
     head_area = entry["head_area"]
     return head_area[0], head_area[1]
+
+
+def load_tool_contact_tip_mesh(
+    tools_json_path: str | Path,
+    tool_mesh_path: str | Path,
+    tool_id: Optional[str] = None,
+) -> Path:
+    """Return the strict fingertip surface mesh for contact anchor sampling."""
+
+    inferred_tool_id = assert_adjusted_decomposed_mesh_path(
+        tool_mesh_path, tool_id
+    )
+    tool_stem = tool_id or inferred_tool_id
+    manifest_path = Path(tools_json_path)
+    if not manifest_path.exists():
+        raise ToolAssetContractError(
+            f"tools_adjusted.json does not exist: {tools_json_path}"
+        )
+    entry = _find_tool_entry(manifest_path, tool_stem)
+    validate_tool_adjusted_entry(entry, tool_stem)
+    raw_path = entry.get("contact_tip_mesh")
+    if not raw_path:
+        raise ToolAssetContractError(
+            f"Tool '{tool_stem}' is missing required contact_tip_mesh"
+        )
+    tip_path = Path(str(raw_path)).expanduser()
+    if not tip_path.is_absolute():
+        tip_path = manifest_path.parent / tip_path
+    if not tip_path.is_file():
+        raise ToolAssetContractError(
+            f"Tool '{tool_stem}' contact_tip_mesh does not exist: {tip_path}"
+        )
+    return tip_path.resolve()
+
+
+def load_tool_kinematic_cloud(
+    tools_json_path: str | Path,
+    tool_id: str,
+) -> tuple[float, "torch.Tensor"]:
+    """Load the canonical cached cloud at the tool asset's recorded openness."""
+
+    cache_key = (Path(tools_json_path).expanduser().resolve(), tool_id)
+    cached = _KINEMATIC_TOOL_CLOUDS.get(cache_key)
+    if cached is not None:
+        return cached
+    entry = _find_tool_entry(tools_json_path, tool_id)
+    raw_cache = entry.get("kinematic_cloud_cache")
+    if raw_cache is None or "opening_fraction" not in entry:
+        raise ToolAssetContractError(
+            f"Tool {tool_id!r} lacks strict kinematic cache metadata"
+        )
+    cache_path = Path(str(raw_cache)).expanduser()
+    if not cache_path.is_absolute():
+        cache_path = Path(tools_json_path).parent / cache_path
+    from utils.geometry.gripper_cloud_cache import (
+        load_gripper_cloud_cache,
+    )
+
+    source_ids = [
+        entry[key]
+        for key in (
+            "source_generated_gripper_id",
+            "source_one_dof_gripper_id",
+        )
+        if key in entry
+    ]
+    if len(source_ids) != 1:
+        raise ToolAssetContractError(
+            f"Tool {tool_id!r} must identify exactly one cached gripper source"
+        )
+    source_id = str(source_ids[0])
+    cache = load_gripper_cloud_cache(
+        cache_path,
+        expected_gripper_id=source_id,
+        expected_source_manifest=str(entry["source_manifest"]),
+    )
+    opening = float(entry["opening_fraction"])
+    result = (opening, cache.cloud_at_fraction(opening))
+    _KINEMATIC_TOOL_CLOUDS[cache_key] = result
+    return result
 
 
 def load_tool_asset(

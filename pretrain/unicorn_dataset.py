@@ -90,14 +90,11 @@ def _augment_pair(
     log_scale_range: tuple[float, float],
     noise_std: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    dtype = points_a.dtype
-    rot = _random_rotation(dtype)
-    log_lo, log_hi = float(log_scale_range[0]), float(log_scale_range[1])
-    scale = torch.exp(torch.empty((), dtype=dtype).uniform_(log_lo, log_hi))
-    trans_lo, trans_hi = float(translation_range[0]), float(translation_range[1])
-    trans = torch.empty(3, dtype=dtype).uniform_(trans_lo, trans_hi)
-    out_a = scale * (points_a @ rot.T) + trans
-    out_b = scale * (points_b @ rot.T) + trans
+    # Keep this legacy dataset behavior consistent with NewPretrainDataset:
+    # no extra rigid/scale augmentation, only 1 mm surface jitter.
+    del translation_range, log_scale_range
+    out_a = points_a
+    out_b = points_b
     if float(noise_std) > 0:
         out_a = out_a + torch.randn_like(out_a) * float(noise_std)
         out_b = out_b + torch.randn_like(out_b) * float(noise_std)
@@ -119,7 +116,8 @@ class UnicornContactPairDataset(Dataset):
         label_chunk_size: int = 8192,
         translation_range: tuple[float, float] = (-0.1, 0.1),
         log_scale_range: tuple[float, float] = (-1.0, 1.0),
-        noise_std: float = 0.01,
+        noise_std: float = 0.001,
+        tool_mesh_contract: str = "adjusted_decomposed_mesh",
     ):
         self.num_points = int(num_points)
         self.augment = bool(augment)
@@ -130,6 +128,7 @@ class UnicornContactPairDataset(Dataset):
         self.translation_range = tuple(float(v) for v in translation_range)
         self.log_scale_range = tuple(float(v) for v in log_scale_range)
         self.noise_std = float(noise_std)
+        self.tool_mesh_contract = str(tool_mesh_contract)
 
         self._index: list[tuple[str, int]] = []
         self._pt_cache: dict[str, Mapping[str, Any]] = {}
@@ -143,6 +142,7 @@ class UnicornContactPairDataset(Dataset):
                 allow_mock=self.allow_mock_physics,
                 require_real_physics=False,
                 require_complete=True,
+                tool_mesh_contract=self.tool_mesh_contract,
             )
             self._pt_cache[path] = data
             self._geom_cache[path] = self._reconstruct_geometry(data)
@@ -207,10 +207,11 @@ class UnicornContactPairDataset(Dataset):
         tool_R_E = _as_float_tensor(data["tool_rotation_E"][contact_i], (3, 3), "tool_rotation_E")
         tool_t_E = _as_float_tensor(data["tool_translation_E"][contact_i], (3,), "tool_translation_E")
 
-        points_a = geom["tool_points_T"] @ tool_R_E.T + tool_t_E
-        points_b = geom["object_points_O"] @ object_R_E.T + object_t_E
-        label_points_a = points_a
-        label_points_b = points_b
+        label_points_a = geom["tool_points_T"] @ tool_R_E.T + tool_t_E
+        label_points_b = geom["object_points_O"] @ object_R_E.T + object_t_E
+        # Encoder inputs use exactly the object-centered frame used by RL.
+        points_a = label_points_a - object_t_E
+        points_b = label_points_b - object_t_E
 
         if self.augment:
             points_a, points_b = _augment_pair(
@@ -258,6 +259,7 @@ def make_unicorn_split(
     translation_range: tuple[float, float] = (-0.1, 0.1),
     log_scale_range: tuple[float, float] = (-1.0, 1.0),
     noise_std: float = 0.01,
+    tool_mesh_contract: str = "adjusted_decomposed_mesh",
 ) -> tuple[UnicornContactPairDataset, UnicornContactPairDataset]:
     files = collect_pt_files(data_dir)
     if not files:
@@ -278,6 +280,7 @@ def make_unicorn_split(
         translation_range=translation_range,
         log_scale_range=log_scale_range,
         noise_std=noise_std,
+        tool_mesh_contract=tool_mesh_contract,
     )
     return (
         UnicornContactPairDataset(train_files, augment=augment, **common),

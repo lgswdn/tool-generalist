@@ -55,7 +55,11 @@ def main() -> int:
     _log("loading experiment config")
     cfg = load_exp_cfg(args.config)
     _log("loading project paths and resolving artifacts")
-    paths = apply_experiment_path_overrides(cfg, load_project_paths(cfg.paths_yaml))
+    paths = apply_experiment_path_overrides(
+        cfg,
+        load_project_paths(cfg.paths_yaml),
+        stage="contact_gen",
+    )
     artifacts = resolve_artifacts(cfg)
     pretrain_ref = _stage_ref(artifacts, "pretrain")
     _log(f"building runtime config pretrain_dir={pretrain_ref.directory}")
@@ -101,6 +105,7 @@ def main() -> int:
         floor_eps=runtime.floor_eps,
         validation_seed=runtime.validation_seed,
         denoise_target_mode=runtime.denoise_target_mode,
+        tool_mesh_contract=runtime.tool_mesh_contract,
     )
     if len(dataset) == 0:
         raise RuntimeError(f"{args.split} split is empty")
@@ -116,6 +121,7 @@ def main() -> int:
             encoder_channel=runtime.encoder_channel,
             vit_depth=runtime.vit_depth,
             vit_heads=runtime.vit_heads,
+            vit_attention_mode=runtime.vit_attention_mode,
             freeze_encoder=runtime.freeze_encoder,
             cross_attn_heads=runtime.cross_attn_heads,
             cross_attn_layers=runtime.cross_attn_layers,
@@ -147,7 +153,11 @@ def main() -> int:
             sdf_relative_eps=runtime.sdf_relative_eps,
         ).to(device)
         _log("loading checkpoint weights")
-        load_ckpt(str(checkpoint), model)
+        load_ckpt(
+            str(checkpoint),
+            model,
+            expected_vit_attention_mode=runtime.vit_attention_mode,
+        )
         model.eval()
         _log("model ready")
 
@@ -218,6 +228,7 @@ def _make_limited_split_dataset(
     floor_eps: float,
     validation_seed: int,
     denoise_target_mode: str,
+    tool_mesh_contract: str,
 ):
     import random
 
@@ -258,6 +269,7 @@ def _make_limited_split_dataset(
         floor_eps=floor_eps,
         validation_seed=validation_seed,
         denoise_target_mode=denoise_target_mode,
+        tool_mesh_contract=tool_mesh_contract,
     )
 
 

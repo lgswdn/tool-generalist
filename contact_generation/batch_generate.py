@@ -7,7 +7,7 @@ generator is imported only when a pair is actually executed.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 import inspect
 import multiprocessing as mp
 import os
@@ -23,11 +23,11 @@ from configs.config_contact_gen import (
     TOOL_SOURCE_OBJECTS,
     TOOL_SOURCE_SELECTED_TOOLS,
     ContactGenCfg,
-    strip_contact_gen_hash_defaults,
 )
 from configs.config_exp import ExpCfg
 from utils.assets import load_selected_tool_ids, load_tool_asset
 from utils.contact.paths import ContactPaths
+from utils.config.hash_payloads import contact_general_payload, contact_payload
 from utils.config.paths import ProjectPaths
 from utils.io import hash_json, read_json, to_plain_data
 
@@ -77,10 +77,92 @@ def run_contact_generation(
     artifact_dir: str | Path,
 ) -> ContactGenerationResult:
     try:
-        return _run_contact_generation(exp_cfg, paths, artifact_dir)
+        result = _run_contact_generation(exp_cfg, paths, artifact_dir)
+        if exp_cfg.contact_gen.require_complete:
+            completed = int(result.ok) + int(result.skipped)
+            if int(result.fail) != 0 or completed != int(result.total):
+                raise RuntimeError(
+                    "Strict contact generation did not produce the complete "
+                    "matched dataset: "
+                    f"completed={completed} required={result.total} "
+                    f"failed={result.fail}."
+                )
+            if exp_cfg.contact_gen.geometry_only:
+                _assert_complete_geometry_dataset(
+                    result,
+                    exp_cfg.contact_gen,
+                )
+        return result
     except KeyboardInterrupt:
         _log("[INTERRUPT] contact generation interrupted")
         raise
+
+
+def _assert_complete_geometry_dataset(
+    result: ContactGenerationResult,
+    contact_cfg: ContactGenCfg,
+) -> None:
+    """Audit every candidate manifest before allowing pretraining to start."""
+
+    manifests = sorted(
+        result.artifact_dir.rglob("*.candidate.manifest.json")
+    )
+    if len(manifests) != int(result.total):
+        raise RuntimeError(
+            "Strict geometry dataset manifest count mismatch: "
+            f"found={len(manifests)} required={result.total} "
+            f"artifact_dir={result.artifact_dir}"
+        )
+    total_candidates = 0
+    expected_label_shape = [int(contact_cfg.B), int(contact_cfg.num_surface_pts)]
+    for path in manifests:
+        manifest = read_json(path)
+        candidate_count = int(manifest.get("num_candidates", -1))
+        if candidate_count != int(contact_cfg.B):
+            raise RuntimeError(
+                "Strict geometry candidate count mismatch: "
+                f"path={path} found={candidate_count} "
+                f"required={contact_cfg.B}"
+            )
+        total_candidates += candidate_count
+        if contact_cfg.precompute_convex_union_labels:
+            if manifest.get("precomputed_convex_union_labels") is not True:
+                raise RuntimeError(
+                    "Strict geometry candidate lacks convex-union labels: "
+                    f"{path}"
+                )
+            for key in (
+                "tool_point_label_shape",
+                "object_point_label_shape",
+            ):
+                if manifest.get(key) != expected_label_shape:
+                    raise RuntimeError(
+                        "Strict geometry candidate label shape mismatch: "
+                        f"path={path} key={key} found={manifest.get(key)} "
+                        f"required={expected_label_shape}"
+                    )
+        if contact_cfg.precompute_mesh_sdf:
+            if manifest.get("precomputed_mesh_sdf") is not True:
+                raise RuntimeError(
+                    "Strict geometry candidate lacks precomputed mesh SDF: "
+                    f"{path}"
+                )
+            for key in (
+                "tool_point_sdf_shape",
+                "object_point_sdf_shape",
+            ):
+                if manifest.get(key) != expected_label_shape:
+                    raise RuntimeError(
+                        "Strict geometry candidate SDF shape mismatch: "
+                        f"path={path} key={key} found={manifest.get(key)} "
+                        f"required={expected_label_shape}"
+                    )
+    expected_candidates = int(result.total) * int(contact_cfg.B)
+    if total_candidates != expected_candidates:
+        raise RuntimeError(
+            "Strict geometry dataset candidate total mismatch: "
+            f"found={total_candidates} required={expected_candidates}"
+        )
 
 
 def _run_contact_generation(
@@ -116,7 +198,12 @@ def _run_contact_generation(
         contact_cfg=contact_cfg,
     )
     _log(f"[PAIR] available pairs={len(pairs)}")
-    selected_pairs_all = sample_pairs(pairs, contact_cfg.num_pairs, exp_cfg.general.seed)
+    selected_pairs_all = sample_pairs(
+        pairs,
+        contact_cfg.num_pairs,
+        exp_cfg.general.seed,
+        balanced_tool_pairs=bool(contact_cfg.balanced_tool_pairs),
+    )
     selected_pairs = shard_items(
         selected_pairs_all,
         shard_count=int(contact_cfg.shard_count),
@@ -156,6 +243,7 @@ def _run_contact_generation(
         out_dir,
         contact_cfg.num_object_poses,
         max_workers=existence_workers,
+        geometry_only=bool(contact_cfg.geometry_only),
     )
     total_outputs = len(selected_pairs) * int(contact_cfg.num_object_poses)
     if skip_existing and total_outputs > 0 and existing_final_outputs == total_outputs:
@@ -233,6 +321,25 @@ def _run_contact_generation(
         "[PHASE-DONE] geometry "
         f"ready={geometry_ok} fail={geometry_fail}"
     )
+
+    if contact_cfg.geometry_only:
+        result = ContactGenerationResult(
+            artifact_dir=out_dir,
+            num_pairs=len(selected_pairs),
+            num_poses=contact_cfg.num_object_poses,
+            ok=geometry_ok,
+            fail=geometry_fail,
+            skipped=_geometry_skipped,
+            shard_index=int(contact_cfg.shard_index),
+            shard_count=int(contact_cfg.shard_count),
+            global_num_pairs=len(selected_pairs_all),
+        )
+        _log(
+            "[DONE] geometry-only contact generation "
+            f"ok={result.ok} fail={result.fail} skipped={result.skipped} "
+            f"artifact_dir={result.artifact_dir}; stabilization=disabled postcontact=disabled"
+        )
+        return result
 
     _log("[PHASE] contact stabilization")
     stabilize_ok, stabilize_fail, _stabilize_skipped = _run_worker_pool(
@@ -576,15 +683,10 @@ def contact_paths_from_project_paths(
 
 
 def contact_config_hash(exp_cfg: ExpCfg) -> str:
-    contact_payload = to_plain_data(exp_cfg.contact_gen)
-    physics = dict(contact_payload.get("physics") or {})
-    physics.pop("num_workers", None)
-    contact_payload["physics"] = physics
-    contact_payload = strip_contact_gen_hash_defaults(contact_payload)
     return hash_json(
         {
-            "general": asdict(exp_cfg.general),
-            "contact_gen": contact_payload,
+            "general": contact_general_payload(exp_cfg),
+            "contact_gen": contact_payload(exp_cfg.contact_gen),
         }
     )
 
@@ -668,6 +770,40 @@ class _SelectedToolPairCatalog:
                 continue
             seen.add((object_index, tool_index))
             selected.append(self._pair(self.tools[tool_index], self.objects[object_index]))
+        return selected
+
+    def sample_balanced_tools(self, num_pairs: int, seed: int):
+        """Sample unique pairs with exactly equal representation per tool."""
+
+        total = len(self)
+        if total <= 0:
+            return []
+        if num_pairs <= 0 or num_pairs >= total:
+            return self.sample(num_pairs, seed)
+        if num_pairs % len(self.tools) != 0:
+            raise ValueError(
+                "Balanced selected-tool sampling requires num_pairs to be "
+                f"divisible by the tool count: num_pairs={num_pairs} "
+                f"tools={len(self.tools)}"
+            )
+        pairs_per_tool = num_pairs // len(self.tools)
+        if pairs_per_tool > len(self.objects):
+            raise ValueError(
+                "Balanced selected-tool sampling cannot select enough unique "
+                f"objects per tool: requested={pairs_per_tool} "
+                f"objects={len(self.objects)}"
+            )
+
+        selected = []
+        for tool_index, tool in enumerate(self.tools):
+            rng = random.Random(int(seed) + tool_index * 1_000_003)
+            object_indices = rng.sample(range(len(self.objects)), pairs_per_tool)
+            selected.extend(
+                self._pair(tool, self.objects[object_index])
+                for object_index in object_indices
+            )
+        # Keep worker assignment independent of catalog order.
+        random.Random(int(seed) + 97).shuffle(selected)
         return selected
 
     def _iter_pairs(self):
@@ -863,7 +999,13 @@ def _mesh_records_from_manifest(entries, obj_mesh_dir) -> tuple[list[_MeshRecord
     return records, missing
 
 
-def sample_pairs(pairs, num_pairs, seed):
+def sample_pairs(pairs, num_pairs, seed, *, balanced_tool_pairs: bool = False):
+    if balanced_tool_pairs:
+        if not hasattr(pairs, "sample_balanced_tools"):
+            raise ValueError(
+                "balanced_tool_pairs is only supported for selected-tool catalogs"
+            )
+        return pairs.sample_balanced_tools(num_pairs, seed)
     if hasattr(pairs, "sample"):
         return pairs.sample(num_pairs, seed)
     rng = random.Random(seed)
@@ -903,23 +1045,48 @@ def existing_output_check_workers(exp_cfg: ExpCfg) -> int:
     return min(32, max(1, cpu_count))
 
 
-def count_existing_final_outputs(pairs_subset, out_dir, num_poses, *, max_workers: int = 1) -> int:
+def count_existing_final_outputs(
+    pairs_subset,
+    out_dir,
+    num_poses,
+    *,
+    max_workers: int = 1,
+    geometry_only: bool = False,
+) -> int:
     expected = []
     for _tool_path, _obj_path, tool_name, obj_name, _tool_asset in pairs_subset:
         for pose_idx in range(int(num_poses)):
-            expected.append(output_path(out_dir, tool_name, obj_name, pose_idx, num_poses))
+            path = output_path(out_dir, tool_name, obj_name, pose_idx, num_poses)
+            expected.append(path)
     if not expected:
         return 0
     max_workers = max(1, min(int(max_workers), len(expected)))
+    exists = (
+        geometry_candidate_complete
+        if geometry_only
+        else Path.exists
+    )
     if max_workers == 1:
-        return sum(1 for path in expected if path.exists())
+        return sum(1 for path in expected if exists(path))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        return sum(1 for exists in executor.map(Path.exists, expected) if exists)
+        return sum(1 for present in executor.map(exists, expected) if present)
 
 
 def candidate_artifact_path(output: str | Path) -> Path:
     path = Path(output)
     return path.with_suffix(path.suffix + ".candidate.pt")
+
+
+def candidate_manifest_path(output: str | Path) -> Path:
+    path = Path(output)
+    return path.with_suffix(path.suffix + ".candidate.manifest.json")
+
+
+def geometry_candidate_complete(output: str | Path) -> bool:
+    return (
+        candidate_artifact_path(output).exists()
+        and candidate_manifest_path(output).exists()
+    )
 
 
 def stabilized_artifact_path(output: str | Path) -> Path:
@@ -1013,11 +1180,22 @@ def run_pair(
                 if contact_cfg.tool_source == TOOL_SOURCE_OBJECTS
                 else "adjusted_decomposed_mesh"
             ),
-            use_tool_head_area=contact_cfg.tool_source == TOOL_SOURCE_SELECTED_TOOLS,
+            require_tool_tip_anchor=(
+                bool(contact_cfg.require_tool_tip_anchor)
+                and contact_cfg.tool_source == TOOL_SOURCE_SELECTED_TOOLS
+            ),
             epsilon=contact_cfg.epsilon,
             floor_eps=contact_cfg.floor_eps,
             penetration_eps=contact_cfg.penetration_eps,
-            contact_mode_prob=dict(contact_cfg.contact_mode_prob),
+            penetration_check_mode=contact_cfg.penetration_check_mode,
+            contact_geometry_mode=contact_cfg.contact_geometry_mode,
+            rejection_refill=contact_cfg.rejection_refill,
+            rejection_max_rounds=contact_cfg.rejection_max_rounds,
+            tangent_translation_noise_std=contact_cfg.tangent_translation_noise_std,
+            tangent_rotation_noise_std_rad=contact_cfg.tangent_rotation_noise_std_rad,
+            rejection_apply_tangent_gaussian=contact_cfg.rejection_apply_tangent_gaussian,
+            precompute_convex_union_labels=contact_cfg.precompute_convex_union_labels,
+            precompute_mesh_sdf=contact_cfg.precompute_mesh_sdf,
             debug_dir=debug_dir,
             visualization_video_dir=visualization_video_dir,
             visualization_picture_dir=visualization_picture_dir,
@@ -1112,7 +1290,7 @@ def worker(
         for job in _progress(jobs, total=len(jobs), desc=f"gpu{gpu} geometry", position=int(gpu)):
             tool_path, obj_path, tool_name, obj_name, pose_idx, pose_seed = job
             pt = output_path(out_dir, tool_name, obj_name, pose_idx, num_poses)
-            if skip_existing and candidate_artifact_path(pt).exists():
+            if skip_existing and geometry_candidate_complete(pt):
                 _log(f"[GEOMETRY-SKIP] gpu={gpu} candidate={candidate_artifact_path(pt)}")
                 geometry_ready.append(job)
                 continue
@@ -1323,7 +1501,7 @@ def _phase_existing_action(phase: str, pt: Path, skip_existing: bool) -> tuple[s
     if phase == "geometry":
         if skip_existing and pt.exists():
             return "skipped", f"[GEOMETRY-SKIP] final_output={pt}"
-        if skip_existing and candidate_artifact_path(pt).exists():
+        if skip_existing and geometry_candidate_complete(pt):
             return "ok", f"[GEOMETRY-SKIP] candidate={candidate_artifact_path(pt)}"
         return "run", ""
     if phase == "stabilize":
@@ -1383,14 +1561,6 @@ def _torch_cuda_device_count() -> int | None:
         return int(torch.cuda.device_count())
     except Exception:
         return None
-
-
-def head_contact_probability(contact_cfg: ContactGenCfg) -> float:
-    weights = contact_cfg.contact_mode_prob
-    total = sum(float(value) for value in weights.values())
-    if total <= 0:
-        return 0.0
-    return float(weights.get("head", 0.0)) / total
 
 
 def _load_generator_api(phase: str = "postcontact") -> GeneratorApi:

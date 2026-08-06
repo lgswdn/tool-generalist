@@ -113,7 +113,11 @@ def _load_runtime_from_config(config_path: str):
     from utils.experiment.effective_paths import apply_experiment_path_overrides
 
     cfg = load_exp_cfg(config_path)
-    paths = apply_experiment_path_overrides(cfg, load_project_paths(cfg.paths_yaml))
+    paths = apply_experiment_path_overrides(
+        cfg,
+        load_project_paths(cfg.paths_yaml),
+        stage="contact_gen",
+    )
     artifacts = resolve_artifacts(cfg)
     pretrain_ref = _stage_ref(artifacts, "pretrain")
     return build_runtime_config(cfg, paths, pretrain_ref.directory)
@@ -133,6 +137,7 @@ def _dataset_kwargs(runtime) -> dict[str, Any]:
         "floor_eps": runtime.floor_eps,
         "validation_seed": runtime.validation_seed,
         "denoise_target_mode": runtime.denoise_target_mode,
+        "tool_mesh_contract": runtime.tool_mesh_contract,
     }
 
 

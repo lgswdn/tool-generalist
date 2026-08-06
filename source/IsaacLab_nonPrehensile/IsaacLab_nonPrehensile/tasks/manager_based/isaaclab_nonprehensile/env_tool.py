@@ -8,8 +8,10 @@ import os
 import json
 import yaml
 import torch
+import xml.etree.ElementTree as ET
 from collections import deque
 import time
+from pathlib import Path
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, DeformableObjectCfg, RigidObjectCfg
@@ -41,10 +43,14 @@ from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdF
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 import IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.mdp as mdp
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from utils.assets import (
+    GeneratedGripperAsset,
+    OneDofGripperAsset,
     ToolAssetContractError,
+    load_generated_gripper_manifest,
+    load_one_dof_gripper_manifest,
     load_selected_tool_ids,
     load_tool_adjusted_entry,
     load_tool_head_area,
@@ -54,12 +60,13 @@ from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.cloud imp
 
 _CLOUD_CACHE = {}
 
-# Load path configuration. By default this reads paths.yaml at the project
-# root; set TOOL_GENERALIST_PATHS_YAML to run against an alternate asset config.
-_DEFAULT_PATHS_CFG_FILE = os.path.join(os.path.dirname(__file__), "../" * 6, "paths.yaml")
+# Load path configuration. By default this reads configs/paths/default.yaml;
+# set TOOL_GENERALIST_PATHS_YAML to run against an alternate asset config.
+_DEFAULT_PATHS_CFG_FILE = os.path.join(
+    os.path.dirname(__file__), "../" * 6, "configs/paths/default.yaml"
+)
 _PATHS_CFG_FILE = os.environ.get("TOOL_GENERALIST_PATHS_YAML", _DEFAULT_PATHS_CFG_FILE)
 _PATHS_CFG_FILE = os.path.abspath(os.path.normpath(_PATHS_CFG_FILE))
-print(f"[INFO] Loading path config from {_PATHS_CFG_FILE}")
 with open(_PATHS_CFG_FILE, "r") as _f:
     _PATHS = yaml.safe_load(_f)
 from scipy.spatial.transform import Rotation as R
@@ -71,9 +78,12 @@ from isaaclab.sensors.frame_transformer.frame_transformer_cfg import OffsetCfg
 from isaaclab_tasks.manager_based.manipulation.cabinet.cabinet_env_cfg import FRAME_MARKER_SMALL_CFG
 from utils.experiment.rl_runtime_spec import load_runtime_spec_from_env, runtime_spec_contract
 from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.asset_assignment import (
+    GENERATED_GRIPPER_ASSIGNMENT_SALT,
     OBJECT_ASSIGNMENT_SALT,
+    ONE_DOF_GRIPPER_ASSIGNMENT_SALT,
     TOOL_ASSIGNMENT_SALT,
     asset_indices_for_rank,
+    cross_embodiment_mode_for_rank,
     sequential_spawn_indices_for_rank,
 )
 
@@ -83,22 +93,47 @@ _PHYSICS_OBSERVATION_FIELDS = tuple(_RL_RUNTIME_SPEC["physics_observation_fields
 _ACTION_DIM = int(_RL_RUNTIME_SPEC["action_dim"])
 _OBSERVATION_DIM = int(_RL_RUNTIME_SPEC["observation_dim"])
 _PHYSICS_DIM = int(_RL_RUNTIME_SPEC["physics_dim"])
-_ROBOT_MODE = str(_RL_RUNTIME_SPEC.get("env_params", {}).get("robot_mode", "tool"))
-if _ROBOT_MODE not in {"tool", "bare_franka"}:
-    raise ValueError(f"Unsupported robot_mode: {_ROBOT_MODE!r}")
+_NUM_ENVS_PER_RANK = int(_RL_RUNTIME_SPEC["num_envs"])
+_GLOBAL_RANK = int(os.environ.get("TOOL_GENERALIST_GLOBAL_RANK", "0"))
+_LOCAL_RANK = int(os.environ.get("TOOL_GENERALIST_LOCAL_RANK", "0"))
+_WORLD_SIZE = int(os.environ.get("TOOL_GENERALIST_WORLD_SIZE", "1"))
+_REQUESTED_ROBOT_MODE = str(_RL_RUNTIME_SPEC.get("env_params", {}).get("robot_mode", "tool"))
+_SUPPORTED_ROBOT_MODES = {
+    "tool",
+    "bare_franka",
+    "official_panda_gripper",
+    "generated_gripper",
+    "one_dof_gripper",
+    "cross_embodiment_gripper",
+}
+if _REQUESTED_ROBOT_MODE not in _SUPPORTED_ROBOT_MODES:
+    raise ValueError(f"Unsupported robot_mode: {_REQUESTED_ROBOT_MODE!r}")
+_USE_CROSS_EMBODIMENT_GRIPPER = _REQUESTED_ROBOT_MODE == "cross_embodiment_gripper"
+if _USE_CROSS_EMBODIMENT_GRIPPER:
+    _ROBOT_MODE = cross_embodiment_mode_for_rank(_GLOBAL_RANK, _WORLD_SIZE)
+    print(
+        "[INFO] cross_embodiment_gripper "
+        f"rank={_GLOBAL_RANK}/{_WORLD_SIZE} effective_robot_mode={_ROBOT_MODE}"
+    )
+else:
+    _ROBOT_MODE = _REQUESTED_ROBOT_MODE
 _USE_BARE_FRANKA = _ROBOT_MODE == "bare_franka"
+_USE_OFFICIAL_PANDA_GRIPPER = _ROBOT_MODE == "official_panda_gripper"
+_USE_GENERATED_GRIPPER = _ROBOT_MODE == "generated_gripper"
+_USE_ONE_DOF_GRIPPER = _ROBOT_MODE == "one_dof_gripper"
+_USE_WELDED_TOOL = _ROBOT_MODE == "tool"
+# Franka specifies 50 mm/s travel speed per finger. Experiments that reproduce
+# the historical asset-limit behavior override this explicitly in RLEnvCfg.
+_GENERATED_PARALLEL_FINGER_VELOCITY_LIMIT_M_S = float(
+    _RL_RUNTIME_SPEC["env_params"][
+        "generated_parallel_finger_velocity_limit_m_s"
+    ]
+)
 _ASSET_ASSIGNMENT = _RL_RUNTIME_SPEC["asset_assignment_params"]
 _ASSET_ASSIGNMENT_SEED = int(_ASSET_ASSIGNMENT["seed"])
 _OBJECT_ASSIGNMENT_SEED = int(os.environ.get("TOOL_GENERALIST_OBJECT_ASSIGNMENT_SEED", _ASSET_ASSIGNMENT_SEED))
 _RANDOMIZE_TOOL_ASSIGNMENT = bool(_ASSET_ASSIGNMENT["randomize_tool_assignment"])
 _RANDOMIZE_OBJECT_ASSIGNMENT = bool(_ASSET_ASSIGNMENT["randomize_object_assignment"])
-# Per-rank env count from the runtime spec; the helper derives global ids as
-# global_rank * _NUM_ENVS_PER_RANK + local_env_id.
-_NUM_ENVS_PER_RANK = int(_RL_RUNTIME_SPEC["num_envs"])
-_GLOBAL_RANK = int(os.environ.get("TOOL_GENERALIST_GLOBAL_RANK", "0"))
-_LOCAL_RANK = int(os.environ.get("TOOL_GENERALIST_LOCAL_RANK", "0"))
-_WORLD_SIZE = int(os.environ.get("TOOL_GENERALIST_WORLD_SIZE", "1"))
-
 if _NUM_ENVS_PER_RANK <= 0:
     raise ValueError("RL runtime spec num_envs must be > 0")
 if _OBJECT_ASSIGNMENT_SEED < 0:
@@ -116,7 +151,7 @@ def _dr_event_enabled(term_cfg) -> bool:
 
 
 def _tool_dr_event_enabled(term_cfg) -> bool:
-    return (not _USE_BARE_FRANKA) and _dr_event_enabled(term_cfg)
+    return _USE_WELDED_TOOL and _dr_event_enabled(term_cfg)
 
 
 def _unsupported_event(enabled: bool, name: str):
@@ -148,58 +183,109 @@ def load_object_candidates(
     """
     Load object candidates from a single JSON file.
 
-    The JSON must be a list of strings in the fixed format "<name>-<scale>",
-    for example: "core-bottle-xxxxxxxx-0.060".
+    Supported schemas are either a list of strings in the fixed format
+    "<name>-<scale>" or a list of dictionaries with ``object`` and ``scale``
+    fields. Dictionary entries intentionally ignore all pose-related fields.
 
     - usd_dir / obj_dir: directories used to build file paths as
       "<usd_dir>/<name>.usd" and "<obj_dir>/<name>.obj".
-    - scale: parsed from the numeric suffix of each item and applied as
-      uniform scaling (s, s, s).
+    - Dictionary-entry scales are always applied as uniform scaling (s, s, s).
+    - String-entry scales are applied only when ``use_scale_from_name`` is true;
+      otherwise their historical spawn scale of 0.01 is preserved.
     - The parameter `uniform_scale` is kept only for API compatibility and is not used.
-    - If the JSON is not a list of strings or an entry does not match the
-      expected format, a ValueError is raised.
+    - Mixed schemas, invalid names, non-positive scales, and duplicate objects
+      with conflicting scales are rejected.
     """
     assets: list[sim_utils.UsdFileCfg] = []
-    assets_names = []
+    asset_scales_by_name: dict[str, float] = {}
 
-    # File mode: original behavior
     with open(source_path, "r") as f:
         data = json.load(f)
-    # File mode: enforce fixed format list of strings like "<name>-<scale>"
-    if not (isinstance(data, list) and all(isinstance(x, str) for x in data)):
-        raise ValueError("Expected JSON to be a list of strings '<name>-<scale>'.")
+    if not isinstance(data, list) or not data:
+        raise ValueError("Expected a non-empty JSON list of object candidates.")
     if usd_dir is None or obj_dir is None:
         raise ValueError("usd_dir and obj_dir must be provided.")
 
-    for item in data:
-        if '-' not in item:
-            raise ValueError(f"Invalid item format (expected '<name>-<scale>'): {item}")
-        base, scale_str = item.rsplit('-', 1)
+    string_schema = all(isinstance(item, str) for item in data)
+    dict_schema = all(isinstance(item, Mapping) for item in data)
+    if not string_schema and not dict_schema:
+        raise ValueError(
+            "Object candidates must be uniformly '<name>-<scale>' strings or "
+            "dictionaries containing 'object' and 'scale'."
+        )
 
-        if base in assets_names:
-            print(f"[WARNING] Asset {base} already exists, skipping...")
+    for index, item in enumerate(data):
+        if string_schema:
+            if "-" not in item:
+                raise ValueError(f"Invalid object candidate at index {index}: {item!r}")
+            base, scale_text = item.rsplit("-", 1)
+            try:
+                manifest_scale = float(scale_text)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Invalid object scale at index {index}: {scale_text!r}"
+                ) from exc
+            spawn_scale = manifest_scale if use_scale_from_name else 0.01
+        else:
+            base = item.get("object")
+            manifest_scale = item.get("scale")
+            if not isinstance(base, str) or not base:
+                raise ValueError(
+                    f"Object candidate at index {index} requires a non-empty string 'object'."
+                )
+            if isinstance(manifest_scale, bool) or not isinstance(manifest_scale, (int, float)):
+                raise ValueError(
+                    f"Object candidate at index {index} requires a numeric 'scale'."
+                )
+            manifest_scale = float(manifest_scale)
+            spawn_scale = manifest_scale
+
+        if not math.isfinite(manifest_scale) or manifest_scale <= 0.0:
+            raise ValueError(
+                f"Object candidate at index {index} has invalid scale {manifest_scale!r}."
+            )
+
+        previous_scale = asset_scales_by_name.get(base)
+        if previous_scale is not None:
+            if not math.isclose(previous_scale, manifest_scale, rel_tol=0.0, abs_tol=1e-12):
+                raise ValueError(
+                    f"Object {base!r} has conflicting scales: "
+                    f"{previous_scale} and {manifest_scale}."
+                )
+            print(f"[WARNING] Asset {base} already exists at the same scale, skipping...")
             continue
-        assets_names.append(base)
+        asset_scales_by_name[base] = manifest_scale
 
         usd_path = os.path.join(usd_dir, f"{base}", f"{base}.usd")
         obj_path = os.path.join(obj_dir, f"{base}.obj")
 
-        # Check if USD file exists, skip if not found
         if not os.path.exists(usd_path):
+            if dict_schema:
+                raise FileNotFoundError(
+                    f"Object candidate {base!r} is missing its required USD: {usd_path}"
+                )
             print(f"[WARNING] USD file not found: {usd_path}, skipping...")
             continue
+        if dict_schema and not os.path.exists(obj_path):
+            raise FileNotFoundError(
+                f"Object candidate {base!r} is missing its required OBJ: {obj_path}"
+            )
 
         usd_cfg = sim_utils.UsdFileCfg(
             usd_path=usd_path,
-            scale=(0.01, 0.01, 0.01),
+            scale=(spawn_scale, spawn_scale, spawn_scale),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.3, 0.3)),
             rigid_props=RigidBodyPropertiesCfg(
-                solver_position_iteration_count=16,
-                solver_velocity_iteration_count=1,
+                solver_position_iteration_count=_RL_CONTRACT.env.object_solver_position_iteration_count,
+                solver_velocity_iteration_count=_RL_CONTRACT.env.object_solver_velocity_iteration_count,
                 max_angular_velocity=1000.0,
                 max_linear_velocity=1000.0,
-                max_depenetration_velocity=5.0,
+                max_depenetration_velocity=_RL_CONTRACT.env.max_depenetration_velocity,
                 disable_gravity=False,
+            ),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                contact_offset=_RL_CONTRACT.env.contact_offset,
+                rest_offset=_RL_CONTRACT.env.rest_offset,
             ),
         )
         usd_cfg.obj_path = obj_path
@@ -207,13 +293,50 @@ def load_object_candidates(
     return assets
 
 
-# Helper for point cloud caching, compatible with IsaacLab multi-env
-def get_cached_cloud(obj_path):
-    key = obj_path
+# Helper for geometry/point-cloud caching, compatible with IsaacLab multi-env.
+# Sampled points inside Cloud remain lazy; requesting vertices or stable poses
+# does not load either point-cloud source.
+def get_cached_cloud(
+    obj_path,
+    *,
+    pointcloud_source: str = "mesh_sampled",
+    preprocessed_pointcloud_path: str | Path | None = None,
+    target_num_points: int = 512,
+):
+    key = (
+        str(obj_path),
+        str(pointcloud_source),
+        str(preprocessed_pointcloud_path) if preprocessed_pointcloud_path is not None else None,
+        int(target_num_points),
+    )
     if key not in _CLOUD_CACHE:
-        print(f"[cloud_cache] create key={key}", flush=True)
-        _CLOUD_CACHE[key] = Cloud(obj_path)  # No scale parameter needed
+        _CLOUD_CACHE[key] = Cloud(
+            obj_path,
+            target_num_points=target_num_points,
+            pointcloud_source=pointcloud_source,
+            preprocessed_pointcloud_path=preprocessed_pointcloud_path,
+        )
     return _CLOUD_CACHE[key]
+
+
+def get_cached_object_cloud(obj_path):
+    """Return an object Cloud whose sampled points follow the RL observation config."""
+    source = str(_RL_CONTRACT.observation.object_cloud_source)
+    preprocessed_path = None
+    if source == "preprocessed":
+        pointcloud_dir = Path(
+            _RL_CONTRACT.observation.object_cloud_preprocessed_dir
+        ).expanduser()
+        preprocessed_path = pointcloud_dir / (
+            f"{Path(obj_path).stem}_first_hit_fps_"
+            f"{int(_RL_CONTRACT.observation.num_points)}.npy"
+        )
+    return get_cached_cloud(
+        obj_path,
+        pointcloud_source=source,
+        preprocessed_pointcloud_path=preprocessed_path,
+        target_num_points=int(_RL_CONTRACT.observation.num_points),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -233,9 +356,7 @@ TOOL_USD_PATHS_BY_ENV: list[str] = []
 TOOL_SPAWN_ASSET_INDICES: list[int] = []
 TOOL_USD_PATHS_FOR_SPAWN: list[str] = []
 
-if _USE_BARE_FRANKA:
-    print("[INFO] robot_mode=bare_franka: skipping tool USD/mesh loading")
-else:
+if _USE_WELDED_TOOL:
     _TOOLS_CFG = _PATHS["tools"]
     _TOOL_MESH_ROOT = _TOOLS_CFG.get("meshdata_adjusted_root")
     if not _TOOL_MESH_ROOT:
@@ -275,7 +396,6 @@ else:
             "base_center": _base_center,
         })
 
-    print(f"[INFO] Loaded {len(TOOL_DATA)} tool variants from {_TOOLS_CFG['robots_usd_dir']}")
     if not TOOL_DATA:
         raise RuntimeError(
             "No valid tool variants remain after filtering tools_selected.json. "
@@ -296,20 +416,293 @@ else:
         else sequential_spawn_indices_for_rank(_NUM_ENVS_PER_RANK, _GLOBAL_RANK, len(TOOL_DATA))
     )
     TOOL_USD_PATHS_FOR_SPAWN = [TOOL_USD_PATHS[index] for index in TOOL_SPAWN_ASSET_INDICES]
-    print(
-        f"[INFO] Tool assignment rank={_GLOBAL_RANK}/{_WORLD_SIZE} "
-        f"local_rank={_LOCAL_RANK} envs={_NUM_ENVS_PER_RANK} "
-        f"randomize={_RANDOMIZE_TOOL_ASSIGNMENT}"
-    )
-    print(
-        f"[INFO] Tool spawn prototypes envs={_NUM_ENVS_PER_RANK} "
-        f"spawn_assets={len(TOOL_USD_PATHS_FOR_SPAWN)} "
-        f"total_assets={len(TOOL_USD_PATHS)}"
-    )
 
 # Legacy single-tool aliases (index 0) for backward-compatible imports
 TOOL_OBJ_PATH: str = TOOL_DATA[0]["obj_path"] if TOOL_DATA else ""
 TOOL_HEAD_AREA_NORM = TOOL_DATA[0].get("head_area") if TOOL_DATA else None
+
+
+def _path_relative_to_paths_yaml(value: str) -> Path:
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path
+    return (Path(_PATHS_CFG_FILE).parent / path).resolve()
+
+
+def _generated_gripper_manifest_path() -> Path:
+    section = _PATHS.get("generated_grippers")
+    if not isinstance(section, Mapping):
+        raise RuntimeError(
+            "robot_mode=generated_gripper requires paths.yaml key "
+            "generated_grippers.manifest pointing to an explicit generated-gripper manifest"
+        )
+    value = section.get("manifest")
+    if not isinstance(value, str) or not value.strip():
+        raise RuntimeError(
+            "robot_mode=generated_gripper requires paths.yaml key "
+            "generated_grippers.manifest pointing to an explicit generated-gripper manifest"
+        )
+    return _path_relative_to_paths_yaml(value)
+
+
+def _generated_gripper_root_path() -> Path:
+    section = _PATHS.get("generated_grippers")
+    if not isinstance(section, Mapping):
+        raise RuntimeError(
+            "robot_mode=generated_gripper requires paths.yaml key generated_grippers.root"
+        )
+    value = section.get("root")
+    if not isinstance(value, str) or not value.strip():
+        raise RuntimeError(
+            "robot_mode=generated_gripper requires paths.yaml key generated_grippers.root"
+        )
+    return _path_relative_to_paths_yaml(value)
+
+
+def get_generated_gripper_cloud_cache_dir() -> Path:
+    section = _PATHS.get("generated_grippers")
+    if not isinstance(section, Mapping):
+        raise RuntimeError(
+            "robot_mode=generated_gripper requires paths.yaml section generated_grippers"
+        )
+    value = section.get("cloud_cache_dir")
+    if not isinstance(value, str) or not value.strip():
+        raise RuntimeError(
+            "robot_mode=generated_gripper requires "
+            "generated_grippers.cloud_cache_dir"
+        )
+    path = _path_relative_to_paths_yaml(value)
+    if not path.is_dir():
+        raise FileNotFoundError(
+            f"Generated-gripper cloud cache directory does not exist: {path}"
+        )
+    return path
+
+
+def _one_dof_gripper_path(key: str) -> Path:
+    section = _PATHS.get("one_dof_grippers")
+    if not isinstance(section, Mapping):
+        raise RuntimeError("robot_mode=one_dof_gripper requires paths.yaml section one_dof_grippers")
+    value = section.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise RuntimeError(f"robot_mode=one_dof_gripper requires one_dof_grippers.{key}")
+    return _path_relative_to_paths_yaml(value)
+
+
+def _require_uniform_generated_value(label: str, values: list):
+    if not values:
+        raise RuntimeError(f"No generated gripper metadata available for {label}")
+    first = values[0]
+    if any(value != first for value in values[1:]):
+        raise RuntimeError(
+            f"generated_gripper requires a uniform {label} across manifest entries; "
+            f"got {values!r}"
+        )
+    return first
+
+
+def _generated_gripper_articulation_signature(asset: GeneratedGripperAsset):
+    urdf_path = asset.root_dir / "isaac.urdf"
+    if not urdf_path.is_file():
+        raise RuntimeError(
+            f"generated_gripper asset {asset.gripper_id!r} is missing required URDF: {urdf_path}"
+        )
+    try:
+        root = ET.parse(urdf_path).getroot()
+    except ET.ParseError as exc:
+        raise RuntimeError(
+            f"generated_gripper asset {asset.gripper_id!r} has invalid URDF: {urdf_path}"
+        ) from exc
+
+    links = tuple(link.get("name") for link in root.findall("link"))
+    joints = []
+    for joint in root.findall("joint"):
+        parent = joint.find("parent")
+        child = joint.find("child")
+        joints.append(
+            (
+                joint.get("name"),
+                joint.get("type"),
+                None if parent is None else parent.get("link"),
+                None if child is None else child.get("link"),
+            )
+        )
+    return links, tuple(joints)
+
+
+def _require_generated_usd_current(asset: GeneratedGripperAsset) -> None:
+    urdf_path = asset.root_dir / "isaac.urdf"
+    if not urdf_path.is_file():
+        raise RuntimeError(
+            f"generated_gripper asset {asset.gripper_id!r} is missing required URDF: {urdf_path}"
+        )
+    if not asset.usd_path.is_file():
+        raise RuntimeError(
+            f"generated_gripper asset {asset.gripper_id!r} is missing required USD: {asset.usd_path}"
+        )
+    if asset.usd_path.stat().st_mtime < urdf_path.stat().st_mtime:
+        raise RuntimeError(
+            f"generated_gripper asset {asset.gripper_id!r} has a stale USD converted before "
+            f"its URDF was updated: usd={asset.usd_path}, urdf={urdf_path}. "
+            "Rerun gripper/convert_urdf.py for generated_gripper before launching RL."
+        )
+
+
+def _require_uniform_generated_articulation_topology(
+    assets: list[GeneratedGripperAsset],
+    *,
+    context: str,
+) -> None:
+    if len(assets) <= 1:
+        return
+
+    groups: dict[tuple, list[str]] = {}
+    for asset in assets:
+        _require_generated_usd_current(asset)
+        signature = _generated_gripper_articulation_signature(asset)
+        groups.setdefault(signature, []).append(asset.gripper_id)
+
+    if len(groups) == 1:
+        return
+
+    previews = []
+    for signature, ids in groups.items():
+        links, joints = signature
+        preview_ids = ", ".join(ids[:5])
+        if len(ids) > 5:
+            preview_ids += f", ... ({len(ids)} total)"
+        previews.append(
+            f"ids=[{preview_ids}] links={len(links)} joints={len(joints)}"
+        )
+    raise RuntimeError(
+        "generated_gripper cannot spawn mixed articulation topologies in one IsaacLab "
+        f"Articulation view ({context}). IsaacLab requires a shared PhysX articulation "
+        "metatype; mixing grippers with different link/joint graphs causes "
+        "root_physx_view.shared_metatype to be None. Regenerate the grippers with a "
+        "uniform topology, or use a manifest containing one topology. Groups: "
+        + "; ".join(previews)
+    )
+
+
+GENERATED_GRIPPER_DATA: list[GeneratedGripperAsset] = []
+GENERATED_GRIPPER_USD_PATHS: list[str] = []
+GENERATED_GRIPPER_ASSET_INDICES_BY_ENV: list[int] = []
+GENERATED_GRIPPER_USD_PATHS_BY_ENV: list[str] = []
+GENERATED_GRIPPER_SPAWN_ASSET_INDICES: list[int] = []
+GENERATED_GRIPPER_USD_PATHS_FOR_SPAWN: list[str] = []
+GENERATED_GRIPPER_FINGER_JOINT_NAMES: tuple[str, str] = ("", "")
+GENERATED_GRIPPER_OPEN_JOINT_POS: float = 0.0
+GENERATED_GRIPPER_EE_BODY_NAME: str = ""
+ONE_DOF_GRIPPER_DATA: list[OneDofGripperAsset] = []
+ONE_DOF_GRIPPER_ASSET_INDICES_BY_ENV: list[int] = []
+ONE_DOF_GRIPPER_SPAWN_ASSET_INDICES: list[int] = []
+ONE_DOF_GRIPPER_USD_PATHS_FOR_SPAWN: list[str] = []
+ONE_DOF_GRIPPER_ACTUATED_JOINT_NAMES: tuple[str, ...] = ()
+ONE_DOF_GRIPPER_OPEN_JOINT_POSITIONS: tuple[float, ...] = ()
+ONE_DOF_GRIPPER_CLOSED_JOINT_POSITIONS: tuple[float, ...] = ()
+ONE_DOF_GRIPPER_EE_BODY_NAME: str = ""
+
+if _USE_GENERATED_GRIPPER:
+    _manifest_path = _generated_gripper_manifest_path()
+    GENERATED_GRIPPER_DATA = load_generated_gripper_manifest(
+        _manifest_path,
+        expected_root=_generated_gripper_root_path(),
+    )
+    GENERATED_GRIPPER_USD_PATHS = [str(entry.usd_path) for entry in GENERATED_GRIPPER_DATA]
+    GENERATED_GRIPPER_FINGER_JOINT_NAMES = _require_uniform_generated_value(
+        "finger_joint_names",
+        [entry.finger_joint_names for entry in GENERATED_GRIPPER_DATA],
+    )
+    GENERATED_GRIPPER_OPEN_JOINT_POS = float(
+        _require_uniform_generated_value(
+            "open_joint_pos",
+            [entry.open_joint_pos for entry in GENERATED_GRIPPER_DATA],
+        )
+    )
+    GENERATED_GRIPPER_EE_BODY_NAME = str(
+        _require_uniform_generated_value(
+            "ee_body_name",
+            [entry.ee_body_name for entry in GENERATED_GRIPPER_DATA],
+        )
+    )
+    GENERATED_GRIPPER_ASSET_INDICES_BY_ENV = asset_indices_for_rank(
+        _NUM_ENVS_PER_RANK,
+        _GLOBAL_RANK,
+        len(GENERATED_GRIPPER_DATA),
+        randomize=_RANDOMIZE_TOOL_ASSIGNMENT,
+        seed=_ASSET_ASSIGNMENT_SEED,
+        salt=GENERATED_GRIPPER_ASSIGNMENT_SALT,
+    )
+    GENERATED_GRIPPER_USD_PATHS_BY_ENV = [
+        GENERATED_GRIPPER_USD_PATHS[index] for index in GENERATED_GRIPPER_ASSET_INDICES_BY_ENV
+    ]
+    GENERATED_GRIPPER_SPAWN_ASSET_INDICES = (
+        GENERATED_GRIPPER_ASSET_INDICES_BY_ENV
+        if _RANDOMIZE_TOOL_ASSIGNMENT
+        else sequential_spawn_indices_for_rank(
+            _NUM_ENVS_PER_RANK,
+            _GLOBAL_RANK,
+            len(GENERATED_GRIPPER_DATA),
+        )
+    )
+    GENERATED_GRIPPER_USD_PATHS_FOR_SPAWN = [
+        GENERATED_GRIPPER_USD_PATHS[index] for index in GENERATED_GRIPPER_SPAWN_ASSET_INDICES
+    ]
+    _require_uniform_generated_articulation_topology(
+        [GENERATED_GRIPPER_DATA[index] for index in sorted(set(GENERATED_GRIPPER_SPAWN_ASSET_INDICES))],
+        context=f"rank={_GLOBAL_RANK} envs={_NUM_ENVS_PER_RANK}",
+    )
+
+if _USE_ONE_DOF_GRIPPER:
+    ONE_DOF_GRIPPER_DATA = load_one_dof_gripper_manifest(
+        _one_dof_gripper_path("manifest"),
+        expected_root=_one_dof_gripper_path("root"),
+        require_usd=True,
+    )
+    families = {asset.topology_family for asset in ONE_DOF_GRIPPER_DATA}
+    signatures = {asset.topology_signature for asset in ONE_DOF_GRIPPER_DATA}
+    if len(families) != 1 or len(signatures) != 1:
+        raise RuntimeError(
+            "one_dof_gripper requires one homogeneous topology family per Isaac process; "
+            f"families={sorted(families)} topology_count={len(signatures)}"
+        )
+    ONE_DOF_GRIPPER_ACTUATED_JOINT_NAMES = _require_uniform_generated_value(
+        "one_dof_gripper.actuated_joint_names",
+        [asset.actuated_joint_names for asset in ONE_DOF_GRIPPER_DATA],
+    )
+    ONE_DOF_GRIPPER_OPEN_JOINT_POSITIONS = _require_uniform_generated_value(
+        "one_dof_gripper.open_joint_positions",
+        [asset.open_joint_positions for asset in ONE_DOF_GRIPPER_DATA],
+    )
+    ONE_DOF_GRIPPER_CLOSED_JOINT_POSITIONS = _require_uniform_generated_value(
+        "one_dof_gripper.closed_joint_positions",
+        [asset.closed_joint_positions for asset in ONE_DOF_GRIPPER_DATA],
+    )
+    ONE_DOF_GRIPPER_EE_BODY_NAME = _require_uniform_generated_value(
+        "one_dof_gripper.ee_body_name",
+        [asset.ee_body_name for asset in ONE_DOF_GRIPPER_DATA],
+    )
+    ONE_DOF_GRIPPER_ASSET_INDICES_BY_ENV = asset_indices_for_rank(
+        _NUM_ENVS_PER_RANK,
+        _GLOBAL_RANK,
+        len(ONE_DOF_GRIPPER_DATA),
+        randomize=_RANDOMIZE_TOOL_ASSIGNMENT,
+        seed=_ASSET_ASSIGNMENT_SEED,
+        salt=ONE_DOF_GRIPPER_ASSIGNMENT_SALT,
+    )
+    ONE_DOF_GRIPPER_SPAWN_ASSET_INDICES = (
+        ONE_DOF_GRIPPER_ASSET_INDICES_BY_ENV
+        if _RANDOMIZE_TOOL_ASSIGNMENT
+        else sequential_spawn_indices_for_rank(
+            _NUM_ENVS_PER_RANK,
+            _GLOBAL_RANK,
+            len(ONE_DOF_GRIPPER_DATA),
+        )
+    )
+    ONE_DOF_GRIPPER_USD_PATHS_FOR_SPAWN = [
+        str(ONE_DOF_GRIPPER_DATA[index].usd_path)
+        for index in ONE_DOF_GRIPPER_SPAWN_ASSET_INDICES
+    ]
 
 
 def _assigned_index_for_env(env_id: int, assignment: list[int], label: str) -> int:
@@ -336,6 +729,24 @@ def get_tool_data_for_env(env_id: int) -> dict:
     return TOOL_DATA[get_tool_index_for_env(env_id)]
 
 
+def get_generated_gripper_index_for_env(env_id: int) -> int:
+    """Return the generated gripper index assigned to a local env."""
+    return _assigned_index_for_env(env_id, GENERATED_GRIPPER_ASSET_INDICES_BY_ENV, "generated gripper")
+
+
+def get_generated_gripper_data_for_env(env_id: int) -> GeneratedGripperAsset:
+    """Return per-gripper metadata for the given env_id."""
+    return GENERATED_GRIPPER_DATA[get_generated_gripper_index_for_env(env_id)]
+
+
+def get_one_dof_gripper_index_for_env(env_id: int) -> int:
+    return _assigned_index_for_env(env_id, ONE_DOF_GRIPPER_ASSET_INDICES_BY_ENV, "one-DoF gripper")
+
+
+def get_one_dof_gripper_data_for_env(env_id: int) -> OneDofGripperAsset:
+    return ONE_DOF_GRIPPER_DATA[get_one_dof_gripper_index_for_env(env_id)]
+
+
 OBJECT_ASSET_CFGS: list[sim_utils.UsdFileCfg] = load_object_candidates(
     _PATHS["dgn"]["candidates_json"],
     usd_dir=_PATHS["dgn"]["usd_dir"],
@@ -360,16 +771,6 @@ OBJECT_SPAWN_ASSET_INDICES: list[int] = (
 OBJECT_ASSET_CFGS_FOR_SPAWN: list[sim_utils.UsdFileCfg] = [
     OBJECT_ASSET_CFGS[index] for index in OBJECT_SPAWN_ASSET_INDICES
 ]
-print(
-    f"[INFO] Object assignment rank={_GLOBAL_RANK}/{_WORLD_SIZE} "
-    f"local_rank={_LOCAL_RANK} envs={_NUM_ENVS_PER_RANK} "
-    f"randomize={_RANDOMIZE_OBJECT_ASSIGNMENT} seed={_OBJECT_ASSIGNMENT_SEED}"
-)
-print(
-    f"[INFO] Object spawn prototypes envs={_NUM_ENVS_PER_RANK} "
-    f"spawn_assets={len(OBJECT_ASSET_CFGS_FOR_SPAWN)} "
-    f"total_assets={len(OBJECT_ASSET_CFGS)}"
-)
 
 
 def get_object_index_for_env(env_id: int) -> int:
@@ -400,7 +801,30 @@ custom_joint_init = {
     "panda_joint6": _joint_init_mid[5],
     "panda_joint7": _joint_init_mid[6],
 }
-bare_franka_path = os.path.abspath(_PATHS["robot"]["franka_usd"])
+official_panda_gripper_joint_init = custom_joint_init.copy()
+official_panda_gripper_joint_init.update(
+    {
+        "panda_finger_joint1": 0.04,
+        "panda_finger_joint2": 0.04,
+    }
+)
+generated_gripper_joint_init = custom_joint_init.copy()
+if _USE_GENERATED_GRIPPER:
+    generated_gripper_joint_init.update(
+        {
+            GENERATED_GRIPPER_FINGER_JOINT_NAMES[0]: GENERATED_GRIPPER_OPEN_JOINT_POS,
+            GENERATED_GRIPPER_FINGER_JOINT_NAMES[1]: GENERATED_GRIPPER_OPEN_JOINT_POS,
+        }
+    )
+one_dof_gripper_joint_init = custom_joint_init.copy()
+if _USE_ONE_DOF_GRIPPER:
+    one_dof_gripper_joint_init.update(
+        dict(zip(ONE_DOF_GRIPPER_ACTUATED_JOINT_NAMES, ONE_DOF_GRIPPER_OPEN_JOINT_POSITIONS))
+    )
+_bare_franka_usd = _PATHS.get("robot", {}).get("franka_usd", "")
+bare_franka_path = os.path.abspath(_bare_franka_usd) if _bare_franka_usd else ""
+if _USE_BARE_FRANKA and not bare_franka_path:
+    raise ValueError("paths.yaml must define robot.franka_usd when robot_mode=bare_franka")
 if _USE_BARE_FRANKA and not os.path.isfile(bare_franka_path):
     print(
         f"[WARNING] Bare Franka USD not found at {bare_franka_path}; "
@@ -411,27 +835,129 @@ arm_only_actuators = {
     for actuator_name, actuator_config in FRANKA_PANDA_HIGH_PD_CFG.actuators.items() 
     if "hand" not in actuator_name and "finger" not in actuator_name
 }
+if _USE_OFFICIAL_PANDA_GRIPPER:
+    _official_tools_cfg = _PATHS.get("tools")
+    if not isinstance(_official_tools_cfg, Mapping) or not _official_tools_cfg.get("robots_usd_dir"):
+        raise ValueError(
+            "paths.yaml must define tools.robots_usd_dir when robot_mode=official_panda_gripper"
+        )
+    OFFICIAL_PANDA_GRIPPER_PROPS_DIR = os.path.abspath(
+        os.path.join(_official_tools_cfg["robots_usd_dir"], "Props")
+    )
+else:
+    OFFICIAL_PANDA_GRIPPER_PROPS_DIR = ""
 
-EE_TARGET_PRIM_PATH = (
-    "{ENV_REGEX_NS}/Robot/panda_hand"
-    if _USE_BARE_FRANKA
-    else "{ENV_REGEX_NS}/Robot/tool_mount/link_coacd_convex_piece_0"
-)
-EE_TARGET_NAME = "ee_hand" if _USE_BARE_FRANKA else "ee_tool"
+if _USE_WELDED_TOOL:
+    EE_TARGET_PRIM_PATH = "{ENV_REGEX_NS}/Robot/tool_mount/link_coacd_convex_piece_0"
+    EE_TARGET_NAME = "ee_tool"
+elif _USE_GENERATED_GRIPPER:
+    if not GENERATED_GRIPPER_EE_BODY_NAME:
+        raise RuntimeError("generated_gripper metadata must provide a non-empty ee_body_name")
+    EE_TARGET_PRIM_PATH = f"{{ENV_REGEX_NS}}/Robot/{GENERATED_GRIPPER_EE_BODY_NAME}"
+    EE_TARGET_NAME = "ee_generated_gripper"
+elif _USE_ONE_DOF_GRIPPER:
+    EE_TARGET_PRIM_PATH = f"{{ENV_REGEX_NS}}/Robot/{ONE_DOF_GRIPPER_EE_BODY_NAME}"
+    EE_TARGET_NAME = "ee_one_dof_gripper"
+else:
+    EE_TARGET_PRIM_PATH = "{ENV_REGEX_NS}/Robot/panda_hand"
+    EE_TARGET_NAME = "ee_hand"
+
+
+def _build_gripper_robot_cfg(
+    usd_paths: list[str], joint_names: Sequence[str], *, mode_name: str
+) -> ArticulationCfg:
+    """Build generated and one-DoF grippers from exactly the same runtime baseline."""
+    if not usd_paths:
+        raise RuntimeError(f"{mode_name} requires at least one robot USD path")
+    robot_cfg = FRANKA_PANDA_HIGH_PD_CFG.copy()
+    base_spawn = robot_cfg.spawn
+    robot_cfg.spawn = sim_utils.MultiUsdFileCfg(
+        usd_path=usd_paths,
+        random_choice=False,
+        activate_contact_sensors=base_spawn.activate_contact_sensors,
+        rigid_props=base_spawn.rigid_props,
+        articulation_props=base_spawn.articulation_props,
+        collision_props=base_spawn.collision_props,
+        mass_props=base_spawn.mass_props,
+        visual_material=base_spawn.visual_material,
+        semantic_tags=base_spawn.semantic_tags,
+    )
+    robot_cfg.spawn.rigid_props.disable_gravity = True
+    robot_cfg.actuators["panda_hand"].joint_names_expr = list(joint_names)
+    return robot_cfg
+
+
+def build_generated_gripper_robot_cfg(usd_paths: list[str]) -> ArticulationCfg:
+    robot_cfg = _build_gripper_robot_cfg(
+        usd_paths,
+        GENERATED_GRIPPER_FINGER_JOINT_NAMES,
+        mode_name="generated_gripper",
+    )
+    robot_cfg.actuators["panda_hand"].velocity_limit_sim = (
+        _GENERATED_PARALLEL_FINGER_VELOCITY_LIMIT_M_S
+    )
+    return robot_cfg
+
+
+def build_one_dof_gripper_robot_cfg(usd_paths: list[str]) -> ArticulationCfg:
+    robot_cfg = _build_gripper_robot_cfg(
+        usd_paths,
+        ONE_DOF_GRIPPER_ACTUATED_JOINT_NAMES,
+        mode_name="one_dof_gripper",
+    )
+    # Keep the arm identical to generated_gripper, while allowing each official
+    # mechanism to carry conservative drive tuning in its reviewed manifest.
+    actuator_specs = {asset.actuator for asset in ONE_DOF_GRIPPER_DATA}
+    if len(actuator_specs) != 1:
+        raise RuntimeError(
+            "one_dof_gripper requires one actuator specification per Isaac process; "
+            f"found {len(actuator_specs)}"
+        )
+    actuator_spec = next(iter(actuator_specs))
+    hand_actuator = robot_cfg.actuators["panda_hand"]
+    hand_actuator.effort_limit_sim = actuator_spec.effort_limit
+    hand_actuator.stiffness = actuator_spec.stiffness
+    hand_actuator.damping = actuator_spec.damping
+    hand_actuator.armature = actuator_spec.armature
+    hand_actuator.velocity_limit_sim = actuator_spec.velocity_limit
+    return robot_cfg
 
 
 def make_robot_cfg() -> ArticulationCfg:
-    if _USE_BARE_FRANKA:
+    if _USE_ONE_DOF_GRIPPER:
+        robot_cfg = build_one_dof_gripper_robot_cfg(ONE_DOF_GRIPPER_USD_PATHS_FOR_SPAWN)
+    elif _USE_GENERATED_GRIPPER:
+        robot_cfg = build_generated_gripper_robot_cfg(GENERATED_GRIPPER_USD_PATHS_FOR_SPAWN)
+    elif _USE_BARE_FRANKA or _USE_OFFICIAL_PANDA_GRIPPER:
         robot_cfg = FRANKA_PANDA_HIGH_PD_CFG.copy()
-        if os.path.isfile(bare_franka_path):
+        if _USE_BARE_FRANKA and os.path.isfile(bare_franka_path):
             robot_cfg.spawn.usd_path = bare_franka_path
         robot_cfg.spawn.rigid_props.disable_gravity = True
     else:
         robot_cfg = build_multi_tool_robot_cfg(TOOL_USD_PATHS_FOR_SPAWN, random_choice=False)
 
+    robot_cfg.spawn.rigid_props.max_depenetration_velocity = _RL_CONTRACT.env.max_depenetration_velocity
+    robot_cfg.spawn.articulation_props.solver_position_iteration_count = (
+        _RL_CONTRACT.env.articulation_solver_position_iteration_count
+    )
+    robot_cfg.spawn.articulation_props.solver_velocity_iteration_count = (
+        _RL_CONTRACT.env.articulation_solver_velocity_iteration_count
+    )
+    robot_cfg.spawn.collision_props = sim_utils.CollisionPropertiesCfg(
+        contact_offset=_RL_CONTRACT.env.contact_offset,
+        rest_offset=_RL_CONTRACT.env.rest_offset,
+    )
     return robot_cfg.replace(
         prim_path="{ENV_REGEX_NS}/Robot",
-        init_state=ArticulationCfg.InitialStateCfg(joint_pos=custom_joint_init),
+        init_state=ArticulationCfg.InitialStateCfg(
+            joint_pos=official_panda_gripper_joint_init
+            if _USE_OFFICIAL_PANDA_GRIPPER
+            else generated_gripper_joint_init
+            if _USE_GENERATED_GRIPPER
+            else one_dof_gripper_joint_init
+            if _USE_ONE_DOF_GRIPPER
+            else custom_joint_init
+        ),
     )
 
 
@@ -469,7 +995,10 @@ class NonPrehensileSceneCfg(InteractiveSceneCfg):
                     disable_gravity=True,
                     kinematic_enabled=True,
                 ),
-                collision_props=sim_utils.CollisionPropertiesCfg(),
+                collision_props=sim_utils.CollisionPropertiesCfg(
+                    contact_offset=_RL_CONTRACT.env.contact_offset,
+                    rest_offset=_RL_CONTRACT.env.rest_offset,
+                ),
                 physics_material=sim_utils.RigidBodyMaterialCfg(
                     static_friction=_RL_CONTRACT.table.material.static_friction,
                     dynamic_friction=_RL_CONTRACT.table.material.dynamic_friction,
@@ -506,12 +1035,16 @@ class NonPrehensileSceneCfg(InteractiveSceneCfg):
             assets_cfg=OBJECT_ASSET_CFGS_FOR_SPAWN,
             random_choice=False,
             rigid_props=RigidBodyPropertiesCfg(
-                solver_position_iteration_count=16,
-                solver_velocity_iteration_count=1,
+                solver_position_iteration_count=_RL_CONTRACT.env.object_solver_position_iteration_count,
+                solver_velocity_iteration_count=_RL_CONTRACT.env.object_solver_velocity_iteration_count,
                 max_angular_velocity=1000.0,
                 max_linear_velocity=1000.0,
-                max_depenetration_velocity=5.0,
+                max_depenetration_velocity=_RL_CONTRACT.env.max_depenetration_velocity,
                 disable_gravity=False,
+            ),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                contact_offset=_RL_CONTRACT.env.contact_offset,
+                rest_offset=_RL_CONTRACT.env.rest_offset,
             ),
         ),
     )
@@ -544,7 +1077,8 @@ class CommandsCfg:
     """Command terms for the MDP."""
     target_object_pose = mdp.StablePoseCommandCfg(
         resampling_time_range=(1e9, 1e9),
-        debug_vis=True,  # Visualize target pose
+        # Video/interactive preference; the training launcher overrides it off.
+        debug_vis=True,
         xy_offset_range=_RL_CONTRACT.object_pose_sampling.xy_offset_range,
         initial_position_range=_RL_CONTRACT.object_pose_sampling.initial_position_range,
     )
@@ -560,6 +1094,76 @@ class RelativeJointPositionActionsCfg:
         use_zero_offset=True,
     )
 
+
+@configclass
+class OfficialPandaGripperActionsCfg:
+    """7D arm delta action plus 1D symmetric Panda gripper openness."""
+
+    arm_action = RelativeJointPositionActionCfg(
+        asset_name="robot",
+        joint_names=["panda_joint.*"],
+        scale=_RL_CONTRACT.action.scale,
+        use_zero_offset=True,
+    )
+    gripper_action = mdp.SymmetricPandaGripperActionCfg(
+        asset_name="robot",
+        joint_names=["panda_finger_joint.*"],
+        closed_joint_pos=0.0,
+        open_joint_pos=0.04,
+        clip=_RL_CONTRACT.action.clip,
+    )
+
+
+@configclass
+class GeneratedGripperActionsCfg:
+    """7D arm delta action plus 1D symmetric generated-gripper openness."""
+
+    arm_action = RelativeJointPositionActionCfg(
+        asset_name="robot",
+        joint_names=["panda_joint.*"],
+        scale=_RL_CONTRACT.action.scale,
+        use_zero_offset=True,
+    )
+    gripper_action = mdp.SymmetricGeneratedGripperActionCfg(
+        asset_name="robot",
+        joint_names=list(GENERATED_GRIPPER_FINGER_JOINT_NAMES),
+        closed_joint_pos=0.0,
+        open_joint_pos=GENERATED_GRIPPER_OPEN_JOINT_POS,
+        clip=_RL_CONTRACT.action.clip,
+        semantic_closure=_USE_CROSS_EMBODIMENT_GRIPPER,
+    )
+
+
+@configclass
+class OneDofGripperActionsCfg:
+    """7D Panda arm delta action plus one embodiment-independent closure command."""
+
+    arm_action = RelativeJointPositionActionCfg(
+        asset_name="robot",
+        joint_names=["panda_joint.*"],
+        scale=_RL_CONTRACT.action.scale,
+        use_zero_offset=True,
+    )
+    gripper_action = mdp.SemanticOneDofGripperActionCfg(
+        asset_name="robot",
+        joint_names=list(ONE_DOF_GRIPPER_ACTUATED_JOINT_NAMES),
+        open_joint_positions=list(ONE_DOF_GRIPPER_OPEN_JOINT_POSITIONS),
+        closed_joint_positions=list(ONE_DOF_GRIPPER_CLOSED_JOINT_POSITIONS),
+        clip=_RL_CONTRACT.action.clip,
+    )
+
+
+ActionsCfg = (
+    OfficialPandaGripperActionsCfg
+    if _USE_OFFICIAL_PANDA_GRIPPER
+    else GeneratedGripperActionsCfg
+    if _USE_GENERATED_GRIPPER
+    else OneDofGripperActionsCfg
+    if _USE_ONE_DOF_GRIPPER
+    else RelativeJointPositionActionsCfg
+)
+
+
 @configclass
 class ObservationsCfg:
     """Observation specifications for the MDP."""
@@ -571,14 +1175,26 @@ class ObservationsCfg:
         # Object Cloud (512*3=1536D: point cloud xyz in env frame)
         object_cloud = ObsTerm(
             func=mdp.get_object_pointcloud_in_env_frame,
-            noise=GaussianNoiseCfg(mean=0.0, std=0.005, operation="add"),
+            noise=(
+                GaussianNoiseCfg(mean=0.0, std=0.005, operation="add")
+                if _RL_CONTRACT.observation.point_cloud_noise_enabled
+                else None
+            ),
         ) if _RL_CONTRACT.observation.include_object_cloud else None
 
         # Tool Cloud (512*3=1536D: tool point cloud xyz in env frame)
         tool_cloud = ObsTerm(
             func=mdp.get_tool_pointcloud_in_env_frame,
-            noise=GaussianNoiseCfg(mean=0.0, std=0.002, operation="add"),
+            noise=(
+                GaussianNoiseCfg(mean=0.0, std=0.002, operation="add")
+                if _RL_CONTRACT.observation.point_cloud_noise_enabled
+                else None
+            ),
         ) if (_RL_CONTRACT.observation.include_tool_cloud and not _USE_BARE_FRANKA) else None
+
+        kinematic_gripper_clouds = ObsTerm(
+            func=mdp.get_generated_gripper_kinematic_state_clouds,
+        ) if _RL_CONTRACT.observation.include_kinematic_gripper_clouds else None
 
         # Object bbox center (3D): MUST come AFTER object_cloud so the cache is populated.
         object_bbox_center = ObsTerm(
@@ -600,7 +1216,7 @@ class ObservationsCfg:
             noise=GaussianNoiseCfg(mean=0.0, std=0.005, operation="add"),
         )
         
-        # Robot State (14D: joint_positions[7] + joint_velocities[7])
+        # Robot State: 14D arm-only or 18D arm+gripper, per robot_mode.
         robot_state = ObsTerm(
             func=mdp.robot_state,
             noise=GaussianNoiseCfg(mean=0.0, std=0.005, operation="add"),
@@ -614,6 +1230,11 @@ class ObservationsCfg:
             func=mdp.rel_pose_goal, params={"command_name": "target_object_pose"},
             noise=GaussianNoiseCfg(mean=0.0, std=0.005, operation="add"),
         )
+
+        task_embedding = ObsTerm(
+            func=mdp.target_pose_task_embedding,
+            params={"command_name": "target_object_pose"},
+        ) if _RL_CONTRACT.observation.task_embedding_dim > 0 else None
 
         # abs_goal = ObsTerm(func=mdp.abs_pose_goal, params={"command_name": "target_object_pose"})
         # cur_pose = ObsTerm(func=mdp.object_pose_9d_in_env_frame)
@@ -653,6 +1274,17 @@ class EventCfg:
             "asset_cfg": SceneEntityCfg("object"),
         },
     ) if _dr_event_enabled(_RL_CONTRACT.domain_randomization.object.scale) else None
+
+    preload_object_pointclouds = EventTerm(
+        func=mdp.preload_object_pointclouds,
+        mode="prestartup",
+        params={
+            "object_cloud_source": _RL_CONTRACT.observation.object_cloud_source,
+            "preprocessed_dir": _RL_CONTRACT.observation.object_cloud_preprocessed_dir,
+            "num_points": _RL_CONTRACT.observation.num_points,
+            "asset_cfg": SceneEntityCfg("object"),
+        },
+    ) if _RL_CONTRACT.observation.include_object_cloud else None
 
     # Tool mass randomization: randomize the mass of the tool body (link_coacd_convex_piece_0)
     randomize_tool_mass = EventTerm(
@@ -807,7 +1439,7 @@ class NonPrehensileEnvCfg(ManagerBasedRLEnvCfg):
     )
     # Basic settings
     observations: ObservationsCfg = ObservationsCfg()
-    actions: RelativeJointPositionActionsCfg = RelativeJointPositionActionsCfg()
+    actions: ActionsCfg = ActionsCfg()
     events: EventCfg = EventCfg()
     commands: CommandsCfg = CommandsCfg()
     curriculum: CurriculumCfg = CurriculumCfg()
@@ -823,7 +1455,13 @@ class NonPrehensileEnvCfg(ManagerBasedRLEnvCfg):
     action_dim: int = _ACTION_DIM
     observation_dim: int = _OBSERVATION_DIM
     physics_dim: int = _PHYSICS_DIM
+    num_points: int = _RL_CONTRACT.observation.num_points
+    object_cloud_source: str = _RL_CONTRACT.observation.object_cloud_source
+    object_cloud_preprocessed_dir: str = (
+        _RL_CONTRACT.observation.object_cloud_preprocessed_dir
+    )
     robot_mode: str = _ROBOT_MODE
+    requested_robot_mode: str = _REQUESTED_ROBOT_MODE
     physics_observation_fields: tuple[str, ...] = _PHYSICS_OBSERVATION_FIELDS
     table_enabled: bool = _RL_CONTRACT.table.enabled
     table_size_xyz: tuple[float, float, float] = tuple(_RL_CONTRACT.table.size_xyz)
@@ -832,10 +1470,14 @@ class NonPrehensileEnvCfg(ManagerBasedRLEnvCfg):
     table_placement_margin_xy: float = _RL_CONTRACT.table.placement_margin_xy
     table_placement_max_attempts: int = _RL_CONTRACT.table.placement_max_attempts
     table_material = _RL_CONTRACT.table.material
-    # Visualization settings
-    visualize_current_object_pose: bool = True  # Enable current object pose visualization
+    # Video/interactive visualization preferences. RL training overrides every
+    # ``visualize_*`` field (and command ``debug_vis``) off before gym.make.
+    visualize_current_object_pose: bool = True
     visualize_object_pointcloud: bool = False  # Enable object point cloud visualization for debug in first env
-    visualize_tool_pointcloud: bool = False if _USE_BARE_FRANKA else True
+    visualize_tool_pointcloud: bool = (
+        bool(_RL_CONTRACT.env.visualize_tool_pointcloud) and not _USE_BARE_FRANKA
+    )
+    visualize_head_area_center: bool = True
     visualize_eef_position: bool = False  # Enable eef tool position visualization
     visualize_object_velocity_mass: bool = False  # Enable 7D object velocity & mass visualization
     visualize_tool_velocity_mass: bool = False  # Enable 7D tool velocity & mass visualization
@@ -885,6 +1527,7 @@ class NonPrehensileEnvCfg(ManagerBasedRLEnvCfg):
         # Physics settings - match reference config
         self.sim.physx.solver_position_iteration_count = _RL_CONTRACT.env.solver_position_iteration_count
         self.sim.physx.solver_velocity_iteration_count = _RL_CONTRACT.env.solver_velocity_iteration_count
+        self.sim.physx.enable_ccd = _RL_CONTRACT.env.enable_ccd
 
 
 class NonPrehensileEnv(ManagerBasedRLEnv):
@@ -922,26 +1565,174 @@ class NonPrehensileEnv(ManagerBasedRLEnv):
         # Sliding window for recent success rate (last 100 episodes)
         self.recent_success_window = deque(maxlen=100)
         self.recent_success_rate = 0.0
+        self.task_recent_success_windows = {}
+        self.task_total_episodes = {}
+        self.task_total_successes = {}
 
         # Global step counter for periodic debug prints
         self._global_step = 0
 
+        self._fine_grained_timing_enabled = bool(
+            getattr(_RL_CONTRACT.launch, "print_fine_grained_timing", False)
+        )
+        self._fine_grained_timing_seconds = {
+            "total": 0.0,
+            "action": 0.0,
+            "recorder": 0.0,
+            "physics": 0.0,
+            "termination": 0.0,
+            "reward": 0.0,
+            "reset": 0.0,
+            "command_events": 0.0,
+            "observation": 0.0,
+            "success_tracking": 0.0,
+        }
+
         # Run post-init setup: physics settings, scale caching, head area offsets
         self.post_reset()
+
+    def reset_fine_grained_timing(self):
+        for key in self._fine_grained_timing_seconds:
+            self._fine_grained_timing_seconds[key] = 0.0
+
+    def _reset_idx(self, env_ids):
+        """Reset environments and refresh only their cached physical parameters."""
+
+        super()._reset_idx(env_ids)
+        mdp.refresh_phys_params_cache(self, env_ids=env_ids)
+
+    def _fine_grained_timing_sync(self):
+        device = torch.device(self.device)
+        if device.type == "cuda" and torch.cuda.is_available():
+            torch.cuda.synchronize(device)
+
+    def _fine_grained_timing_start(self) -> float:
+        self._fine_grained_timing_sync()
+        return time.perf_counter()
+
+    def _fine_grained_timing_stop(self, key: str, start: float):
+        self._fine_grained_timing_sync()
+        self._fine_grained_timing_seconds[key] += time.perf_counter() - start
+
+    def fine_grained_timing_summary(self, iteration: int) -> str:
+        total = self._fine_grained_timing_seconds["total"]
+        keys = (
+            "action",
+            "recorder",
+            "physics",
+            "termination",
+            "reward",
+            "reset",
+            "command_events",
+            "observation",
+            "success_tracking",
+        )
+        accounted = sum(self._fine_grained_timing_seconds[key] for key in keys)
+        unaccounted = max(total - accounted, 0.0)
+        details = " ".join(
+            f"{key}={self._fine_grained_timing_seconds[key]:.3f}s"
+            for key in keys
+        )
+        return (
+            f"[EnvStepTiming][rank {_GLOBAL_RANK}/{_WORLD_SIZE}] iter={iteration} "
+            f"total={total:.3f}s {details} unaccounted={unaccounted:.3f}s"
+        )
+
+    def _timed_manager_step(self, action):
+        timing_start = self._fine_grained_timing_start()
+        self.action_manager.process_action(action.to(self.device))
+        self._fine_grained_timing_stop("action", timing_start)
+
+        timing_start = self._fine_grained_timing_start()
+        self.recorder_manager.record_pre_step()
+        self._fine_grained_timing_stop("recorder", timing_start)
+
+        is_rendering = self.sim.has_gui() or self.sim.has_rtx_sensors()
+        timing_start = self._fine_grained_timing_start()
+        for _ in range(self.cfg.decimation):
+            self._sim_step_counter += 1
+            self.action_manager.apply_action()
+            self.scene.write_data_to_sim()
+            self.sim.step(render=False)
+            if self._sim_step_counter % self.cfg.sim.render_interval == 0 and is_rendering:
+                self.sim.render()
+            self.scene.update(dt=self.physics_dt)
+        self._fine_grained_timing_stop("physics", timing_start)
+
+        self.episode_length_buf += 1
+        self.common_step_counter += 1
+
+        timing_start = self._fine_grained_timing_start()
+        self.reset_buf = self.termination_manager.compute()
+        self.reset_terminated = self.termination_manager.terminated
+        self.reset_time_outs = self.termination_manager.time_outs
+        self._fine_grained_timing_stop("termination", timing_start)
+
+        timing_start = self._fine_grained_timing_start()
+        self.reward_buf = self.reward_manager.compute(dt=self.step_dt)
+        self._fine_grained_timing_stop("reward", timing_start)
+
+        if len(self.recorder_manager.active_terms) > 0:
+            timing_start = self._fine_grained_timing_start()
+            self.obs_buf = self.observation_manager.compute()
+            self.recorder_manager.record_post_step()
+            self._fine_grained_timing_stop("recorder", timing_start)
+
+        timing_start = self._fine_grained_timing_start()
+        reset_env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
+        if len(reset_env_ids) > 0:
+            self.recorder_manager.record_pre_reset(reset_env_ids)
+            self._reset_idx(reset_env_ids)
+            self.scene.write_data_to_sim()
+            self.sim.forward()
+            if self.sim.has_rtx_sensors() and self.cfg.rerender_on_reset:
+                self.sim.render()
+            self.recorder_manager.record_post_reset(reset_env_ids)
+        self._fine_grained_timing_stop("reset", timing_start)
+
+        timing_start = self._fine_grained_timing_start()
+        self.command_manager.compute(dt=self.step_dt)
+        if "interval" in self.event_manager.available_modes:
+            self.event_manager.apply(mode="interval", dt=self.step_dt)
+        self._fine_grained_timing_stop("command_events", timing_start)
+
+        timing_start = self._fine_grained_timing_start()
+        self.obs_buf = self.observation_manager.compute(update_history=True)
+        self._fine_grained_timing_stop("observation", timing_start)
+
+        return self.obs_buf, self.reward_buf, self.reset_terminated, self.reset_time_outs, self.extras
     
     def step(self, action):
         """Override step to track success rates."""
+        total_timing_start = (
+            self._fine_grained_timing_start()
+            if self._fine_grained_timing_enabled
+            else None
+        )
+        success_timing_start = (
+            self._fine_grained_timing_start()
+            if self._fine_grained_timing_enabled
+            else None
+        )
+        command_term = self.command_manager.get_term("target_object_pose")
+        task_index_before_step = getattr(command_term, "target_pose_task_index", None)
+        task_names = tuple(getattr(command_term, "target_pose_task_names", ("stable_pose", "secondary_task")))
+        if task_index_before_step is not None:
+            task_index_before_step = task_index_before_step.clone()
+        if success_timing_start is not None:
+            self._fine_grained_timing_stop("success_tracking", success_timing_start)
+
         # Call parent step method
-        obs, reward, terminated, truncated, info = super().step(action)
+        if self._fine_grained_timing_enabled:
+            obs, reward, terminated, truncated, info = self._timed_manager_step(action)
+        else:
+            obs, reward, terminated, truncated, info = super().step(action)
 
-        # Increment global step and periodically print timers
-        # self._global_step += 1
-        # if self._global_step % 1 == 0:
-        #     from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.mdp.observations import print_obs_timers
-        #     from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.mdp.commands import print_cmd_timers
-        #     print_obs_timers(self)
-        #     print_cmd_timers(self)
-
+        success_timing_start = (
+            self._fine_grained_timing_start()
+            if self._fine_grained_timing_enabled
+            else None
+        )
         success_mask = self.termination_manager.get_term("reached")
         # Update episode success buffer
         self.episode_success_buf = self.episode_success_buf | success_mask
@@ -960,6 +1751,14 @@ class NonPrehensileEnv(ManagerBasedRLEnv):
                 
                 # Add to sliding window for recent success rate
                 self.recent_success_window.append(episode_success)
+                if task_index_before_step is not None:
+                    task_idx = int(task_index_before_step[env_id].item())
+                    task_name = task_names[task_idx] if 0 <= task_idx < len(task_names) else f"task_{task_idx}"
+                    window = self.task_recent_success_windows.setdefault(task_name, deque(maxlen=100))
+                    window.append(episode_success)
+                    self.task_total_episodes[task_name] = self.task_total_episodes.get(task_name, 0) + 1
+                    if episode_success:
+                        self.task_total_successes[task_name] = self.task_total_successes.get(task_name, 0) + 1
             
             # Store success status before reset for external access
             self._episode_success_before_reset = self.episode_success_buf.clone()
@@ -981,6 +1780,20 @@ class NonPrehensileEnv(ManagerBasedRLEnv):
                 if len(self.recent_success_window) > 0:
                     self.recent_success_rate = sum(self.recent_success_window) / len(self.recent_success_window)
                     self.extras["log"]["recent_success_rate"] = self.recent_success_rate
+                for task_name, window in self.task_recent_success_windows.items():
+                    task_episodes = self.task_total_episodes.get(task_name, 0)
+                    if task_episodes <= 0 or len(window) <= 0:
+                        continue
+                    task_successes = self.task_total_successes.get(task_name, 0)
+                    self.extras["log"][f"success_rate/{task_name}"] = task_successes / task_episodes
+                    self.extras["log"][f"recent_success_rate/{task_name}"] = sum(window) / len(window)
+                    self.extras["log"][f"total_episodes/{task_name}"] = task_episodes
+                    self.extras["log"][f"total_successes/{task_name}"] = task_successes
+
+        if success_timing_start is not None:
+            self._fine_grained_timing_stop("success_tracking", success_timing_start)
+        if total_timing_start is not None:
+            self._fine_grained_timing_stop("total", total_timing_start)
 
         return obs, reward, terminated, truncated, info
 
@@ -988,9 +1801,9 @@ class NonPrehensileEnv(ManagerBasedRLEnv):
         # NOTE: _object_scales and _tool_scales removed — scales are now baked into
         # per-env sampled point clouds at init time (in get_object_pointcloud).
 
-        # Compute per-env head area offsets from the fixed fork OBJ + head_area_norm.
-        # Each offset is in the tool's local frame (relative to link_coacd_convex_piece_0 origin).
-        if _USE_BARE_FRANKA:
-            self._head_area_offsets = torch.zeros(self.num_envs, 3, device=self.device)
-        else:
+        # Welded tools use per-tool head-area offsets in the tool body frame.
+        # Franka-only modes use their robot bodies directly for end-effector centers.
+        if _USE_WELDED_TOOL:
             self._head_area_offsets = mdp.compute_head_area_offsets_from_usd(self)
+        else:
+            self._head_area_offsets = torch.zeros(self.num_envs, 3, device=self.device)

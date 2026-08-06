@@ -17,16 +17,13 @@ from utils.artifacts.naming import (
 from utils.artifacts.paths import artifact_root, manifest_path
 from utils.config.hash import config_hash
 from utils.config.hash_payloads import (
-    normalize_artifact_root as _normalize_artifact_root,
-    semantic_contact_general_payload as _semantic_contact_general_payload,
-    semantic_contact_gen_payload as _semantic_contact_gen_payload,
-    semantic_exp_payload as _semantic_exp_payload,
-    semantic_pretrain_model_payload as _semantic_pretrain_model_payload,
-    semantic_pretrain_payload as _semantic_pretrain_payload,
-    strip_contact_runtime_fields as _strip_contact_runtime_fields,
-    strip_default_condition_normalization as _strip_default_condition_normalization,
-    strip_default_sdf_relative_loss as _strip_default_sdf_relative_loss,
-    strip_pretrain_runtime_fields as _strip_pretrain_runtime_fields,
+    contact_general_payload as _contact_general_payload,
+    contact_payload as _contact_payload,
+    experiment_payload as _experiment_payload,
+    general_payload as _general_payload,
+    model_payload as _model_payload,
+    pretrain_artifact_payload as _pretrain_artifact_payload,
+    rl_payload as _rl_payload,
 )
 from utils.experiment.stages import StageSpec, all_stages
 
@@ -65,7 +62,7 @@ def resolve_artifacts(cfg: ExpCfg, *, timestamp: str | None = None) -> ResolvedA
         artifact_name=experiment_name,
         directory=exp_dir,
         manifest_path=manifest_path(exp_dir),
-        config_hash=config_hash(_semantic_exp_payload(cfg)),
+        config_hash=config_hash(_experiment_payload(cfg)),
     )
     stages = tuple(_stage_ref(cfg, stage, timestamp=timestamp) for stage in all_stages(cfg))
     return ResolvedArtifacts(experiment=experiment, stages=stages)
@@ -96,24 +93,18 @@ def _stage_artifact_name_and_payload(
 ) -> tuple[str, object]:
     if stage_name == "contact_gen":
         return contact_artifact_name(cfg), {
-            "general": _semantic_contact_general_payload(cfg),
-            "contact_gen": _semantic_contact_gen_payload(cfg.contact_gen),
+            "general": _contact_general_payload(cfg),
+            "contact_gen": _contact_payload(cfg.contact_gen),
         }
     if stage_name == "pretrain":
-        return encoder_artifact_name(cfg), {
-            "general": cfg.general,
-            "contact_gen": _semantic_contact_gen_payload(cfg.contact_gen),
-            "pretrain": _semantic_pretrain_payload(cfg.pretrain),
-            "model": _semantic_pretrain_model_payload(cfg),
-        }
+        return encoder_artifact_name(cfg), _pretrain_artifact_payload(cfg)
     if stage_name == "rl":
-        contact_payload = _semantic_contact_gen_payload(cfg.contact_gen) if cfg.contact_gen.enabled else None
+        contact_payload = _contact_payload(cfg.contact_gen) if cfg.contact_gen.enabled else None
         return rl_artifact_name(cfg, timestamp), {
-            "general": cfg.general,
+            "general": _general_payload(cfg),
             "contact_gen": contact_payload,
-            "model": cfg.model,
-            "rl": cfg.rl,
-            "timestamp": timestamp,
+            "model": _model_payload(cfg),
+            "rl": _rl_payload(cfg.rl),
         }
     return stage_name, {"stage": stage_name, "config": cfg}
 

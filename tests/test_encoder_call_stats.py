@@ -207,6 +207,12 @@ def test_collect_timing_cache_off_uses_cached_helpers_without_storage_cache():
     assert "encoder=" in summary
     assert "actor_critic=" in summary
     assert "other=" in summary
+    assert "[CollectOtherTiming]" in summary
+    assert "env_step=" in summary
+    assert "transfer_normalize=" in summary
+    assert "process_env_step=" in summary
+    assert "bookkeeping=" in summary
+    assert "unaccounted=" in summary
     assert "%" in summary
 
 

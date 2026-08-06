@@ -6,6 +6,7 @@ pretrain, or RL implementation modules.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import importlib
@@ -21,6 +22,12 @@ from utils.config.hash import to_plain_data
 from utils.config.loader import load_exp_cfg
 from utils.config.paths import ProjectPaths, load_project_paths
 from utils.experiment.effective_paths import apply_experiment_path_overrides
+from utils.experiment.eval_curriculum import (
+    latest_eval_checkpoint,
+    latest_eval_objects_summary,
+    materialize_curriculum_object_manifest,
+    normalize_success_rate_threshold,
+)
 from utils.experiment.validation import validate_for_plan, validate_for_run
 
 
@@ -35,9 +42,27 @@ class ExperimentRun:
     resolved_encoder_checkpoint: str | None = None
 
 
-def run_from_config(config: str | Path) -> ExperimentRun:
+def run_from_config(
+    config: str | Path,
+    *,
+    curriculum_from_eval: bool = False,
+    curriculum_success_rate_threshold: float = 0.5,
+    curriculum_resume_from_eval: bool = True,
+    runtime_num_gpus: int | None = None,
+    runtime_total_envs: int = 8192,
+    runtime_print_fine_grained_timing: bool = False,
+) -> ExperimentRun:
     cfg = load_exp_cfg(config)
-    return run_experiment(cfg, config_source=str(config))
+    return run_experiment(
+        cfg,
+        config_source=str(config),
+        curriculum_from_eval=curriculum_from_eval,
+        curriculum_success_rate_threshold=curriculum_success_rate_threshold,
+        curriculum_resume_from_eval=curriculum_resume_from_eval,
+        runtime_num_gpus=runtime_num_gpus,
+        runtime_total_envs=runtime_total_envs,
+        runtime_print_fine_grained_timing=runtime_print_fine_grained_timing,
+    )
 
 
 def plan_from_config(config: str | Path) -> ExperimentRun:
@@ -58,9 +83,35 @@ def plan_experiment(cfg: ExpCfg, *, config_source: str | None = None) -> Experim
     )
 
 
-def run_experiment(cfg: ExpCfg, *, config_source: str | None = None) -> ExperimentRun:
+def run_experiment(
+    cfg: ExpCfg,
+    *,
+    config_source: str | None = None,
+    curriculum_from_eval: bool = False,
+    curriculum_success_rate_threshold: float = 0.5,
+    curriculum_resume_from_eval: bool = True,
+    runtime_num_gpus: int | None = None,
+    runtime_total_envs: int = 8192,
+    runtime_print_fine_grained_timing: bool = False,
+) -> ExperimentRun:
     _log_event("RUN", f"experiment={cfg.name} config={config_source or '<in-memory>'} mode=run")
-    run = _prepare_experiment(cfg, config_source=config_source, mode="run")
+    if curriculum_from_eval:
+        threshold = normalize_success_rate_threshold(curriculum_success_rate_threshold)
+        _log_event("CURR", f"source=latest_eval_objects threshold={threshold:.4f}")
+    runtime_rl = _runtime_rl_override(runtime_num_gpus, runtime_total_envs)
+    if runtime_rl is not None:
+        _log_event(
+            "RUN",
+            f"runtime_num_gpus={runtime_rl['num_gpus']} "
+            f"runtime_total_envs={runtime_rl['total_envs']} "
+            f"runtime_envs_per_gpu={runtime_rl['num_envs_per_gpu']}",
+        )
+    run = _prepare_experiment(
+        cfg,
+        config_source=config_source,
+        mode="run",
+        runtime_rl=runtime_rl,
+    )
     _log_event("RUN", f"paths_yaml={run.paths.source_yaml}")
     stage_results: dict[str, Any] = {}
     manifests: list[Path] = []
@@ -78,6 +129,7 @@ def run_experiment(cfg: ExpCfg, *, config_source: str | None = None) -> Experime
     )
 
     for ref in run.artifacts.stages:
+        stage_paths = apply_experiment_path_overrides(cfg, run.paths, stage=ref.stage)
         action = _stage_action(cfg, ref)
         if action == "skipped":
             _log_stage("SKIP", ref, action=action)
@@ -87,7 +139,7 @@ def run_experiment(cfg: ExpCfg, *, config_source: str | None = None) -> Experime
                     cfg,
                     ref,
                     config_source,
-                    run.paths,
+                    stage_paths,
                     mode="run",
                     status="skipped",
                     action=action,
@@ -109,7 +161,7 @@ def run_experiment(cfg: ExpCfg, *, config_source: str | None = None) -> Experime
                         cfg,
                         ref,
                         config_source,
-                        run.paths,
+                        stage_paths,
                         mode="run",
                         status="complete",
                         action=action,
@@ -127,7 +179,7 @@ def run_experiment(cfg: ExpCfg, *, config_source: str | None = None) -> Experime
                 cfg,
                 ref,
                 config_source,
-                run.paths,
+                stage_paths,
                 mode="run",
                 status="running",
                 action="run",
@@ -138,10 +190,33 @@ def run_experiment(cfg: ExpCfg, *, config_source: str | None = None) -> Experime
         kwargs: dict[str, Any] = {}
         if ref.stage == "rl":
             kwargs["resolved_encoder_checkpoint"] = resolved_encoder_checkpoint
+            kwargs["runtime_print_fine_grained_timing"] = bool(
+                runtime_print_fine_grained_timing
+            )
+            if runtime_rl is not None:
+                kwargs["runtime_num_gpus"] = runtime_rl["num_gpus"]
+                kwargs["runtime_num_envs"] = runtime_rl["num_envs_per_gpu"]
+            if curriculum_from_eval:
+                threshold = normalize_success_rate_threshold(curriculum_success_rate_threshold)
+                runtime_objects_manifest = materialize_curriculum_object_manifest(
+                    stage_paths,
+                    ref.directory,
+                    threshold=threshold,
+                )
+                eval_summary = latest_eval_objects_summary(ref.directory)
+                resume_checkpoint = latest_eval_checkpoint(ref.directory) if curriculum_resume_from_eval else None
+                _log_event(
+                    "CURR",
+                    f"eval_summary={eval_summary} selected_manifest={runtime_objects_manifest} "
+                    f"resume_checkpoint={resume_checkpoint or '<disabled>'} threshold={threshold:.4f}",
+                )
+                kwargs["runtime_objects_manifest"] = runtime_objects_manifest
+                if resume_checkpoint is not None:
+                    kwargs["runtime_rl_resume_checkpoint"] = resume_checkpoint
         try:
             _log_event("START", f"stage={ref.stage} entrypoint={ref.entrypoint}")
             entrypoint = _load_entrypoint(ref.entrypoint)
-            result = _call_stage(entrypoint, cfg, run.paths, ref.directory, kwargs=kwargs)
+            result = _call_stage(entrypoint, cfg, stage_paths, ref.directory, kwargs=kwargs)
             _validate_stage_result(ref, result)
             if _contact_result_is_partial_shard(ref, result):
                 _log_event("PARTIAL", f"stage={ref.stage} {_stage_result_summary(ref, result)}")
@@ -157,7 +232,7 @@ def run_experiment(cfg: ExpCfg, *, config_source: str | None = None) -> Experime
                         cfg,
                         ref,
                         config_source,
-                        run.paths,
+                        stage_paths,
                         mode="run",
                         status="partial",
                         action="run",
@@ -203,7 +278,7 @@ def run_experiment(cfg: ExpCfg, *, config_source: str | None = None) -> Experime
                     cfg,
                     ref,
                     config_source,
-                    run.paths,
+                    stage_paths,
                     mode="run",
                     status="failed",
                     action="run",
@@ -243,7 +318,7 @@ def run_experiment(cfg: ExpCfg, *, config_source: str | None = None) -> Experime
                 cfg,
                 ref,
                 config_source,
-                run.paths,
+                stage_paths,
                 mode="run",
                 status="complete",
                 action="run",
@@ -285,20 +360,22 @@ def _prepare_experiment(
     *,
     config_source: str | None,
     mode: str,
+    runtime_rl: dict[str, int] | None = None,
 ) -> ExperimentRun:
     paths = apply_experiment_path_overrides(
         cfg,
-        load_project_paths(_effective_paths_yaml(cfg)),
+        load_project_paths(cfg.paths_yaml),
     )
+    validation_cfg = _cfg_for_runtime_validation(cfg, runtime_rl)
     if mode == "plan":
         validate_for_plan(
-            cfg,
+            validation_cfg,
             paths,
             cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"),
         )
     elif mode == "run":
         validate_for_run(
-            cfg,
+            validation_cfg,
             paths,
             cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"),
         )
@@ -426,12 +503,6 @@ def _stage_is_reusable(ref: ArtifactRef) -> bool:
     return False
 
 
-def _contact_artifact_has_outputs(directory: Path) -> bool:
-    if not directory.exists():
-        return False
-    return any(directory.rglob("*.pt.manifest.json"))
-
-
 def _contact_manifest_result_is_complete(manifest_path: Path) -> bool:
     try:
         payload = read_manifest(manifest_path)
@@ -442,11 +513,6 @@ def _contact_manifest_result_is_complete(manifest_path: Path) -> bool:
         return False
     result = metrics.get("result")
     if not isinstance(result, dict):
-        return False
-    fail = _result_count(result, "fail")
-    if fail is None:
-        return False
-    if fail > 0:
         return False
     ok = _result_count(result, "ok") or 0
     skipped = _result_count(result, "skipped") or 0
@@ -464,14 +530,6 @@ def _validate_stage_result(ref: ArtifactRef, result: Any) -> None:
             "Contact generation produced no usable outputs "
             f"(ok={ok}, skipped={skipped}, fail={fail}); refusing to mark artifact complete"
         )
-    if ref.stage == "contact_gen" and _failed_contact_result(result):
-        ok = _result_count(result, "ok")
-        skipped = _result_count(result, "skipped")
-        fail = _result_count(result, "fail")
-        raise RuntimeError(
-            "Contact generation finished with failed outputs "
-            f"(ok={ok}, skipped={skipped}, fail={fail}); refusing to mark artifact complete"
-        )
 
 
 def _empty_failed_contact_result(result: Any) -> bool:
@@ -479,11 +537,6 @@ def _empty_failed_contact_result(result: Any) -> bool:
     skipped = _result_count(result, "skipped")
     fail = _result_count(result, "fail")
     return ok == 0 and skipped == 0
-
-
-def _failed_contact_result(result: Any) -> bool:
-    fail = _result_count(result, "fail")
-    return fail is not None and fail > 0
 
 
 def _contact_result_is_partial_shard(ref: ArtifactRef, result: Any) -> bool:
@@ -793,10 +846,6 @@ def _json_safe(value: Any) -> Any:
         return repr(value)
 
 
-def _effective_paths_yaml(cfg: ExpCfg) -> str:
-    return cfg.paths_yaml
-
-
 def _source_paths(paths: ProjectPaths, config_source: str | None) -> dict[str, str]:
     values: dict[str, str] = {
         "config": config_source or "",
@@ -806,3 +855,33 @@ def _source_paths(paths: ProjectPaths, config_source: str | None) -> dict[str, s
         if path is not None:
             values[key] = str(path)
     return values
+
+
+def _runtime_rl_override(runtime_num_gpus: int | None, runtime_total_envs: int) -> dict[str, int] | None:
+    if runtime_num_gpus is None:
+        return None
+    num_gpus = int(runtime_num_gpus)
+    total_envs = int(runtime_total_envs)
+    if num_gpus <= 0:
+        raise RuntimeError(f"runtime_num_gpus must be positive, got {runtime_num_gpus!r}")
+    if total_envs <= 0:
+        raise RuntimeError(f"runtime_total_envs must be positive, got {runtime_total_envs!r}")
+    if total_envs % num_gpus != 0:
+        raise RuntimeError(
+            f"runtime_total_envs ({total_envs}) must be divisible by runtime_num_gpus ({num_gpus})"
+        )
+    return {
+        "num_gpus": num_gpus,
+        "total_envs": total_envs,
+        "num_envs_per_gpu": total_envs // num_gpus,
+    }
+
+
+def _cfg_for_runtime_validation(cfg: ExpCfg, runtime_rl: dict[str, int] | None) -> ExpCfg:
+    if runtime_rl is None:
+        return cfg
+    validation_cfg = deepcopy(cfg)
+    validation_cfg.num_gpus = runtime_rl["num_gpus"]
+    validation_cfg.rl.env.num_envs = runtime_rl["num_envs_per_gpu"]
+    validation_cfg.rl.launch.distributed = runtime_rl["num_gpus"] > 1
+    return validation_cfg

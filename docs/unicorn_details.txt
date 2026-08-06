@@ -1,0 +1,61 @@
+A. Details on training UNICORN
+1) Contact dataset generation: Since predicting contacts
+between distant or fully overlapping objects is trivial, we prior-
+itize sampling near-contact object configurations to encourage
+our model to learn informative representations. To achieve
+this, we follow CORN [17] and randomly sample two objects
+from the object dataset and position each object at a random
+SE(3) pose. Since this initial placement is unlikely to result in
+objects in colliding configurations, we first move the objects
+tangent to each other by measuring the shortest displacement
+between the two objects, and translating one of the objects by
+that amount so that they come into contact with each other.
+Afterward, we apply a small Gaussian noise to the poses so
+that the objects either slightly clip into each other or narrowly
+remain collision-free.
+After positioning the objects, we generate the point clouds
+and contact labels. We sample the point clouds uniformly from
+the surface of each object, then label the points based on
+whether they fall within the other object. Since computing
+point-mesh intersection is often unreliable, we first apply con-
+vex decomposition to each object, then compute whether each
+point falls within any of the other object’s convex parts, and
+vice versa. Overall, this procedure yields approximately half of
+the dataset comprising objects in colliding configurations, with
+the other half in near-contact configurations; the representation
+model must learn to distinguish the two scenarios. We iterate
+this procedure to generate a dataset comprising 500,000 point
+cloud pairs and their contact labels.
+2) Details on pretraining pipeline: The contact decoder
+is a three-layer conditional MLP (CMLP), where each layer
+is a residual block with conditional batch normalization
+(CBN) [65]. CBN transforms each layer’s output features by
+applying batch normalization, whose affine parameters are
+mapped from the conditioning input zB
+N with a single linear
+layer.
+During training, we apply data augmentation by rotating,
+translating, and scaling both clouds, plus a small Gaussian
+noise. After patchifying the point clouds, we adjust the propor-
+tion of the inputs to the contact decoder so that approximately
+half of the input pairs are in contact (positive). This is done
+by resampling the positive patches with probability f/P and
+negative patches with probability (1−f)/N, where f denotes
+the target fraction of positive labels, P denotes the number
+of positive patches, and N denotes the number of negative
+patches. The hyperparameters for pretraining are in Table IV.
+
+Hyperparameter Value
+Batch size 1024
+Optimizer SAM [32]
+Learning rate schedule cosine
+Base learning rate 0.0002
+Min. learning rate 1e-6
+Max. gradient norm 1,000
+Weight decay 0.001
+Rotational augmentation (−π, +π)
+Translational augmentation (-0.1, +0.1)
+Scale augmentation (e−1,e+1)
+Noise augmentation 0.01
+Positive patch fraction 0.5
+Decoder size (128, 128)

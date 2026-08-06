@@ -32,6 +32,18 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
 
+def _require_fixed_base_flag(robot: Articulation, action_name: str) -> bool:
+    root_physx_view = getattr(robot, "root_physx_view", None)
+    shared_metatype = getattr(root_physx_view, "shared_metatype", None)
+    if shared_metatype is None or not hasattr(shared_metatype, "fixed_base"):
+        raise RuntimeError(
+            f"{action_name} cannot read robot fixed-base status because Isaac has not "
+            "populated robot.root_physx_view.shared_metatype.fixed_base. This action "
+            "must be initialized after the articulation PhysX view is ready."
+        )
+    return bool(shared_metatype.fixed_base)
+
+
 class SubgoalResidualAction(ActionTerm):
     """Subgoal residual action with variable impedance control.
     
@@ -69,7 +81,7 @@ class SubgoalResidualAction(ActionTerm):
             raise ValueError(f"Expected 7 joints, got {self._num_joints}. This action is designed for 7-DOF arms.")
 
         # Get end-effector body index from the resolved configuration
-        if self._robot.is_fixed_base:
+        if _require_fixed_base_flag(self._robot, "SubgoalResidualAction"):
             self._ee_jacobi_idx = self._robot_entity_cfg.body_ids[0] - 1
         else:
             self._ee_jacobi_idx = self._robot_entity_cfg.body_ids[0]

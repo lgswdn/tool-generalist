@@ -6,7 +6,20 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
-PRETRAINED_ENCODER_ADAPTERS = ("tce_strict", "point2vec_native", "icp_legacy", "unicorn_strict")
+PRETRAINED_ENCODER_ADAPTERS = (
+    "tce_strict",
+    "point2vec_native",
+    "icp_legacy",
+    "unicorn_strict",
+    "oracle_none",
+    "oracle_pointmesh_pointnet_strict",
+    "oracle_pointcloud_pointnet_strict",
+    "oracle_pointcloud_pointnet_pretrain_strict",
+    "oracle_pointcloud_pointnet_normalized_pretrain_strict",
+    "oracle_pointcloud_pointnet_rl_encoder_strict",
+    "oracle_pointcloud_patch_oracle_strict",
+    "patch_distance_pointnet_strict",
+)
 
 
 @dataclass
@@ -19,6 +32,14 @@ class EncoderCfg:
 
 
 @dataclass
+class KinematicConditioningCfg:
+    enabled: bool = False
+    state_fractions: tuple[float, float, float] = (0.0, 0.5, 1.0)
+    attention_layers: int = 1
+    delta_std: float = 0.15
+
+
+@dataclass
 class TCECfg(EncoderCfg):
     name: str = "TCE"
     encoder_type: str = "TCE"
@@ -28,6 +49,15 @@ class TCECfg(EncoderCfg):
     encoder_channel: int = 128
     vit_depth: int = 12
     vit_heads: int = 4
+    vit_attention_mode: str = "joint_self"
+    rl_token_source: str = "encoder"
+    encoder_token_pca_rank: int = 128
+    encoder_token_pca_path: Optional[str] = None
+    encoder_token_bottleneck_rank: int = 128
+    encoder_token_bottleneck_pca_path: Optional[str] = None
+    kinematic_conditioning: KinematicConditioningCfg = field(
+        default_factory=KinematicConditioningCfg
+    )
 
 
 @dataclass
@@ -72,7 +102,108 @@ class UnicornCfg(EncoderCfg):
     encoder_channel: int = 128
     vit_depth: int = 4
     vit_heads: int = 4
+    rl_token_source: str = "encoder"
     checkpoint_path: Optional[str] = None
+
+
+@dataclass
+class PatchDistancePointNetCfg(EncoderCfg):
+    """XYZ-only PointNet pretrained on distance to its discrete patch points."""
+
+    name: str = "patch_distance_pointnet"
+    encoder_type: str = "patch_distance_pointnet"
+    output_dim: int = 128
+    num_points: int = 512
+    num_patches: int = 16
+    patch_size: int = 32
+    encoder_channel: int = 128
+    point_scale_m: float = 0.05
+    query_count: int = 24
+    supervised_patches_per_cloud: int = 8
+    query_min_offset_m: float = 0.0005
+    query_max_offset_m: float = 0.03
+    distance_scale_m: float = 0.03
+    patch_center_scale_m: float = 0.30
+    checkpoint_path: Optional[str] = None
+
+
+@dataclass
+class OraclePatchCfg(EncoderCfg):
+    """Explicit patch-distance representation with no pretrained weights."""
+
+    name: str = "oracle_patch"
+    encoder_type: str = "oracle_patch"
+    output_dim: int = 128
+    num_points: int = 512
+    num_patches: int = 16
+    patch_size: int = 32
+    encoder_channel: int = 128
+    include_contact_feature: bool = True
+    contact_eps: float = 0.002
+    center_scale_m: float = 0.30
+    distance_scale_m: float = 0.10
+    patch_relative_scale_m: float = 0.05
+    log_distance_resolution_m: float = 0.005
+    log_distance_cap_m: float = 0.05
+    normalization_clip: float = 5.0
+
+
+@dataclass
+class OraclePointMeshPointNetCfg(EncoderCfg):
+    """Patchwise PointNet over privileged ``(x, y, z, unsigned distance)``."""
+
+    name: str = "oracle_pointmesh_pointnet"
+    encoder_type: str = "oracle_pointmesh_pointnet"
+    output_dim: int = 128
+    num_points: int = 512
+    num_patches: int = 16
+    patch_size: int = 32
+    encoder_channel: int = 128
+    coordinate_scale_m: float = 0.30
+    distance_scale_m: float = 0.10
+    normalization_clip: float = 5.0
+
+
+@dataclass
+class OraclePointCloudPointNetCfg(EncoderCfg):
+    """Fast patchwise PointNet using nearest opposite point-cloud geometry."""
+
+    name: str = "oracle_pointcloud_pointnet"
+    encoder_type: str = "oracle_pointcloud_pointnet"
+    output_dim: int = 128
+    num_points: int = 512
+    num_patches: int = 16
+    patch_size: int = 32
+    encoder_channel: int = 128
+    nearest_frame_batch_size: int = 64
+    # "fast11" is the fitted probe contract.  "rich21" adds cheap local
+    # distance/displacement/contact-scale features for learning directly in RL.
+    feature_mode: str = "fast11"
+    # False keeps the fitted probe's input normalization but initializes every
+    # learned PointNet/projection weight from scratch for a controlled RL ablation.
+    load_fitted_weights: bool = True
+    # The fitted probe reconstructs a rank-10 Unicorn token.  Scratch RL can
+    # instead produce a direct 128D patch token with no 10D bottleneck.
+    use_rank10_bottleneck: bool = True
+    # "patches": 32 pooled patch tokens; "points": 1024 unpooled point tokens.
+    token_mode: str = "patches"
+    # "fast11_probe_v1" is the fixed mean/std contract isolated by the
+    # normalization ablation. "identity" preserves legacy native experiments.
+    input_normalization: str = "identity"
+
+
+@dataclass
+class OraclePointCloudPatchOracleCfg(EncoderCfg):
+    """Deep analytic patch MLP over nearest opposite point-cloud geometry."""
+
+    name: str = "oracle_pointcloud_patch_oracle"
+    encoder_type: str = "oracle_pointcloud_patch_oracle"
+    output_dim: int = 128
+    num_points: int = 512
+    num_patches: int = 16
+    patch_size: int = 32
+    encoder_channel: int = 128
+    nearest_frame_batch_size: int = 64
 
 
 @dataclass
@@ -102,6 +233,9 @@ class PolicyFusionCfg:
     context_dim: Optional[int] = None
     cross_attn_heads: int = 4
     cross_attn_layers: int = 2
+    # "joint" lets every layer attend to all tokens. "tool_then_object"
+    # routes layer 1 to gripper/tool tokens and layer 2 to object tokens.
+    cross_attn_token_order: str = "joint"
     fusion_hidden_dims: list[int] = field(default_factory=lambda: [512, 256, 128])
     actor_hidden_dims: list[int] = field(default_factory=lambda: [128, 64])
     critic_hidden_dims: list[int] = field(default_factory=lambda: [128, 64])
@@ -115,6 +249,19 @@ class ModelCfg:
     p2v: P2VCfg = field(default_factory=P2VCfg)
     icp: ICPCfg = field(default_factory=ICPCfg)
     unicorn: UnicornCfg = field(default_factory=UnicornCfg)
+    patch_distance_pointnet: PatchDistancePointNetCfg = field(
+        default_factory=PatchDistancePointNetCfg
+    )
+    oracle_patch: OraclePatchCfg = field(default_factory=OraclePatchCfg)
+    oracle_pointmesh_pointnet: OraclePointMeshPointNetCfg = field(
+        default_factory=OraclePointMeshPointNetCfg
+    )
+    oracle_pointcloud_pointnet: OraclePointCloudPointNetCfg = field(
+        default_factory=OraclePointCloudPointNetCfg
+    )
+    oracle_pointcloud_patch_oracle: OraclePointCloudPatchOracleCfg = field(
+        default_factory=OraclePointCloudPatchOracleCfg
+    )
     pretrained_encoder: PretrainedEncoderCfg = field(default_factory=PretrainedEncoderCfg)
     policy_fusion: PolicyFusionCfg = field(default_factory=PolicyFusionCfg)
 
@@ -169,6 +316,16 @@ class ModelCfg:
             return self.icp
         if backend == "unicorn":
             return self.unicorn
+        if backend == "patch_distance_pointnet":
+            return self.patch_distance_pointnet
+        if backend == "oracle_patch":
+            return self.oracle_patch
+        if backend == "oracle_pointmesh_pointnet":
+            return self.oracle_pointmesh_pointnet
+        if backend == "oracle_pointcloud_pointnet":
+            return self.oracle_pointcloud_pointnet
+        if backend == "oracle_pointcloud_patch_oracle":
+            return self.oracle_pointcloud_patch_oracle
         raise ValueError(f"Unsupported ModelCfg.encoder_backend: {self.encoder_backend!r}")
 
     @encoder.setter
@@ -189,7 +346,32 @@ class ModelCfg:
             self.unicorn = value
             self.encoder_backend = "unicorn"
             return
-        raise ValueError("ModelCfg.encoder must be a TCECfg, P2VCfg, ICPCfg, or UnicornCfg")
+        if isinstance(value, PatchDistancePointNetCfg):
+            self.patch_distance_pointnet = value
+            self.encoder_backend = "patch_distance_pointnet"
+            return
+        if isinstance(value, OraclePatchCfg):
+            self.oracle_patch = value
+            self.encoder_backend = "oracle_patch"
+            return
+        if isinstance(value, OraclePointMeshPointNetCfg):
+            self.oracle_pointmesh_pointnet = value
+            self.encoder_backend = "oracle_pointmesh_pointnet"
+            return
+        if isinstance(value, OraclePointCloudPointNetCfg):
+            self.oracle_pointcloud_pointnet = value
+            self.encoder_backend = "oracle_pointcloud_pointnet"
+            return
+        if isinstance(value, OraclePointCloudPatchOracleCfg):
+            self.oracle_pointcloud_patch_oracle = value
+            self.encoder_backend = "oracle_pointcloud_patch_oracle"
+            return
+        raise ValueError(
+            "ModelCfg.encoder must be a TCECfg, P2VCfg, ICPCfg, UnicornCfg, "
+            "PatchDistancePointNetCfg, "
+            "OraclePatchCfg, OraclePointMeshPointNetCfg, or "
+            "OraclePointCloudPointNetCfg, or OraclePointCloudPatchOracleCfg"
+        )
 
     @property
     def concerto(self) -> ConcertoCfg:
@@ -215,6 +397,16 @@ class ModelCfg:
             return "icp"
         if value in {"unicorn", "universal_corn"}:
             return "unicorn"
+        if value in {"patch_distance_pointnet", "patch_sdf_pointnet"}:
+            return "patch_distance_pointnet"
+        if value in {"oracle_patch", "oracle_sdf"}:
+            return "oracle_patch"
+        if value in {"oracle_pointmesh_pointnet", "oracle_unsigned_pointnet"}:
+            return "oracle_pointmesh_pointnet"
+        if value in {"oracle_pointcloud_pointnet", "oracle_fast_pointnet"}:
+            return "oracle_pointcloud_pointnet"
+        if value in {"oracle_pointcloud_patch_oracle", "oracle_fast_patch_oracle"}:
+            return "oracle_pointcloud_patch_oracle"
         return value
 
     @property

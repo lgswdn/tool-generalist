@@ -31,6 +31,11 @@ PATH_ALIASES: dict[str, tuple[str, ...]] = {
     "tools.objects_usd_root": (),
     "tools.robots_usd_root": ("tools.robots_usd_dir",),
     "tools.franka_src_root": (),
+    "generated_grippers.root": (),
+    "generated_grippers.manifest": (),
+    "generated_grippers.cloud_cache_dir": (),
+    "one_dof_grippers.root": (),
+    "one_dof_grippers.manifest": (),
 }
 
 

@@ -129,7 +129,11 @@ def main() -> int:
         paths_yaml = Path(cfg.paths_yaml).expanduser()
         if not paths_yaml.is_absolute():
             paths_yaml = ROOT / paths_yaml
-        paths = apply_experiment_path_overrides(cfg, load_project_paths(paths_yaml))
+        paths = apply_experiment_path_overrides(
+            cfg,
+            load_project_paths(paths_yaml),
+            stage="contact_gen",
+        )
 
         _log("resolve paths")
         objects_json = require_path(paths, "objects.candidates_json")

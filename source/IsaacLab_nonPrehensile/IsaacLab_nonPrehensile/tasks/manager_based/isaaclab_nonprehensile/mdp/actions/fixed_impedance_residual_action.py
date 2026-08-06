@@ -15,6 +15,19 @@ from isaaclab.utils.math import apply_delta_pose
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
+
+def _require_fixed_base_flag(robot: Articulation, action_name: str) -> bool:
+    root_physx_view = getattr(robot, "root_physx_view", None)
+    shared_metatype = getattr(root_physx_view, "shared_metatype", None)
+    if shared_metatype is None or not hasattr(shared_metatype, "fixed_base"):
+        raise RuntimeError(
+            f"{action_name} cannot read robot fixed-base status because Isaac has not "
+            "populated robot.root_physx_view.shared_metatype.fixed_base. This action "
+            "must be initialized after the articulation PhysX view is ready."
+        )
+    return bool(shared_metatype.fixed_base)
+
+
 class FixedImpedanceResidualAction(ActionTerm):
     def __init__(self, cfg: FixedImpedanceResidualActionCfg, env: ManagerBasedEnv) -> None:
         super().__init__(cfg, env)
@@ -30,7 +43,7 @@ class FixedImpedanceResidualAction(ActionTerm):
         if self._num_joints != 7:
             raise ValueError(f"Expected 7 joints, got {self._num_joints}.")
 
-        if self._robot.is_fixed_base:
+        if _require_fixed_base_flag(self._robot, "FixedImpedanceResidualAction"):
             self._ee_jacobi_idx = self._robot_entity_cfg.body_ids[0] - 1
         else:
             self._ee_jacobi_idx = self._robot_entity_cfg.body_ids[0]

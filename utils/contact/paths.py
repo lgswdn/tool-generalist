@@ -50,7 +50,9 @@ def _get_path(
     return None
 
 
-def load_contact_paths(yaml_path: str | Path = "paths.yaml") -> ContactPaths:
+def load_contact_paths(
+    yaml_path: str | Path = "configs/paths/default.yaml",
+) -> ContactPaths:
     """Load the strict contact-generation path schema."""
 
     import yaml

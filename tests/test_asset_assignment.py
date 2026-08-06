@@ -62,6 +62,15 @@ def test_sequential_spawn_indices_compact_deterministic_cycles():
     assert assignment.sequential_spawn_indices_for_rank(2, 1, 5) == [2, 3]
 
 
+def test_cross_embodiment_rank_assignment_is_exactly_balanced():
+    assignment = _load_asset_assignment_module()
+
+    modes = [assignment.cross_embodiment_mode_for_rank(rank, 8) for rank in range(8)]
+    assert modes == ["generated_gripper"] * 4 + ["one_dof_gripper"] * 4
+    with pytest.raises(ValueError, match="even world_size"):
+        assignment.cross_embodiment_mode_for_rank(0, 3)
+
+
 def test_asset_assignment_random_seed_and_salt_contract():
     assignment = _load_asset_assignment_module()
 
@@ -133,6 +142,33 @@ def test_runtime_spec_contains_asset_assignment_params(tmp_path):
     assert contract.asset_assignment.seed == 42
     assert contract.asset_assignment.randomize_tool_assignment is True
     assert contract.asset_assignment.randomize_object_assignment is False
+
+
+def test_runtime_spec_carries_fine_grained_timing_launch_override(tmp_path):
+    paths_yaml = tmp_path / "paths.yaml"
+    paths_yaml.write_text("{}\n", encoding="utf-8")
+    paths = load_project_paths(paths_yaml)
+
+    cfg = ExpCfg(name="fine_grained_timing_runtime_unit")
+    cfg.rl.encoder_checkpoint = str(tmp_path / "encoder.pt")
+
+    disabled = asdict(build_rl_runtime_spec(cfg, paths, tmp_path / "disabled"))
+    enabled = asdict(
+        build_rl_runtime_spec(
+            cfg,
+            paths,
+            tmp_path / "enabled",
+            runtime_print_fine_grained_timing=True,
+        )
+    )
+
+    assert disabled["launch_params"]["print_fine_grained_timing"] is False
+    assert enabled["launch_params"]["print_fine_grained_timing"] is True
+    validate_runtime_spec(enabled, tmp_path / "enabled.json")
+
+    enabled["launch_params"]["print_fine_grained_timing"] = "yes"
+    with pytest.raises(RuntimeError, match="print_fine_grained_timing must be a bool"):
+        validate_runtime_spec(enabled, tmp_path / "invalid.json")
 
 
 def test_env_tool_uses_compact_spawn_lists_with_deterministic_spawners():

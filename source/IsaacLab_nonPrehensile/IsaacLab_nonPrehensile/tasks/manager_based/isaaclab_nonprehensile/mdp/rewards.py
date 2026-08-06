@@ -17,6 +17,49 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 from .observations import get_head_area_pos_w
+from .step_cache import (
+    get_or_compute_step_value,
+    object_goal_geometry,
+    object_pose_success_mask,
+)
+
+
+def _reward_head_area_pos_w(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Compute the head-area position once per environment step for reward terms."""
+
+    return get_or_compute_step_value(
+        env,
+        ("reward_head_area_pos_w",),
+        lambda: get_head_area_pos_w(env),
+    )
+
+
+def _object_ee_distance(
+    env: ManagerBasedRLEnv,
+    object: RigidObject,
+) -> torch.Tensor:
+    """Compute the object/head-area distance once per step."""
+
+    return get_or_compute_step_value(
+        env,
+        ("object_ee_distance", id(object)),
+        lambda: torch.norm(object.data.root_pos_w - _reward_head_area_pos_w(env), dim=1),
+    )
+
+
+def _object_ee_within_threshold(
+    env: ManagerBasedRLEnv,
+    object: RigidObject,
+    threshold: float,
+) -> torch.Tensor:
+    """Share the contact gate used by coarse and fine goal rewards."""
+
+    threshold = float(threshold)
+    return get_or_compute_step_value(
+        env,
+        ("object_ee_within_threshold", id(object), threshold),
+        lambda: _object_ee_distance(env, object) < threshold,
+    )
 
 
 def object_ee_distance_tanh(
@@ -28,12 +71,7 @@ def object_ee_distance_tanh(
     """Reward the agent for reaching the object using tanh-kernel."""
     # extract the used quantities (to enable type-hinting)
     object: RigidObject = env.scene[object_cfg.name]
-    # Target object position: (num_envs, 3)
-    obj_pos_w = object.data.root_pos_w
-    # Head area world position (tool body + rotated per-env local offset): (num_envs, 3)
-    ee_pos = get_head_area_pos_w(env)
-    # Distance of the end-effector to the object: (num_envs,)
-    object_ee_distance = torch.norm(obj_pos_w - ee_pos, dim=1)
+    object_ee_distance = _object_ee_distance(env, object)
 
     return 1 - torch.tanh(object_ee_distance / std)
 
@@ -49,32 +87,19 @@ def object_goal_distance_tanh(
 ) -> torch.Tensor:
     """Reward the agent for reaching the object using tanh-kernel."""
     object: RigidObject = env.scene[object_cfg.name]
-    command = env.command_manager.get_command(command_name)
-    # Head area world position: (num_envs, 3)
-    ee_pos = get_head_area_pos_w(env)
-    # Target object position: (num_envs, 3)
-    obj_pos_w = object.data.root_pos_w
-    # Distance of the end-effector to the object: (num_envs,)
-    object_ee_distance = torch.norm(obj_pos_w - ee_pos, dim=1)
-    obj_ee_dist_cond = object_ee_distance < obj_ee_distance_threshold
-    
-    # Get target position and orientation in environment coordinates
-    des_pos_env = command[:, :3]
-    object_pos_w = object.data.root_pos_w[:, :3]
-    object_pos_env = object_pos_w - env.scene.env_origins
+    obj_ee_dist_cond = _object_ee_within_threshold(
+        env, object, obj_ee_distance_threshold
+    )
+    geometry = object_goal_geometry(env, object, command_name=command_name)
+    combined_key = float(rotation_distance_divisor)
+    combined_distances = geometry["combined_distances"]
+    if combined_key not in combined_distances:
+        combined_distances[combined_key] = geometry["position_distance"] + (
+            torch.clamp(geometry["angular_distance"], max=torch.pi)
+            / rotation_distance_divisor
+        )
 
-    # Position distance
-    pos_distance = torch.norm(des_pos_env - object_pos_env, dim=1)
-
-    des_rot_env = command[:, 3:7]
-    object_quat_w = object.data.root_quat_w  # (num_envs, 4) [w, x, y, z]
-    dot_product = torch.sum(object_quat_w * des_rot_env, dim=1)
-    dot_product = torch.clamp(torch.abs(dot_product), max=1.0)
-    ang_distance = 2 * torch.acos(dot_product)
-    ang_distance = torch.clamp(ang_distance, max=torch.pi)
-    pos_distance += ang_distance / rotation_distance_divisor
-
-    return obj_ee_dist_cond * (1 - torch.tanh(pos_distance / std))
+    return obj_ee_dist_cond * (1 - torch.tanh(combined_distances[combined_key] / std))
 
 def joint_power_penalty(
     env: ManagerBasedRLEnv,
@@ -114,36 +139,18 @@ def task_success_reward(
 ) -> torch.Tensor:
     """Task success reward: gives base_reward when object reaches target pose within thresholds."""
     object: RigidObject = env.scene[object_cfg.name]
-    command = env.command_manager.get_command(command_name)
-    
-    # Get target pose
-    des_pos_env = command[:, :3]  # target position in environment coordinates
-    des_rot_env = command[:, 3:7]  # target orientation (quaternion) in environment coordinates
-    
-    # Get current object position in environment coordinates
-    object_pos_w = object.data.root_pos_w[:, :3]
-    object_pos_env = object_pos_w - env.scene.env_origins
-    
-    # Get current object orientation and convert to euler
-    object_quat_w = object.data.root_quat_w  # (num_envs, 4) [w, x, y, z]
-    
-    if planar:
-        position_distance = torch.norm(des_pos_env[:, :2] - object_pos_env[:, :2], dim=1)
-        position_reached = position_distance < threshold
-        return position_reached.float()
+    success_mask = object_pose_success_mask(
+        env,
+        object,
+        command_name=command_name,
+        threshold=threshold,
+        rotation_threshold=rotation_threshold,
+        planar=planar,
+    )
 
-    position_distance = torch.norm(des_pos_env - object_pos_env, dim=1)
-    
-    dot_product = torch.sum(object_quat_w * des_rot_env, dim=1)
-    dot_product = torch.clamp(torch.abs(dot_product), max=1.0)
-    angular_distance = 2 * torch.acos(dot_product)
-    
-    # Check if within thresholds
-    position_reached = position_distance < threshold
-    rotation_reached = angular_distance < rotation_threshold
-    
-    # Calculate success mask
-    success_mask = position_reached & rotation_reached
+    if planar:
+        # Preserve the legacy planar behavior, which ignored base_reward.
+        return success_mask.float()
     
     # Final reward: base_reward for success, 0.0 for failure
     reward = torch.where(
@@ -198,13 +205,10 @@ def _object_pose_success_mask(
     threshold: float,
     rotation_threshold: float,
 ) -> torch.Tensor:
-    command = env.command_manager.get_command(command_name)
-    des_pos_env = command[:, :3]
-    des_rot_env = command[:, 3:7]
-    object_pos_env = object.data.root_pos_w[:, :3] - env.scene.env_origins
-    object_quat_w = object.data.root_quat_w
-    position_distance = torch.norm(des_pos_env - object_pos_env, dim=1)
-    dot_product = torch.sum(object_quat_w * des_rot_env, dim=1)
-    dot_product = torch.clamp(torch.abs(dot_product), max=1.0)
-    angular_distance = 2.0 * torch.acos(dot_product)
-    return (position_distance < threshold) & (angular_distance < rotation_threshold)
+    return object_pose_success_mask(
+        env,
+        object,
+        command_name=command_name,
+        threshold=threshold,
+        rotation_threshold=rotation_threshold,
+    )

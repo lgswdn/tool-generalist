@@ -25,16 +25,23 @@ except ImportError:
     HAS_WANDB = False
 
 from configs.config_exp import ExpCfg
-from configs.config_contact_gen import strip_contact_gen_hash_defaults
+from configs.config_contact_gen import TOOL_SOURCE_OBJECTS
+from utils.config.hash_payloads import experiment_payload
 from utils.config.paths import ProjectPaths
 from utils.artifacts.resolver import resolve_artifacts
 from utils.experiment.runtime import git_metadata, runtime_metadata
+
+_VIT_ATTENTION_CONTRACT = "explicit_v1"
 from utils.io import hash_json, read_json, to_plain_data, write_json
 
 from pretrain.dataset import make_split
 from pretrain.model import ContactDiffusionModel
 from pretrain.optim import SAM
-from pretrain.unicorn_dataset import make_unicorn_split
+from pretrain.oracle_contact_model import OracleContactPretrainModel
+from pretrain.oracle_pointmesh_pointnet_model import OraclePointMeshPointNetPretrainModel
+from pretrain.oracle_pointcloud_pointnet_model import (
+    OraclePointCloudPointNetPretrainModel,
+)
 from pretrain.unicorn_model import UnicornPretrainModel
 
 
@@ -43,6 +50,9 @@ class PretrainRuntimeConfig:
     pretrain_mode: str
     device: str | None
     data_dir: str
+    use_geometry_candidates: bool
+    use_saved_contact_clouds: bool
+    max_contacts_per_file: int
     max_files: int
     val_ratio: float
     augment: bool
@@ -59,7 +69,12 @@ class PretrainRuntimeConfig:
     encoder_channel: int
     vit_depth: int
     vit_heads: int
+    vit_attention_mode: str
     freeze_encoder: bool
+    kinematic_conditioning: bool
+    kinematic_attention_layers: int
+    kinematic_delta_std: float
+    pointcloud_input_normalization: str
     cross_attn_heads: int
     cross_attn_layers: int
     condition_mlp_hidden_dims: tuple[int, ...]
@@ -83,6 +98,7 @@ class PretrainRuntimeConfig:
     noise_max_retries: int
     floor_eps: float
     denoise_target_mode: str
+    encoder_input_centering: str
     sdf_weight: float
     sdf_backend: str
     sdf_mode: str
@@ -103,6 +119,7 @@ class PretrainRuntimeConfig:
     optimizer_betas: tuple[float, float]
     optimizer_eps: float
     sam_rho: float
+    max_gradient_norm: float
     scheduler: str
     min_lr: float
     epochs: int
@@ -125,15 +142,30 @@ class PretrainRuntimeConfig:
     seed: int
     unicorn_num_patches: int
     unicorn_decoder_hidden: tuple[int, ...]
+    unicorn_decoder_type: str
     unicorn_positive_patch_fraction: float
+    unicorn_label_source: str
     unicorn_label_backend: str
     unicorn_contact_eps: float
     unicorn_patch_positive_rule: str
     unicorn_positive_min_points: int
     unicorn_label_chunk_size: int
+    unicorn_paper_pair_augmentation: bool
+    unicorn_aug_rotation_range: tuple[float, float]
     unicorn_aug_translation_range: tuple[float, float]
     unicorn_aug_log_scale_range: tuple[float, float]
     unicorn_aug_noise_std: float
+    oracle_center_scale_m: float = 0.30
+    oracle_distance_scale_m: float = 0.10
+    oracle_patch_relative_scale_m: float = 0.05
+    oracle_log_distance_resolution_m: float = 0.005
+    oracle_log_distance_cap_m: float = 0.05
+    oracle_normalization_clip: float = 5.0
+    oracle_include_contact_feature: bool = True
+    oracle_pointmesh_coordinate_scale_m: float = 0.30
+    oracle_pointmesh_distance_scale_m: float = 0.10
+    oracle_pointmesh_normalization_clip: float = 5.0
+    tool_mesh_contract: str = "adjusted_decomposed_mesh"
 
 
 # ============================================================================ #
@@ -194,6 +226,10 @@ def build_checkpoint_metadata(
         "num_pts": cfg_dump.get("num_pts"),
         "patch_size": cfg_dump.get("patch_size"),
         "encoder_channel": cfg_dump.get("encoder_channel"),
+        "vit_depth": cfg_dump.get("vit_depth"),
+        "vit_heads": cfg_dump.get("vit_heads"),
+        "vit_attention_mode": cfg_dump.get("vit_attention_mode"),
+        "vit_attention_contract": _VIT_ATTENTION_CONTRACT,
         "num_patches": getattr(raw_model, "num_patches", None),
         "feature_dim": getattr(getattr(raw_model, "encoder", None), "feature_dim", None),
         "head_mode": getattr(raw_model, "head_mode", cfg_dump.get("head_mode")),
@@ -209,6 +245,37 @@ def build_checkpoint_metadata(
         "condition_norm_eps": cfg_dump.get("condition_norm_eps"),
         "condition_mean": cfg_dump.get("condition_mean"),
         "condition_std": cfg_dump.get("condition_std"),
+        "encoder_input_centering": getattr(raw_model, "encoder_input_centering", cfg_dump.get("encoder_input_centering")),
+        "contact_label_source": getattr(
+            raw_model,
+            "contact_label_source",
+            cfg_dump.get("unicorn_label_source"),
+        ),
+        "contact_decoder_type": getattr(
+            raw_model,
+            "contact_decoder_type",
+            cfg_dump.get("unicorn_decoder_type"),
+        ),
+        "kinematic_conditioning": cfg_dump.get("kinematic_conditioning", False),
+        "kinematic_attention_layers": cfg_dump.get(
+            "kinematic_attention_layers", 1
+        ),
+        "pointcloud_feature_mode": getattr(
+            getattr(raw_model, "encoder", None), "feature_mode", None
+        ),
+        "pointcloud_use_rank10_bottleneck": getattr(
+            getattr(raw_model, "encoder", None),
+            "use_rank10_bottleneck",
+            None,
+        ),
+        "pointcloud_token_mode": getattr(
+            getattr(raw_model, "encoder", None), "token_mode", None
+        ),
+        "pointcloud_input_normalization": getattr(
+            getattr(raw_model, "encoder", None),
+            "input_normalization",
+            None,
+        ),
     }
     hash_algo = cfg_dump.get("dataset_hash_algo", "sha256")
     dataset_hash = _hash_dataset_paths(dataset_paths, hash_algo) if dataset_paths else ""
@@ -250,6 +317,7 @@ def build_checkpoint_metadata(
             "postcontact_hidden": cfg_dump.get("postcontact_hidden"),
         },
         "model_dims": model_dims,
+        "encoder_input_centering": getattr(raw_model, "encoder_input_centering", cfg_dump.get("encoder_input_centering")),
         "git": git_metadata(Path.cwd()),
         "runtime": runtime_metadata(cwd=Path.cwd(), argv=[]),
     }
@@ -285,8 +353,45 @@ def save_ckpt(
         write_json(manifest_path, metadata)
 
 
-def load_ckpt(path: str, model: torch.nn.Module, optimizer=None):
+def load_ckpt(
+    path: str,
+    model: torch.nn.Module,
+    optimizer=None,
+    *,
+    expected_vit_attention_mode: str,
+    expected_kinematic_conditioning: bool = False,
+):
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    metadata = ckpt.get("metadata") if isinstance(ckpt, dict) else None
+    dims = metadata.get("model_dims") if isinstance(metadata, dict) else None
+    if not isinstance(dims, dict):
+        raise RuntimeError(f"Resume checkpoint lacks model_dims metadata: {path}")
+    contract = dims.get("vit_attention_contract")
+    actual_mode = dims.get("vit_attention_mode")
+    legacy_joint_self = (
+        contract is None
+        and expected_vit_attention_mode == "joint_self"
+        and actual_mode == "joint_self"
+    )
+    if contract != _VIT_ATTENTION_CONTRACT and not legacy_joint_self:
+        raise RuntimeError(
+            "Resume checkpoint predates explicit attention propagation and "
+            "cannot be trusted for this attention mode: expected "
+            f"vit_attention_contract="
+            f"{_VIT_ATTENTION_CONTRACT!r}, got {contract!r} in {path}"
+        )
+    if actual_mode != expected_vit_attention_mode:
+        raise RuntimeError(
+            "Resume checkpoint attention mismatch: expected "
+            f"{expected_vit_attention_mode!r}, got {actual_mode!r} in {path}"
+        )
+    actual_kinematic = bool(dims.get("kinematic_conditioning", False))
+    if actual_kinematic != bool(expected_kinematic_conditioning):
+        raise RuntimeError(
+            "Resume checkpoint kinematic-conditioning mismatch: expected "
+            f"{bool(expected_kinematic_conditioning)}, got {actual_kinematic} "
+            f"in {path}"
+        )
     m = model.module if isinstance(model, DDP) else model
     m.load_state_dict(ckpt["model"])
     if optimizer is not None and "optimizer" in ckpt:
@@ -361,6 +466,20 @@ def train_step(
         object_bbox_center_E=tensor_batch.get("object_bbox_center_E"),
         tool_rotation_E_k=tensor_batch.get("tool_rotation_E_k"),
         tool_translation_E_k=tensor_batch.get("tool_translation_E_k"),
+        tool_point_inside_object=tensor_batch.get(
+            "tool_point_inside_object"
+        ),
+        object_point_inside_tool=tensor_batch.get(
+            "object_point_inside_tool"
+        ),
+        tool_point_object_signed_sdf=tensor_batch.get(
+            "tool_point_object_signed_sdf"
+        ),
+        object_point_tool_signed_sdf=tensor_batch.get(
+            "object_point_tool_signed_sdf"
+        ),
+        kinematic_tool_clouds=tensor_batch.get("kinematic_tool_clouds"),
+        openness_delta=tensor_batch.get("openness_delta"),
         target_tool_denoise_pose9d_k=tensor_batch["target_tool_denoise_pose9d_k"],
         target_object_post_delta9d=tensor_batch.get("target_object_post_delta9d"),
     )
@@ -376,10 +495,9 @@ def train_step_unicorn(
         for key, value in batch.items()
     }
     return model(
-        points_A=tensor_batch["points_A"],
-        points_B=tensor_batch["points_B"],
-        label_points_A_E=tensor_batch["label_points_A_E"],
-        label_points_B_E=tensor_batch["label_points_B_E"],
+        tool_points_E_k=tensor_batch["tool_points_E_k"],
+        object_points_E_k=tensor_batch["object_points_E_k"],
+        rel_tool_object_t_k=tensor_batch["rel_tool_object_t_k"],
         object_mesh_vertices=tensor_batch.get("object_mesh_vertices"),
         object_mesh_faces=tensor_batch.get("object_mesh_faces"),
         tool_mesh_vertices=tensor_batch.get("tool_mesh_vertices"),
@@ -547,12 +665,37 @@ def build_runtime_config(
     model_cfg = exp_cfg.model
     general_cfg = exp_cfg.general
     active_encoder_cfg = model_cfg.encoder
+    kinematic_cfg = getattr(active_encoder_cfg, "kinematic_conditioning", None)
+    kinematic_conditioning = bool(
+        getattr(kinematic_cfg, "enabled", False)
+    )
+    kinematic_attention_layers = int(
+        getattr(kinematic_cfg, "attention_layers", 1)
+    )
+    kinematic_delta_std = float(getattr(kinematic_cfg, "delta_std", 0.15))
+    if kinematic_conditioning:
+        if tuple(getattr(kinematic_cfg, "state_fractions", ())) != (
+            0.0,
+            0.5,
+            1.0,
+        ):
+            raise ValueError(
+                "Kinematic conditioning requires state_fractions=(0.0, 0.5, 1.0)"
+            )
+    pointcloud_pretrain = pretrain_cfg.mode in {
+        "oracle_pointcloud_diffusion",
+        "oracle_pointcloud_postcontact",
+    }
     enabled_heads = tuple(pretrain_cfg.enabled_heads)
     if "sdf" in enabled_heads:
         if pretrain_cfg.sdf_target.mode != "signed":
-            raise ValueError("PretrainCfg.sdf_target.mode must be 'signed' for SDF supervision")
+            raise ValueError(
+                "PretrainCfg.sdf_target.mode must be 'signed' when the SDF head is enabled"
+            )
         if pretrain_cfg.sdf_target.query != "surface_points":
-            raise ValueError("PretrainCfg.sdf_target.query must be 'surface_points' for SDF supervision")
+            raise ValueError(
+                "PretrainCfg.sdf_target.query must be 'surface_points' when the SDF head is enabled"
+            )
     has_pose_head = bool({"diff", "postcontact"}.intersection(enabled_heads))
     if pretrain_cfg.dataset_manifest:
         data_dir = _resolve_config_path(pretrain_cfg.dataset_manifest, paths)
@@ -561,7 +704,6 @@ def build_runtime_config(
     noise_trans_high = float(pretrain_cfg.translation_noise_range[1])
     noise_rot_high = float(pretrain_cfg.rotation_noise_range_deg[1])
     full_config = to_plain_data(exp_cfg)
-    full_config_for_hash = _strip_pretrain_logging_from_exp_payload(full_config)
     resume_checkpoint = pretrain_cfg.checkpoint_policy.resume_checkpoint
     if not resume_checkpoint:
         existing_best = Path(artifact_dir) / pretrain_cfg.checkpoint_policy.best_filename
@@ -572,6 +714,9 @@ def build_runtime_config(
         pretrain_mode=pretrain_cfg.mode,
         device=pretrain_cfg.device,
         data_dir=str(data_dir),
+        use_geometry_candidates=bool(pretrain_cfg.use_geometry_candidates),
+        use_saved_contact_clouds=pointcloud_pretrain,
+        max_contacts_per_file=int(pretrain_cfg.max_contacts_per_file),
         max_files=pretrain_cfg.max_files,
         val_ratio=pretrain_cfg.val_ratio,
         augment=pretrain_cfg.augment,
@@ -583,6 +728,7 @@ def build_runtime_config(
             "sdf": float(pretrain_cfg.loss.w_sdf),
             "diff": float(pretrain_cfg.loss.w_diff),
             "postcontact": float(pretrain_cfg.loss.w_post),
+            "contact": 1.0,
         },
         head_mode=pretrain_cfg.sdf_head_mode,
         patch_agg=pretrain_cfg.decoder_pooling,
@@ -590,9 +736,31 @@ def build_runtime_config(
         num_pts=active_encoder_cfg.num_points,
         patch_size=getattr(active_encoder_cfg, "patch_size", model_cfg.patch_size),
         encoder_channel=getattr(active_encoder_cfg, "encoder_channel", model_cfg.encoder_channel),
-        vit_depth=getattr(active_encoder_cfg, "vit_depth", model_cfg.vit_depth),
-        vit_heads=getattr(active_encoder_cfg, "vit_heads", model_cfg.vit_heads),
+        vit_depth=(
+            0
+            if pointcloud_pretrain
+            else getattr(active_encoder_cfg, "vit_depth", model_cfg.vit_depth)
+        ),
+        vit_heads=(
+            1
+            if pointcloud_pretrain
+            else getattr(active_encoder_cfg, "vit_heads", model_cfg.vit_heads)
+        ),
+        # The direct PointNet has no attention mode.  ``joint_self`` is used
+        # only while ContactDiffusionModel constructs the discarded temporary
+        # TCE before the subclass installs the exact RL PointNet.
+        vit_attention_mode=(
+            "joint_self"
+            if pointcloud_pretrain
+            else _required_vit_attention_mode(active_encoder_cfg)
+        ),
         freeze_encoder=not active_encoder_cfg.trainable,
+        kinematic_conditioning=kinematic_conditioning,
+        kinematic_attention_layers=kinematic_attention_layers,
+        kinematic_delta_std=kinematic_delta_std,
+        pointcloud_input_normalization=str(
+            getattr(active_encoder_cfg, "input_normalization", "identity")
+        ),
         cross_attn_heads=pretrain_cfg.cross_attn_heads,
         cross_attn_layers=pretrain_cfg.cross_attn_layers,
         condition_mlp_hidden_dims=tuple(pretrain_cfg.condition_mlp_hidden_dims),
@@ -616,6 +784,7 @@ def build_runtime_config(
         noise_max_retries=pretrain_cfg.legal_pose_max_tries,
         floor_eps=pretrain_cfg.floor_eps,
         denoise_target_mode=pretrain_cfg.denoise_target_mode,
+        encoder_input_centering=pretrain_cfg.encoder_input_centering,
         sdf_weight=float(pretrain_cfg.loss.w_sdf),
         sdf_backend=pretrain_cfg.sdf_target.backend,
         sdf_mode=pretrain_cfg.sdf_target.mode,
@@ -636,6 +805,7 @@ def build_runtime_config(
         optimizer_betas=tuple(pretrain_cfg.optimizer.betas),
         optimizer_eps=pretrain_cfg.optimizer.eps,
         sam_rho=pretrain_cfg.optimizer.sam_rho,
+        max_gradient_norm=pretrain_cfg.optimizer.max_gradient_norm,
         scheduler=pretrain_cfg.optimizer.scheduler,
         min_lr=pretrain_cfg.optimizer.min_learning_rate,
         epochs=pretrain_cfg.epochs,
@@ -647,7 +817,7 @@ def build_runtime_config(
         checkpoint_write_manifest=pretrain_cfg.checkpoint_policy.write_manifest,
         dataset_hash_algo=pretrain_cfg.checkpoint_policy.dataset_hash_algo,
         full_config=full_config,
-        full_config_hash=hash_json(full_config_for_hash, pretrain_cfg.checkpoint_policy.dataset_hash_algo),
+        full_config_hash=hash_json(experiment_payload(exp_cfg), pretrain_cfg.checkpoint_policy.dataset_hash_algo),
         paths_yaml=str(paths.source_yaml),
         artifact_dir=str(Path(artifact_dir)),
         wandb=(pretrain_cfg.logger == "wandb") or bool(general_cfg.wandb.enabled),
@@ -658,61 +828,45 @@ def build_runtime_config(
         seed=general_cfg.seed,
         unicorn_num_patches=int(pretrain_cfg.unicorn.num_patches),
         unicorn_decoder_hidden=tuple(pretrain_cfg.unicorn.decoder_hidden_dims),
+        unicorn_decoder_type=str(pretrain_cfg.unicorn.decoder_type),
         unicorn_positive_patch_fraction=float(pretrain_cfg.unicorn.positive_patch_fraction),
+        unicorn_label_source=str(pretrain_cfg.unicorn.label.source),
         unicorn_label_backend=pretrain_cfg.unicorn.label.backend,
         unicorn_contact_eps=float(pretrain_cfg.unicorn.label.contact_eps),
         unicorn_patch_positive_rule=pretrain_cfg.unicorn.label.patch_positive_rule,
         unicorn_positive_min_points=int(pretrain_cfg.unicorn.label.positive_min_points),
         unicorn_label_chunk_size=int(pretrain_cfg.unicorn.label.chunk_size),
+        unicorn_paper_pair_augmentation=bool(
+            pretrain_cfg.unicorn.augment.paper_pair_augmentation
+        ),
+        unicorn_aug_rotation_range=tuple(
+            pretrain_cfg.unicorn.augment.rotation_range
+        ),
         unicorn_aug_translation_range=tuple(pretrain_cfg.unicorn.augment.translation_range),
         unicorn_aug_log_scale_range=tuple(pretrain_cfg.unicorn.augment.log_scale_range),
         unicorn_aug_noise_std=float(pretrain_cfg.unicorn.augment.noise_std),
+        oracle_center_scale_m=float(model_cfg.oracle_patch.center_scale_m),
+        oracle_distance_scale_m=float(model_cfg.oracle_patch.distance_scale_m),
+        oracle_patch_relative_scale_m=float(model_cfg.oracle_patch.patch_relative_scale_m),
+        oracle_log_distance_resolution_m=float(model_cfg.oracle_patch.log_distance_resolution_m),
+        oracle_log_distance_cap_m=float(model_cfg.oracle_patch.log_distance_cap_m),
+        oracle_normalization_clip=float(model_cfg.oracle_patch.normalization_clip),
+        oracle_include_contact_feature=bool(model_cfg.oracle_patch.include_contact_feature),
+        oracle_pointmesh_coordinate_scale_m=float(
+            model_cfg.oracle_pointmesh_pointnet.coordinate_scale_m
+        ),
+        oracle_pointmesh_distance_scale_m=float(
+            model_cfg.oracle_pointmesh_pointnet.distance_scale_m
+        ),
+        oracle_pointmesh_normalization_clip=float(
+            model_cfg.oracle_pointmesh_pointnet.normalization_clip
+        ),
+        tool_mesh_contract=(
+            "object_mesh"
+            if exp_cfg.contact_gen.tool_source == TOOL_SOURCE_OBJECTS
+            else "adjusted_decomposed_mesh"
+        ),
     )
-
-
-def _strip_pretrain_logging_from_exp_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    cleaned = dict(payload)
-    cleaned.pop("pretrain_reuse", None)
-    contact_gen = dict(cleaned.get("contact_gen") or {})
-    if contact_gen:
-        cleaned["contact_gen"] = strip_contact_gen_hash_defaults(contact_gen)
-    pretrain = dict(cleaned.get("pretrain") or {})
-    if isinstance(pretrain.get("loss"), dict):
-        pretrain["loss"] = dict(pretrain["loss"])
-    for key in ("logger", "wandb_project", "wandb_run_name", "wandb_entity", "wandb_mode"):
-        pretrain.pop(key, None)
-    _strip_default_sdf_relative_loss(pretrain)
-    _strip_default_condition_normalization(pretrain)
-    if pretrain:
-        cleaned["pretrain"] = pretrain
-    model = dict(cleaned.get("model") or {})
-    policy_fusion = dict(model.get("policy_fusion") or {})
-    if policy_fusion:
-        policy_fusion["query_dim"] = 128
-        model["policy_fusion"] = policy_fusion
-    if model:
-        cleaned["model"] = model
-    return cleaned
-
-
-def _strip_default_sdf_relative_loss(pretrain: dict[str, Any]) -> None:
-    loss = pretrain.get("loss")
-    if not isinstance(loss, dict):
-        return
-    if bool(loss.get("sdf_relative_loss", False)):
-        return
-    if float(loss.get("sdf_relative_eps", 0.005)) != 0.005:
-        return
-    loss.pop("sdf_relative_loss", None)
-    loss.pop("sdf_relative_eps", None)
-
-
-def _strip_default_condition_normalization(pretrain: dict[str, Any]) -> None:
-    if pretrain.get("condition_normalization") is not None:
-        return
-    pretrain.pop("condition_normalization", None)
-    pretrain.pop("condition_norm_sample_files", None)
-    pretrain.pop("condition_norm_eps", None)
 
 
 def _contact_artifact_dir(exp_cfg: ExpCfg) -> Path:
@@ -861,6 +1015,16 @@ def _resolve_config_path(raw_path: str, paths: ProjectPaths) -> Path:
     return (paths.source_yaml.parent / path).resolve()
 
 
+def _required_vit_attention_mode(active_encoder_cfg) -> str:
+    mode = getattr(active_encoder_cfg, "vit_attention_mode", None)
+    if mode not in {"joint_self", "cross_only"}:
+        raise RuntimeError(
+            "Active encoder config must explicitly define vit_attention_mode as "
+            f"joint_self or cross_only, got {mode!r}"
+        )
+    return str(mode)
+
+
 def _runtime_config_from_json(path: str | Path) -> PretrainRuntimeConfig:
     payload = read_json(path)
     if not isinstance(payload, dict):
@@ -875,12 +1039,27 @@ def _runtime_config_from_json(path: str | Path) -> PretrainRuntimeConfig:
         "condition_std",
         "optimizer_betas",
         "unicorn_decoder_hidden",
+        "unicorn_aug_rotation_range",
         "unicorn_aug_translation_range",
         "unicorn_aug_log_scale_range",
     }
     for key in tuple_keys:
         if key in payload and payload[key] is not None:
             payload[key] = tuple(payload[key])
+    payload.setdefault("use_geometry_candidates", False)
+    payload.setdefault("max_contacts_per_file", 0)
+    payload.setdefault("max_gradient_norm", 1.0)
+    payload.setdefault("unicorn_decoder_type", "relu_mlp")
+    payload.setdefault("unicorn_paper_pair_augmentation", False)
+    payload.setdefault("unicorn_aug_rotation_range", (0.0, 0.0))
+    payload.setdefault("unicorn_label_source", "mesh_sdf")
+    payload.setdefault("kinematic_conditioning", False)
+    payload.setdefault("kinematic_attention_layers", 1)
+    payload.setdefault("kinematic_delta_std", 0.15)
+    if "vit_attention_mode" not in payload:
+        raise RuntimeError(
+            f"Pretrain runtime config is missing required vit_attention_mode: {path}"
+        )
     return PretrainRuntimeConfig(**payload)
 
 
@@ -908,23 +1087,49 @@ def _run_unicorn_training_loop(cfg: PretrainRuntimeConfig) -> dict[str, Any]:
     device = _select_pretrain_device(cfg, local_rank)
     torch.manual_seed(cfg.seed + rank)
 
-    train_ds, val_ds = make_unicorn_split(
+    train_ds, val_ds = make_split(
         data_dir=cfg.data_dir,
+        use_geometry_candidates=cfg.use_geometry_candidates,
+        max_contacts_per_file=cfg.max_contacts_per_file,
         val_ratio=cfg.val_ratio,
         seed=cfg.seed,
         augment=cfg.augment,
         max_files=cfg.max_files,
+        require_movement=False,
         num_points=cfg.num_pts,
+        num_precontact_steps=0,
         allow_mock_physics=cfg.allow_mock_physics,
-        contact_eps=cfg.unicorn_contact_eps,
-        label_backend=cfg.unicorn_label_backend,
-        label_chunk_size=cfg.unicorn_label_chunk_size,
-        translation_range=cfg.unicorn_aug_translation_range,
-        log_scale_range=cfg.unicorn_aug_log_scale_range,
-        noise_std=cfg.unicorn_aug_noise_std,
+        noise_max_trans=cfg.noise_max_trans,
+        noise_max_rot_deg=cfg.noise_max_rot_deg,
+        noise_max_retries=cfg.noise_max_retries,
+        floor_eps=cfg.floor_eps,
+        validation_seed=cfg.validation_seed,
+        denoise_target_mode=cfg.denoise_target_mode,
+        tool_mesh_contract=cfg.tool_mesh_contract,
+        include_meshes=(
+            not cfg.use_saved_contact_clouds
+            and cfg.unicorn_label_source != "precomputed_mesh_sdf"
+        ),
+        surface_jitter_std=(
+            0.0 if cfg.unicorn_paper_pair_augmentation else 1e-3
+        ),
+        kinematic_conditioning=cfg.kinematic_conditioning,
+        kinematic_delta_std=cfg.kinematic_delta_std,
+        use_saved_contact_clouds=cfg.use_saved_contact_clouds,
     )
+    if cfg.condition_normalization:
+        condition_mean, condition_std = _estimate_condition_normalization_stats(
+            train_ds,
+            enabled_heads=cfg.enabled_heads,
+            movement_cond_dim=cfg.movement_cond_dim,
+            sample_files=cfg.condition_norm_sample_files,
+            eps=cfg.condition_norm_eps,
+        )
+        cfg.condition_mean = condition_mean
+        cfg.condition_std = condition_std
+
     world_size = int(os.environ.get("WORLD_SIZE", 1))
-    per_rank_batch = max(1, int(cfg.batch_size) // max(1, world_size))
+    per_rank_batch = int(cfg.batch_size)
     train_sampler = DistributedSampler(train_ds) if world_size > 1 else None
     val_sampler = DistributedSampler(val_ds, shuffle=False) if world_size > 1 else None
     train_dl = DataLoader(
@@ -933,7 +1138,7 @@ def _run_unicorn_training_loop(cfg: PretrainRuntimeConfig) -> dict[str, Any]:
         sampler=train_sampler,
         shuffle=(train_sampler is None),
         num_workers=cfg.num_workers,
-        pin_memory=(device.type == "cuda"),
+        pin_memory=True,
         drop_last=False,
         collate_fn=collate_fn,
     )
@@ -943,7 +1148,7 @@ def _run_unicorn_training_loop(cfg: PretrainRuntimeConfig) -> dict[str, Any]:
         sampler=val_sampler,
         shuffle=False,
         num_workers=cfg.num_workers,
-        pin_memory=(device.type == "cuda"),
+        pin_memory=True,
         drop_last=False,
         collate_fn=collate_fn,
     )
@@ -951,9 +1156,9 @@ def _run_unicorn_training_loop(cfg: PretrainRuntimeConfig) -> dict[str, Any]:
     if is_main():
         print(f"Train: {len(train_ds)} contact cases, Val: {len(val_ds)} contact cases")
         print(
-            "Task: unicorn_contact "
-            f"global_batch_size={cfg.batch_size} per_rank_batch_size={per_rank_batch} "
-            f"num_workers={cfg.num_workers} lr={cfg.lr:.6g} optimizer={cfg.optimizer_name} "
+            f"Task: {cfg.pretrain_mode} batch_size={cfg.batch_size} "
+            f"per_rank_batch_size={per_rank_batch} num_workers={cfg.num_workers} "
+            f"lr={cfg.lr:.6g} optimizer={cfg.optimizer_name} "
             f"scheduler={cfg.scheduler} min_lr={cfg.min_lr:.6g}"
         )
         print(
@@ -962,21 +1167,45 @@ def _run_unicorn_training_loop(cfg: PretrainRuntimeConfig) -> dict[str, Any]:
             f"positive_patch_fraction={cfg.unicorn_positive_patch_fraction:g}"
         )
 
-    model = UnicornPretrainModel(
+    model_cls = {
+        "unicorn_contact": UnicornPretrainModel,
+        "oracle_contact": OracleContactPretrainModel,
+        "oracle_pointmesh_contact": OraclePointMeshPointNetPretrainModel,
+    }[cfg.pretrain_mode]
+    model_kwargs = dict(
         num_points=cfg.num_pts,
         num_patches=cfg.unicorn_num_patches,
         patch_size=cfg.patch_size,
         encoder_channel=cfg.encoder_channel,
         vit_depth=cfg.vit_depth,
         vit_heads=cfg.vit_heads,
-        decoder_hidden_dims=cfg.unicorn_decoder_hidden,
+        vit_attention_mode=cfg.vit_attention_mode,
+        decoder_hidden_dims=cfg.head_hidden,
         positive_patch_fraction=cfg.unicorn_positive_patch_fraction,
         patch_positive_rule=cfg.unicorn_patch_positive_rule,
         positive_min_points=cfg.unicorn_positive_min_points,
         label_backend=cfg.unicorn_label_backend,
         contact_eps=cfg.unicorn_contact_eps,
         label_chunk_size=cfg.unicorn_label_chunk_size,
-    ).to(device)
+        encoder_input_centering=cfg.encoder_input_centering,
+    )
+    if cfg.pretrain_mode == "oracle_contact":
+        model_kwargs.update(
+            include_contact_feature=cfg.oracle_include_contact_feature,
+            center_scale_m=cfg.oracle_center_scale_m,
+            distance_scale_m=cfg.oracle_distance_scale_m,
+            patch_relative_scale_m=cfg.oracle_patch_relative_scale_m,
+            log_distance_resolution_m=cfg.oracle_log_distance_resolution_m,
+            log_distance_cap_m=cfg.oracle_log_distance_cap_m,
+            normalization_clip=cfg.oracle_normalization_clip,
+        )
+    elif cfg.pretrain_mode == "oracle_pointmesh_contact":
+        model_kwargs.update(
+            coordinate_scale_m=cfg.oracle_pointmesh_coordinate_scale_m,
+            distance_scale_m=cfg.oracle_pointmesh_distance_scale_m,
+            normalization_clip=cfg.oracle_pointmesh_normalization_clip,
+        )
+    model = model_cls(**model_kwargs).to(device)
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank] if device.type == "cuda" else None, find_unused_parameters=False)
 
@@ -986,7 +1215,13 @@ def _run_unicorn_training_loop(cfg: PretrainRuntimeConfig) -> dict[str, Any]:
     start_epoch = 0
     best_val = float("inf")
     if cfg.resume:
-        start_epoch, best_val = load_ckpt(cfg.resume, model, optimizer)
+        start_epoch, best_val = load_ckpt(
+            cfg.resume,
+            model,
+            optimizer,
+            expected_vit_attention_mode=cfg.vit_attention_mode,
+            expected_kinematic_conditioning=cfg.kinematic_conditioning,
+        )
         if is_main():
             print(f"Resumed from {cfg.resume} at epoch {start_epoch}, best_val={best_val:.6f}")
 
@@ -1018,17 +1253,23 @@ def _run_unicorn_training_loop(cfg: PretrainRuntimeConfig) -> dict[str, Any]:
                 loss, metrics = train_step_unicorn(model, batch, device)
                 optimizer.zero_grad()
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1000.0)
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), cfg.max_gradient_norm
+                )
                 optimizer.first_step(zero_grad=True)
                 second_loss, _ = train_step_unicorn(model, batch, device)
                 second_loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1000.0)
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), cfg.max_gradient_norm
+                )
                 optimizer.second_step(zero_grad=True)
             else:
                 loss, metrics = train_step_unicorn(model, batch, device)
                 optimizer.zero_grad()
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1000.0)
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), cfg.max_gradient_norm
+                )
                 optimizer.step()
             epoch_loss += float(loss.item())
             for key, value in metrics.items():
@@ -1087,7 +1328,10 @@ def _run_unicorn_training_loop(cfg: PretrainRuntimeConfig) -> dict[str, Any]:
         if is_main():
             train_detail = _format_metric_subset(
                 avg_train,
-                ("contact_loss", "bce_A", "bce_B", "patch_pos_frac_A", "patch_pos_frac_B", "contact_acc"),
+                (
+                    "contact_loss", "bce_A", "bce_B", "patch_pos_frac_A",
+                    "patch_pos_frac_B", "contact_acc",
+                ),
             )
             val_detail = _format_metric_subset(
                 avg_val,
@@ -1141,7 +1385,11 @@ def _run_unicorn_training_loop(cfg: PretrainRuntimeConfig) -> dict[str, Any]:
 
 
 def _run_training_loop(cfg: PretrainRuntimeConfig) -> dict[str, Any]:
-    if cfg.pretrain_mode == "unicorn_contact":
+    if cfg.pretrain_mode in {
+        "unicorn_contact",
+        "oracle_contact",
+        "oracle_pointmesh_contact",
+    }:
         return _run_unicorn_training_loop(cfg)
     require_movement = "postcontact" in cfg.enabled_heads
 
@@ -1153,6 +1401,8 @@ def _run_training_loop(cfg: PretrainRuntimeConfig) -> dict[str, Any]:
     # ── Data ─────────────────────────────────────────────────────────────
     train_ds, val_ds = make_split(
         data_dir=cfg.data_dir,
+        use_geometry_candidates=cfg.use_geometry_candidates,
+        max_contacts_per_file=cfg.max_contacts_per_file,
         val_ratio=cfg.val_ratio,
         seed=cfg.seed,
         augment=cfg.augment,
@@ -1167,6 +1417,17 @@ def _run_training_loop(cfg: PretrainRuntimeConfig) -> dict[str, Any]:
         floor_eps=cfg.floor_eps,
         validation_seed=cfg.validation_seed,
         denoise_target_mode=cfg.denoise_target_mode,
+        tool_mesh_contract=cfg.tool_mesh_contract,
+        include_meshes=(
+            not cfg.use_saved_contact_clouds
+            and cfg.unicorn_label_source != "precomputed_mesh_sdf"
+        ),
+        surface_jitter_std=(
+            0.0 if cfg.unicorn_paper_pair_augmentation else 1e-3
+        ),
+        kinematic_conditioning=cfg.kinematic_conditioning,
+        kinematic_delta_std=cfg.kinematic_delta_std,
+        use_saved_contact_clouds=cfg.use_saved_contact_clouds,
     )
     if cfg.condition_normalization:
         condition_mean, condition_std = _estimate_condition_normalization_stats(
@@ -1227,7 +1488,24 @@ def _run_training_loop(cfg: PretrainRuntimeConfig) -> dict[str, Any]:
     )
 
     # ── Model ────────────────────────────────────────────────────────────
-    model = ContactDiffusionModel(
+    model_cls = (
+        OraclePointCloudPointNetPretrainModel
+        if cfg.pretrain_mode in {
+            "oracle_pointcloud_diffusion",
+            "oracle_pointcloud_postcontact",
+        }
+        else ContactDiffusionModel
+    )
+    pointcloud_model_kwargs = (
+        {
+            "pointcloud_input_normalization": (
+                cfg.pointcloud_input_normalization
+            )
+        }
+        if model_cls is OraclePointCloudPointNetPretrainModel
+        else {}
+    )
+    model = model_cls(
         head_mode=cfg.head_mode,
         patch_agg=cfg.patch_agg,
         head_hidden=cfg.head_hidden,
@@ -1236,7 +1514,10 @@ def _run_training_loop(cfg: PretrainRuntimeConfig) -> dict[str, Any]:
         encoder_channel=cfg.encoder_channel,
         vit_depth=cfg.vit_depth,
         vit_heads=cfg.vit_heads,
+        vit_attention_mode=cfg.vit_attention_mode,
         freeze_encoder=cfg.freeze_encoder,
+        kinematic_conditioning=cfg.kinematic_conditioning,
+        kinematic_attention_layers=cfg.kinematic_attention_layers,
         cross_attn_heads=cfg.cross_attn_heads,
         cross_attn_layers=cfg.cross_attn_layers,
         condition_mlp_hidden_dims=cfg.condition_mlp_hidden_dims,
@@ -1265,22 +1546,40 @@ def _run_training_loop(cfg: PretrainRuntimeConfig) -> dict[str, Any]:
         sdf_chunk_size=cfg.sdf_chunk_size,
         sdf_relative_loss=cfg.sdf_relative_loss,
         sdf_relative_eps=cfg.sdf_relative_eps,
+        encoder_input_centering=cfg.encoder_input_centering,
+        contact_eps=cfg.unicorn_contact_eps,
+        contact_label_source=cfg.unicorn_label_source,
+        contact_positive_patch_fraction=cfg.unicorn_positive_patch_fraction,
+        contact_patch_positive_rule=cfg.unicorn_patch_positive_rule,
+        contact_positive_min_points=cfg.unicorn_positive_min_points,
+        contact_decoder_type=cfg.unicorn_decoder_type,
+        contact_decoder_hidden=cfg.unicorn_decoder_hidden,
+        contact_pair_augmentation=cfg.unicorn_paper_pair_augmentation,
+        contact_aug_rotation_range=cfg.unicorn_aug_rotation_range,
+        contact_aug_translation_range=cfg.unicorn_aug_translation_range,
+        contact_aug_log_scale_range=cfg.unicorn_aug_log_scale_range,
+        contact_aug_noise_std=cfg.unicorn_aug_noise_std,
+        **pointcloud_model_kwargs,
     ).to(device)
 
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank], find_unused_parameters=False)
 
     # ── Optimizer ────────────────────────────────────────────────────────
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
-    )
+    optimizer = _build_optimizer(model.parameters(), cfg)
     scheduler = _build_lr_scheduler(optimizer, cfg)
 
     # ── Resume ───────────────────────────────────────────────────────────
     start_epoch = 0
     best_val = float("inf")
     if cfg.resume:
-        start_epoch, best_val = load_ckpt(cfg.resume, model, optimizer)
+        start_epoch, best_val = load_ckpt(
+            cfg.resume,
+            model,
+            optimizer,
+            expected_vit_attention_mode=cfg.vit_attention_mode,
+            expected_kinematic_conditioning=cfg.kinematic_conditioning,
+        )
         if is_main():
             print(f"Resumed from {cfg.resume} at epoch {start_epoch}, best_val={best_val:.6f}")
 
@@ -1318,8 +1617,19 @@ def _run_training_loop(cfg: PretrainRuntimeConfig) -> dict[str, Any]:
 
             optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(), cfg.max_gradient_norm
+            )
+            if isinstance(optimizer, SAM):
+                optimizer.first_step(zero_grad=True)
+                second_loss, _ = train_step(model, batch, cfg, device)
+                second_loss.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), cfg.max_gradient_norm
+                )
+                optimizer.second_step(zero_grad=True)
+            else:
+                optimizer.step()
 
             epoch_loss += loss.item()
             for k, v in metrics.items():
@@ -1332,6 +1642,15 @@ def _run_training_loop(cfg: PretrainRuntimeConfig) -> dict[str, Any]:
                     avg,
                     (
                         "total_loss",
+                        "contact_loss",
+                        "bce_A",
+                        "bce_B",
+                        "patch_pos_frac_A",
+                        "patch_pos_frac_B",
+                        "empty_positive_patch_count",
+                        "contact_acc",
+                        "contact_precision",
+                        "contact_recall",
                         "sdf_loss",
                         "tool_sdf_loss",
                         "obj_sdf_loss",
@@ -1382,6 +1701,15 @@ def _run_training_loop(cfg: PretrainRuntimeConfig) -> dict[str, Any]:
                 avg_train,
                 (
                     "sdf_loss",
+                    "contact_loss",
+                    "bce_A",
+                    "bce_B",
+                    "patch_pos_frac_A",
+                    "patch_pos_frac_B",
+                    "empty_positive_patch_count",
+                    "contact_acc",
+                    "contact_precision",
+                    "contact_recall",
                     "tool_sdf_loss",
                     "obj_sdf_loss",
                     "denoise_loss",
@@ -1401,6 +1729,15 @@ def _run_training_loop(cfg: PretrainRuntimeConfig) -> dict[str, Any]:
                 avg_val,
                 (
                     "val_sdf_loss",
+                    "val_contact_loss",
+                    "val_bce_A",
+                    "val_bce_B",
+                    "val_patch_pos_frac_A",
+                    "val_patch_pos_frac_B",
+                    "val_empty_positive_patch_count",
+                    "val_contact_acc",
+                    "val_contact_precision",
+                    "val_contact_recall",
                     "val_tool_sdf_loss",
                     "val_obj_sdf_loss",
                     "val_denoise_loss",

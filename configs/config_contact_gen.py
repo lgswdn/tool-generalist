@@ -8,31 +8,15 @@ from typing import Optional
 
 ROTATION_SELECTION_MOST_DOWNWARD = "most_downward_legal_tool_z_axis"
 ROTATION_SELECTION_RANDOM_LEGAL = "random_legal"
+ROTATION_SELECTION_MOST_CAVITY_CENTERED = "most_cavity_centered_legal"
 TOOL_SOURCE_SELECTED_TOOLS = "selected_tools"
 TOOL_SOURCE_OBJECTS = "objects"
-
-CONTACT_GEN_HASH_COMPAT_DEFAULTS = {
-    "rotation_selection": ROTATION_SELECTION_MOST_DOWNWARD,
-    "tool_source": TOOL_SOURCE_SELECTED_TOOLS,
-    "object_tool_manifest": None,
-    "allow_self_object_tool_pairs": False,
-}
-CONTACT_GEN_HASH_RUNTIME_FIELDS = {
-    "shard_count",
-    "shard_index",
-}
-
-
-def strip_contact_gen_hash_defaults(payload: dict) -> dict:
-    """Drop newly added default fields so old experiment hashes stay stable."""
-
-    cleaned = dict(payload)
-    for key in CONTACT_GEN_HASH_RUNTIME_FIELDS:
-        cleaned.pop(key, None)
-    for key, default in CONTACT_GEN_HASH_COMPAT_DEFAULTS.items():
-        if cleaned.get(key) == default:
-            cleaned.pop(key, None)
-    return cleaned
+CONTACT_GEOMETRY_ANCHOR_PAIR_REJECTION = "anchor_pair_rejection"
+CONTACT_GEOMETRY_BBOX_TRANSLATION_NEAREST = "bbox_translation_nearest"
+CONTACT_GEOMETRY_INTERSECTING_ANCHORS = "intersecting_anchor_pairs"
+CONTACT_GEOMETRY_TANGENT_GAUSSIAN = "tangent_gaussian"
+PENETRATION_CHECK_TOOL_INTO_OBJECT = "tool_into_object"
+PENETRATION_CHECK_BIDIRECTIONAL = "bidirectional_surface_sdf"
 
 
 @dataclass
@@ -89,16 +73,49 @@ class ContactGenCfg:
     B: int = 2048
     M: int = 4096
     chunk_B: int = 512
-    object_scale_range: tuple[float, float] = (0.1, 0.2)
+    object_scale_range: tuple[float, float] = (0.1, 0.4)
     num_surface_pts: int = 512
     sdf_grid_res: int = 128
     sdf_padding: float = 0.03
-    contact_mode_prob: dict[str, float] = field(
-        default_factory=lambda: {"head": 0.75, "body": 0.25}
-    )
     epsilon: float = 2e-3
     floor_eps: float = 0.0
     upright_threshold: float = 0.0
+    contact_geometry_mode: str = CONTACT_GEOMETRY_ANCHOR_PAIR_REJECTION
+    # When true, geometry candidates are the terminal dataset: Isaac
+    # stabilization and post-contact rollout are intentionally omitted.
+    geometry_only: bool = False
+    # Require anchors to come from the explicit contact_tip_mesh stored in the
+    # adjusted tool catalog. It never falls back to the full tool cloud.
+    require_tool_tip_anchor: bool = False
+    # Refill rejected anchor pairs until exactly B candidates are produced.
+    # Fail rather than silently creating a smaller dataset if this target
+    # cannot be reached within rejection_max_rounds.
+    rejection_refill: bool = False
+    rejection_max_rounds: int = 1
+    # Select exactly the same number of object pairs for every selected tool.
+    # This is required by controlled representation comparisons whose contact
+    # dataset must expose every gripper equally often.
+    balanced_tool_pairs: bool = False
+    # Treat any missing pair/pose output as a fatal stage error. Controlled
+    # comparisons must never silently continue with differently sized data.
+    require_complete: bool = False
+    # Persist paper-style point-in-any-convex-component labels alongside each
+    # geometry candidate instead of recomputing mesh signs every epoch.
+    precompute_convex_union_labels: bool = False
+    # Persist mutual signed point-to-mesh distances for every candidate and
+    # sampled cloud. Pretraining can then apply its contact threshold without
+    # repeating expensive mesh queries.
+    precompute_mesh_sdf: bool = False
+    # Paper-style UniCORN contact generation first brings the two meshes to
+    # tangency, then perturbs the moving geometry by a small zero-mean SE(3)
+    # Gaussian.  The paper does not publish these two standard deviations, so
+    # experiments must record them explicitly.
+    tangent_translation_noise_std: float = 0.002
+    tangent_rotation_noise_std_rad: float = 0.01
+    # Apply the same SE(3) Gaussian after anchor alignment in the rejection
+    # sampler, then run floor and bidirectional penetration checks on the
+    # perturbed pose. This keeps the final sample nonpenetrating.
+    rejection_apply_tangent_gaussian: bool = False
     rotation_selection: str = ROTATION_SELECTION_MOST_DOWNWARD
     tool_source: str = TOOL_SOURCE_SELECTED_TOOLS
     object_tool_manifest: Optional[str] = None
@@ -107,6 +124,11 @@ class ContactGenCfg:
     shard_index: int = 0
     max_contacts_per_pair: int = 1
     penetration_eps: float = 5e-4
+    # The legacy rejection sampler only queried tool surface points against
+    # the object SDF. Bidirectional mode additionally rejects object surface
+    # points lying inside the tool, which is required for a genuinely
+    # non-penetrating geometry control.
+    penetration_check_mode: str = PENETRATION_CHECK_TOOL_INTO_OBJECT
     rotation_orth_eps: float = 1e-4
     artifact_subdir: str = "contact"
     skip_existing: bool = True

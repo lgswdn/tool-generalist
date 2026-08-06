@@ -1,0 +1,16 @@
+dgn:
+  candidates_json: /mnt/project/world_model/tool_generalist/assets/DGN/full_yes.json
+  usd_dir: /mnt/project/world_model/tool_generalist/assets/DGN/coacd_usd
+  obj_dir: /mnt/project/world_model/tool_generalist/assets/DGN/coacd_normalized
+objects:
+  candidates_json: /mnt/project/world_model/tool_generalist/assets/DGN/full_yes.json
+  usd_dir: /mnt/project/world_model/tool_generalist/assets/DGN/coacd_usd
+  obj_dir: /mnt/project/world_model/tool_generalist/assets/DGN/coacd_normalized
+tools:
+  robots_usd_dir: /mnt/project/world_model/tool_generalist/Robots
+  tools_adjusted_json: ../generated_gripper_contact_assets/tools_adjusted.json
+  tools_selected_json: ../generated_gripper_contact_assets/tools_selected.json
+  meshdata_adjusted_root: ../generated_gripper_contact_assets/meshdata_adjusted
+one_dof_grippers:
+  root: ../../thirdparty/rpdiff/src/rpdiff/descriptions/franka_panda_table
+  manifest: ../grippers/robotiq_3f.json

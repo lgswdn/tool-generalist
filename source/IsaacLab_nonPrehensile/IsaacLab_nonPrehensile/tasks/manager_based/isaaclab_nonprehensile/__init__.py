@@ -17,6 +17,74 @@ gym.register(
 )
 
 gym.register(
+    id="panda-gripper-v0",
+    entry_point=f"{__name__}.env_tool_unstable:NonPrehensileUnstableEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.env_tool_unstable:NonPrehensileUnstableEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.config.rsl_rl_ppo_cfg:TGPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="generated-gripper-v0",
+    entry_point=f"{__name__}.env_tool_unstable:NonPrehensileUnstableEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.env_tool_unstable:NonPrehensileUnstableEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.config.rsl_rl_ppo_cfg:TGPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="one-dof-gripper-v0",
+    entry_point=f"{__name__}.env_tool_unstable:NonPrehensileUnstableEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.env_tool_unstable:NonPrehensileUnstableEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.config.rsl_rl_ppo_cfg:TGPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="cross-embodiment-gripper-v0",
+    entry_point=f"{__name__}.env_tool_unstable:NonPrehensileUnstableEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.env_tool_unstable:NonPrehensileUnstableEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.config.rsl_rl_ppo_cfg:TGPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="generated-gripper-oracle-v0",
+    entry_point=f"{__name__}.env_tool_oracle:OracleNonPrehensileUnstableEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.env_tool_oracle:OracleNonPrehensileUnstableEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.config.rsl_rl_ppo_cfg:TGPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="generated-gripper-oracle-pointmesh-v0",
+    entry_point=(
+        f"{__name__}.env_tool_oracle_pointmesh:"
+        "OraclePointMeshNonPrehensileUnstableEnv"
+    ),
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.env_tool_oracle_pointmesh:"
+            "OraclePointMeshNonPrehensileUnstableEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.config.rsl_rl_ppo_cfg:TGPPORunnerCfg",
+    },
+)
+
+gym.register(
     id="tool-unstable-v0",
     entry_point=f"{__name__}.env_tool_unstable:NonPrehensileUnstableEnv",
     disable_env_checker=True,

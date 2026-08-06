@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "grippers": [
+    {
+      "id": "robotiq_2f140",
+      "category": "robotiq_like",
+      "topology_family": "robotiq_2f140",
+      "root_dir": "../../thirdparty/rpdiff/src/rpdiff/descriptions/franka_panda_table",
+      "urdf_path": "panda_2f140.urdf",
+      "usd_path": "panda_2f140.usd",
+      "palm_body_name": "robotiq_arg2f_base_link",
+      "ee_body_name": "panda_grasptarget",
+      "grasp_frame": {
+        "body_name": "panda_grasptarget",
+        "offset": {
+          "translation": [0.0, 0.0, 0.0],
+          "quat_wxyz": [1.0, 0.0, 0.0, 0.0]
+        }
+      },
+      "control": {
+        "command_dim": 1,
+        "adapter": "primary_joint_with_mimics",
+        "actuated_joint_names": ["finger_joint"],
+        "measured_joint_name": "finger_joint",
+        "open_joint_positions": [0.0],
+        "closed_joint_positions": [0.7],
+        "actuator": {
+          "effort_limit": 60.0,
+          "stiffness": 800.0,
+          "damping": 50.0,
+          "armature": 0.005,
+          "velocity_limit": 2.0
+        }
+      },
+      "cloud_parts": [
+        {
+          "body_name": "robotiq_arg2f_coupling",
+          "geometry_type": "mesh",
+          "mesh_path": "meshes/robotiq_2f140/collision/robotiq_arg2f_coupling.stl",
+          "mesh_scale": [0.001, 0.001, 0.001]
+        },
+        {
+          "body_name": "robotiq_arg2f_base_link",
+          "geometry_type": "mesh",
+          "mesh_path": "meshes/robotiq_2f140/collision/robotiq_arg2f_base_link.stl"
+        },
+        {
+          "body_name": "left_outer_knuckle",
+          "geometry_type": "mesh",
+          "mesh_path": "meshes/robotiq_2f140/collision/robotiq_arg2f_140_outer_knuckle.stl"
+        },
+        {
+          "body_name": "left_outer_finger",
+          "geometry_type": "mesh",
+          "mesh_path": "meshes/robotiq_2f140/collision/robotiq_arg2f_140_outer_finger.stl"
+        },
+        {
+          "body_name": "left_inner_finger",
+          "geometry_type": "mesh",
+          "mesh_path": "meshes/robotiq_2f140/collision/robotiq_arg2f_140_inner_finger.stl"
+        },
+        {
+          "body_name": "left_inner_finger_pad",
+          "geometry_type": "box",
+          "box_size": [0.03, 0.07, 0.0075]
+        },
+        {
+          "body_name": "left_inner_knuckle",
+          "geometry_type": "mesh",
+          "mesh_path": "meshes/robotiq_2f140/collision/robotiq_arg2f_140_inner_knuckle.stl"
+        },
+        {
+          "body_name": "right_outer_knuckle",
+          "geometry_type": "mesh",
+          "mesh_path": "meshes/robotiq_2f140/collision/robotiq_arg2f_140_outer_knuckle.stl"
+        },
+        {
+          "body_name": "right_outer_finger",
+          "geometry_type": "mesh",
+          "mesh_path": "meshes/robotiq_2f140/collision/robotiq_arg2f_140_outer_finger.stl"
+        },
+        {
+          "body_name": "right_inner_finger",
+          "geometry_type": "mesh",
+          "mesh_path": "meshes/robotiq_2f140/collision/robotiq_arg2f_140_inner_finger.stl"
+        },
+        {
+          "body_name": "right_inner_finger_pad",
+          "geometry_type": "box",
+          "box_size": [0.03, 0.07, 0.0075]
+        },
+        {
+          "body_name": "right_inner_knuckle",
+          "geometry_type": "mesh",
+          "mesh_path": "meshes/robotiq_2f140/collision/robotiq_arg2f_140_inner_knuckle.stl"
+        }
+      ],
+      "params": {
+        "official_model": "Robotiq 2F-140",
+        "policy_control_dof": 1
+      }
+    }
+  ]
+}

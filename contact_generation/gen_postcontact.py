@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from configs.config_contact_gen import (
+    CONTACT_GEOMETRY_ANCHOR_PAIR_REJECTION,
+    PENETRATION_CHECK_TOOL_INTO_OBJECT,
     ROTATION_SELECTION_MOST_DOWNWARD,
     TOOL_SOURCE_OBJECTS,
     ContactGenCfg,
@@ -60,16 +62,24 @@ class ContactPairConfig:
     chunk_B: int = 1
     tool_scale: float = 0.1
     tool_scale_xyz: tuple[float, float, float] = (0.1, 0.1, 0.1)
-    object_scale_range: tuple[float, float] = (0.1, 0.2)
+    object_scale_range: tuple[float, float] = (0.1, 0.4)
     num_tool_surface_pts: int = 512
     upright_threshold: float = 0.0
     rotation_selection: str = ROTATION_SELECTION_MOST_DOWNWARD
     tool_mesh_contract: str = "adjusted_decomposed_mesh"
-    use_tool_head_area: bool = True
+    require_tool_tip_anchor: bool = False
     epsilon: float = 2e-3
     floor_eps: float = 0.0
     penetration_eps: float = 5e-4
-    contact_mode_prob: Mapping[str, float] | float = None
+    penetration_check_mode: str = PENETRATION_CHECK_TOOL_INTO_OBJECT
+    contact_geometry_mode: str = CONTACT_GEOMETRY_ANCHOR_PAIR_REJECTION
+    rejection_refill: bool = False
+    rejection_max_rounds: int = 1
+    tangent_translation_noise_std: float = 0.002
+    tangent_rotation_noise_std_rad: float = 0.01
+    rejection_apply_tangent_gaussian: bool = False
+    precompute_convex_union_labels: bool = False
+    precompute_mesh_sdf: bool = False
     physics_runner: str = "isaac"
     t_stabilize: int = 120
     t_postcontact: int = 120
@@ -151,10 +161,30 @@ class ContactPairConfig:
                 if contact_cfg.tool_source == TOOL_SOURCE_OBJECTS
                 else "adjusted_decomposed_mesh"
             ),
-            use_tool_head_area=contact_cfg.tool_source != TOOL_SOURCE_OBJECTS,
+            require_tool_tip_anchor=(
+                bool(contact_cfg.require_tool_tip_anchor)
+                and contact_cfg.tool_source != TOOL_SOURCE_OBJECTS
+            ),
             epsilon=contact_cfg.epsilon,
             floor_eps=contact_cfg.floor_eps,
-            contact_mode_prob=dict(contact_cfg.contact_mode_prob),
+            penetration_eps=contact_cfg.penetration_eps,
+            penetration_check_mode=contact_cfg.penetration_check_mode,
+            contact_geometry_mode=contact_cfg.contact_geometry_mode,
+            rejection_refill=bool(contact_cfg.rejection_refill),
+            rejection_max_rounds=int(contact_cfg.rejection_max_rounds),
+            tangent_translation_noise_std=float(
+                contact_cfg.tangent_translation_noise_std
+            ),
+            tangent_rotation_noise_std_rad=float(
+                contact_cfg.tangent_rotation_noise_std_rad
+            ),
+            rejection_apply_tangent_gaussian=bool(
+                contact_cfg.rejection_apply_tangent_gaussian
+            ),
+            precompute_convex_union_labels=bool(
+                contact_cfg.precompute_convex_union_labels
+            ),
+            precompute_mesh_sdf=bool(contact_cfg.precompute_mesh_sdf),
             physics_runner=physics.runner,
             t_stabilize=physics.t_stabilize,
             t_postcontact=physics.t_postcontact,
@@ -190,9 +220,6 @@ class ContactPairConfig:
         )
 
     def geometry_config(self) -> GeometryContactConfig:
-        contact_mode_prob = self.contact_mode_prob
-        if isinstance(contact_mode_prob, (float, int)):
-            contact_mode_prob = {"head": float(contact_mode_prob), "body": 1.0 - float(contact_mode_prob)}
         return GeometryContactConfig(
             object_mesh_path=self.object_mesh_path,
             tool_mesh_path=self.tool_mesh_path,
@@ -212,14 +239,30 @@ class ContactPairConfig:
             chunk_B=self.chunk_B,
             tool_scale_xyz=tuple(float(x) for x in self.tool_scale_xyz),
             object_scale_range=tuple(float(x) for x in self.object_scale_range),
-            contact_mode_prob=dict(contact_mode_prob or {"head": 0.7, "body": 0.3}),
             upright_threshold=self.upright_threshold,
             rotation_selection=self.rotation_selection,
             tool_mesh_contract=self.tool_mesh_contract,
-            use_tool_head_area=bool(self.use_tool_head_area),
+            require_tool_tip_anchor=bool(self.require_tool_tip_anchor),
             epsilon=self.epsilon,
             floor_eps=self.floor_eps,
             penetration_eps=self.penetration_eps,
+            penetration_check_mode=self.penetration_check_mode,
+            contact_geometry_mode=self.contact_geometry_mode,
+            rejection_refill=bool(self.rejection_refill),
+            rejection_max_rounds=int(self.rejection_max_rounds),
+            tangent_translation_noise_std=float(
+                self.tangent_translation_noise_std
+            ),
+            tangent_rotation_noise_std_rad=float(
+                self.tangent_rotation_noise_std_rad
+            ),
+            rejection_apply_tangent_gaussian=bool(
+                self.rejection_apply_tangent_gaussian
+            ),
+            precompute_convex_union_labels=bool(
+                self.precompute_convex_union_labels
+            ),
+            precompute_mesh_sdf=bool(self.precompute_mesh_sdf),
             visualization_enabled=bool(self.visualization_enabled),
         )
 

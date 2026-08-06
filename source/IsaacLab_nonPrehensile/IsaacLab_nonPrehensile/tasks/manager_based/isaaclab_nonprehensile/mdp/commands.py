@@ -28,44 +28,8 @@ from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.mdp.table
     table_top_z_from_contract,
 )
 
-# Lightweight profiling utilities for command functions
-import time
-from functools import wraps
-
-def _ensure_cmd_timers(env: "ManagerBasedRLEnv") -> dict:
-    if not hasattr(env, "_cmd_timers"):
-        env._cmd_timers = {}
-    return env._cmd_timers
-
 def profile_cmd(fn):
-    @wraps(fn)
-    def wrapper(self, *args, **kwargs):
-        timers = _ensure_cmd_timers(self._env)
-        name = fn.__name__
-        t0 = time.perf_counter()
-        result = fn(self, *args, **kwargs)
-        dt = time.perf_counter() - t0
-        entry = timers.get(name)
-        if entry is None:
-            timers[name] = {"time": dt, "count": 1}
-        else:
-            entry["time"] += dt
-            entry["count"] += 1
-        return result
-    return wrapper
-
-def print_cmd_timers(env: "ManagerBasedRLEnv") -> None:
-    timers = getattr(env, "_cmd_timers", {})
-    if not timers:
-        print("[cmd timers] no data collected yet")
-        return
-    print("[cmd timers] summary:")
-    for name, entry in timers.items():
-        total = entry["time"]
-        count = entry["count"]
-        avg = total / count if count > 0 else 0.0
-        print(f"  {name}: total={total:.6f}s count={count} avg={avg:.6f}s")
-
+    return fn
 
 class StablePoseCommand(CommandTerm):
     """Command generator for stable object poses using trimesh."""
@@ -83,6 +47,9 @@ class StablePoseCommand(CommandTerm):
 
         # create command buffer (7D: position + quaternion)
         self._command = torch.zeros(self.num_envs, 7, device=self.device)
+        self.target_pose_task_is_stable = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+        self.target_pose_task_index = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.target_pose_task_names = ("stable_pose", "random_pose")
 
         # Curriculum parameters - can be modified dynamically
         self.xy_offset_range = self.cfg.xy_offset_range
@@ -105,7 +72,7 @@ class StablePoseCommand(CommandTerm):
     def _resample_command(self, env_ids: torch.Tensor):
         """Resample commands for given environment indices."""
         from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
-            get_cached_cloud,
+            get_cached_object_cloud,
             get_object_asset_cfg_for_env,
             get_object_index_for_env,
         )
@@ -137,7 +104,7 @@ class StablePoseCommand(CommandTerm):
             sel = torch.tensor(g["indices"], device=self.device, dtype=torch.long)
             scales_sub = scales.index_select(0, sel)  # (G,3)
 
-            object_cloud = get_cached_cloud(obj_path)
+            object_cloud = get_cached_object_cloud(obj_path)
 
             # Batch sample stable poses (returns numpy), then convert to torch
             pos_np, quat_np = object_cloud.sample_stable_pose_trimesh_batch(scale=scales_sub.cpu().numpy())
@@ -185,6 +152,8 @@ class StablePoseCommand(CommandTerm):
         for i, env_id in enumerate(env_ids):
             env_id_int = int(env_id.item())
             self.command[env_id_int] = out[i]
+        self.target_pose_task_is_stable[env_ids] = True
+        self.target_pose_task_index[env_ids] = 0
 
         # Update visualization after resampling commands
         if self.cfg.debug_vis and self._target_visualizer is not None:
@@ -230,81 +199,6 @@ class StablePoseCommand(CommandTerm):
         dot_product = torch.clamp(torch.abs(dot_product), max=1.0)
         quat_angle = 2 * torch.acos(dot_product)
         self.metrics["rot_to_goal"] = quat_angle
-        self._print_pose_debug(object_pos_local, object_quat_w, target_pos_local, target_quat)
-
-    def _print_pose_debug(
-        self,
-        object_pos_local: torch.Tensor,
-        object_quat_w: torch.Tensor,
-        target_pos_local: torch.Tensor,
-        target_quat: torch.Tensor,
-    ) -> None:
-        count = int(getattr(self._env, "_rl_pose_debug_print_count", 0))
-        setattr(self._env, "_rl_pose_debug_print_count", count + 1)
-        if count >= 10 and count % 1000 != 0:
-            return
-        if self.num_envs <= 0:
-            return
-
-        env_i = 0
-
-        def _vals(tensor: torch.Tensor) -> list[float]:
-            return [round(float(v), 6) for v in tensor.detach().cpu().tolist()]
-
-        if getattr(self._env.cfg, "bimanual", False):
-            ee_frame_1 = self._env.scene["ee_frame_1"]
-            ee_frame_2 = self._env.scene["ee_frame_2"]
-            hand1_pos_local = (
-                mdp.get_head_area_pos_w_for_slot(
-                    self._env,
-                    ee_frame_name="ee_frame_1",
-                    offsets_attr="_head_area_offsets_1",
-                )
-                - self._env.scene.env_origins
-            )
-            hand2_pos_local = (
-                mdp.get_head_area_pos_w_for_slot(
-                    self._env,
-                    ee_frame_name="ee_frame_2",
-                    offsets_attr="_head_area_offsets_2",
-                )
-                - self._env.scene.env_origins
-            )
-            hand1_quat_w = ee_frame_1.data.target_quat_w[..., 0, :]
-            hand2_quat_w = ee_frame_2.data.target_quat_w[..., 0, :]
-            print(
-                "[rl_pose_debug] "
-                f"step={count} env={env_i} "
-                f"hand1_pos_E={_vals(hand1_pos_local[env_i])} "
-                f"hand1_quat_wxyz={_vals(hand1_quat_w[env_i])} "
-                f"hand2_pos_E={_vals(hand2_pos_local[env_i])} "
-                f"hand2_quat_wxyz={_vals(hand2_quat_w[env_i])} "
-                f"object_pos_E={_vals(object_pos_local[env_i])} "
-                f"object_quat_wxyz={_vals(object_quat_w[env_i])} "
-                f"target_pos_E={_vals(target_pos_local[env_i])} "
-                f"target_quat_wxyz={_vals(target_quat[env_i])} "
-                f"distance_to_goal={float(self.metrics['distance_to_goal'][env_i].detach().cpu()):.6f} "
-                f"rot_to_goal={float(self.metrics['rot_to_goal'][env_i].detach().cpu()):.6f}",
-                flush=True,
-            )
-            return
-
-        ee_frame = self._env.scene["ee_frame"]
-        hand_pos_local = mdp.get_head_area_pos_w(self._env) - self._env.scene.env_origins
-        hand_quat_w = ee_frame.data.target_quat_w[..., 0, :]
-        print(
-            "[rl_pose_debug] "
-            f"step={count} env={env_i} "
-            f"hand_pos_E={_vals(hand_pos_local[env_i])} "
-            f"hand_quat_wxyz={_vals(hand_quat_w[env_i])} "
-            f"object_pos_E={_vals(object_pos_local[env_i])} "
-            f"object_quat_wxyz={_vals(object_quat_w[env_i])} "
-            f"target_pos_E={_vals(target_pos_local[env_i])} "
-            f"target_quat_wxyz={_vals(target_quat[env_i])} "
-            f"distance_to_goal={float(self.metrics['distance_to_goal'][env_i].detach().cpu()):.6f} "
-            f"rot_to_goal={float(self.metrics['rot_to_goal'][env_i].detach().cpu()):.6f}",
-            flush=True,
-        )
 
     @property
     def command(self) -> torch.Tensor:
@@ -320,6 +214,13 @@ class StablePoseCommand(CommandTerm):
 class RandomPoseCommand(StablePoseCommand):
     """Command generator for arbitrary object orientations placed on the support surface."""
 
+    def __init__(self, cfg: "RandomPoseCommandCfg", env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        self.secondary_task = str(getattr(self.cfg, "secondary_task", "random_pose"))
+        if self.secondary_task not in {"random_pose", "grasp_lift"}:
+            raise ValueError(f"Unsupported secondary_task={self.secondary_task!r}")
+        self.target_pose_task_names = ("stable_pose", self.secondary_task)
+
     @profile_cmd
     def _resample_command(self, env_ids: torch.Tensor):
         """Resample random object target poses for given environment indices."""
@@ -329,17 +230,28 @@ class RandomPoseCommand(StablePoseCommand):
         stable_pose_probability = max(0.0, min(1.0, stable_pose_probability))
         if stable_pose_probability >= 1.0:
             StablePoseCommand._resample_command(self, env_ids)
+            self.target_pose_task_is_stable[env_ids] = True
+            self.target_pose_task_index[env_ids] = 0
             return
+        original_env_ids = env_ids
+        random_env_ids = env_ids
         if stable_pose_probability > 0.0:
             stable_mask = torch.rand(env_ids.shape[0], device=self.device) < stable_pose_probability
             if bool(stable_mask.any()):
                 StablePoseCommand._resample_command(self, env_ids[stable_mask])
             if bool(stable_mask.all()):
+                self.target_pose_task_is_stable[original_env_ids] = True
+                self.target_pose_task_index[original_env_ids] = 0
                 return
-            env_ids = env_ids[~stable_mask]
+            random_env_ids = env_ids[~stable_mask]
+            env_ids = random_env_ids
+
+        if self.secondary_task == "grasp_lift":
+            self._resample_grasp_lift_command(env_ids)
+            return
 
         from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
-            get_cached_cloud,
+            get_cached_object_cloud,
             get_object_asset_cfg_for_env,
             get_object_index_for_env,
         )
@@ -367,7 +279,7 @@ class RandomPoseCommand(StablePoseCommand):
             scales_sub = scales.index_select(0, sel)
             group_size = int(sel.numel())
 
-            object_cloud = get_cached_cloud(obj_path)
+            object_cloud = get_cached_object_cloud(obj_path)
             object_vertices = object_cloud._get_vertices_torch(self.device).float()
             points_local = object_vertices.unsqueeze(0) * scales_sub[:, None, :].float()
 
@@ -387,6 +299,23 @@ class RandomPoseCommand(StablePoseCommand):
 
         for i, env_id in enumerate(env_ids):
             self.command[int(env_id.item())] = out[i]
+        self.target_pose_task_is_stable[random_env_ids] = False
+        self.target_pose_task_index[random_env_ids] = 1
+
+        if self.cfg.debug_vis and self._target_visualizer is not None:
+            self._update_visualization()
+
+    def _resample_grasp_lift_command(self, env_ids: torch.Tensor):
+        object_asset: RigidObject = self._env.scene["object"]
+        object_pos_env = object_asset.data.root_pos_w[env_ids, :3] - self._env.scene.env_origins[env_ids]
+        object_quat = object_asset.data.root_quat_w[env_ids]
+        target_pos = object_pos_env.clone()
+        target_pos[:, 2] += float(getattr(self.cfg, "grasp_lift_height", 0.05))
+        out = torch.cat([target_pos, object_quat], dim=1)
+        for i, env_id in enumerate(env_ids):
+            self.command[int(env_id.item())] = out[i]
+        self.target_pose_task_is_stable[env_ids] = False
+        self.target_pose_task_index[env_ids] = 1
 
         if self.cfg.debug_vis and self._target_visualizer is not None:
             self._update_visualization()
@@ -435,3 +364,9 @@ class RandomPoseCommandCfg(StablePoseCommandCfg):
 
     stable_pose_probability: float = 0.0
     """Probability of sampling a stable target pose instead of an arbitrary target pose."""
+
+    secondary_task: str = "random_pose"
+    """Task to sample when stable_pose_probability does not select a stable target."""
+
+    grasp_lift_height: float = 0.05
+    """Lift-current-pose target z offset in meters when secondary_task='grasp_lift'."""

@@ -1,5 +1,4 @@
-# Local path config (machine-specific, do not commit)
-# paths.yaml
+# Path configurations may contain machine-specific asset roots.
 
 **/eef/
 **/tmp/
@@ -112,3 +111,18 @@ videos/
 tool_contact_viz/
 
 docs/hamnet-unicorn-paper/
+
+# External repositories and local environments
+/thirdparty/
+/stereo/
+
+# Downloaded model and dataset artifacts
+**/GOMP_USD/
+**/.cache/huggingface/
+*.ckpt
+*.safetensors
+*.engine
+
+artifacts/
+configs/generated_gripper_contact_assets*/
+gripper/

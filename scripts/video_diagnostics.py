@@ -117,7 +117,7 @@ def recording_debug_metrics(
     wrist_failure_distance = float(reward_params.get("bimanual_arm_proximity_failure_distance", 0.15))
     wrist_surface_warning_height = float(reward_params.get("bimanual_wrist_surface_warning_height", 0.12))
     wrist_surface_contact_height = float(reward_params.get("bimanual_wrist_surface_contact_height", 0.06))
-    dwell_steps = max(10, int(reward_params.get("stable_success_dwell_steps", 10)))
+    dwell_steps = max(1, int(reward_params.get("stable_success_dwell_steps", 10)))
     dwell_counter = getattr(base_env, "_goal_pose_success_count", None)
     dwell_count = 0
     if dwell_counter is not None and int(dwell_counter.shape[0]) > env_i:
@@ -175,6 +175,13 @@ def format_recording_diagnostics(metrics: dict[str, Any], *, step: int | None = 
             f"{metrics.get('wrist_surface_warning_height', 0.12):.4f}/"
             f"{metrics.get('wrist_surface_contact_height', 0.06):.4f}"
         )
+    output_gate_expert_a = metrics.get("output_gate_expert_a_weight")
+    if output_gate_expert_a is not None:
+        text += (
+            f" gate={metrics.get('output_gate_selected_expert', 'unknown')}"
+            f"(a={float(output_gate_expert_a):.3f},"
+            f"b={float(metrics.get('output_gate_expert_b_weight', 1.0 - float(output_gate_expert_a))):.3f})"
+        )
     return text
 
 
@@ -211,6 +218,19 @@ def overlay_recording_diagnostics(frame: Any, metrics: dict[str, Any], *, step: 
             f"wrist surface {wrist_surface_clearance:.3f} m above z={wrist_surface_z:.3f}  "
             f"warn {wrist_surface_warning_height:.3f} contact {wrist_surface_contact_height:.3f}  "
             f"link {wrist_surface_link}"
+        )
+    output_gate_expert_a = metrics.get("output_gate_expert_a_weight")
+    if output_gate_expert_a is not None:
+        expert_a = float(output_gate_expert_a)
+        expert_b = float(metrics.get("output_gate_expert_b_weight", 1.0 - expert_a))
+        gate_range = ""
+        gate_min = metrics.get("output_gate_expert_a_min")
+        gate_max = metrics.get("output_gate_expert_a_max")
+        if gate_min is not None and gate_max is not None and abs(float(gate_max) - float(gate_min)) > 1.0e-6:
+            gate_range = f"  range {float(gate_min):.2f}-{float(gate_max):.2f}"
+        lines.append(
+            f"output gate {metrics.get('output_gate_selected_expert', 'unknown')}  "
+            f"model_a {expert_a:.3f}  model_b {expert_b:.3f}{gate_range}"
         )
     lines.append(
         (

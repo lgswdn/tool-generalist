@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Export sampled contact_pt_env_v1 pre/post contact states as colored OBJ files.
+"""Export sampled contact_pt_env_v1 pre-contact states as colored OBJ files.
 
-Each exported OBJ contains five groups: floor, pre object, post object, pre tool,
-and post tool.  Mesh reconstruction follows the training loader contract:
-source OBJ vertices are scaled, shifted by the persisted mesh bbox center, then
-posed with the persisted env-frame contact poses.
+Each exported OBJ contains three groups: floor, pre object, and pre tool.  Mesh
+reconstruction follows the training loader contract: source OBJ vertices are
+scaled, shifted by the persisted mesh bbox center, then posed with the
+persisted env-frame contact poses.
 """
 
 from __future__ import annotations
@@ -22,8 +22,6 @@ from typing import Any, Iterable, Sequence
 import numpy as np
 
 from utils.geometry.mesh_io import load_mesh_vertices_faces, scale_vertices
-from utils.geometry.pose import rotation_from_pose9d_np
-
 
 BLOCKED_PT_SUFFIXES = (
     ".candidate.pt",
@@ -35,9 +33,7 @@ BLOCKED_PT_SUFFIXES = (
 MATERIALS = {
     "floor": (0.50, 0.50, 0.50),
     "pre_object": (0.18, 0.42, 0.86),
-    "post_object": (0.10, 0.68, 0.35),
     "pre_tool": (0.94, 0.48, 0.12),
-    "post_tool": (0.80, 0.18, 0.72),
 }
 
 
@@ -58,7 +54,6 @@ class ExportTask:
     floor_z: float
     floor_margin: float
     floor_min_size: float
-    tool_post_delta_field: str
 
 
 def parse_args() -> argparse.Namespace:
@@ -78,12 +73,6 @@ def parse_args() -> argparse.Namespace:
         "--weighted-by-contacts",
         action="store_true",
         help="Sample contact cases uniformly instead of first sampling a .pt uniformly.",
-    )
-    parser.add_argument(
-        "--tool-post-delta-field",
-        choices=("post_tool_achieved_delta_pose9d_E", "post_tool_delta_pose9d_E"),
-        default="post_tool_achieved_delta_pose9d_E",
-        help="Field used to place the post-contact tool mesh.",
     )
     parser.add_argument("--floor-z", type=float, default=0.0, help="Floor plane z coordinate.")
     parser.add_argument("--floor-margin", type=float, default=0.20, help="Extra XY margin around all meshes.")
@@ -133,7 +122,6 @@ def main() -> int:
         floor_margin=float(args.floor_margin),
         floor_min_size=float(args.floor_min_size),
         weighted_by_contacts=bool(args.weighted_by_contacts),
-        tool_post_delta_field=str(args.tool_post_delta_field),
     )
 
     manifest: dict[str, Any] = {
@@ -143,7 +131,7 @@ def main() -> int:
         "num_outputs": int(args.num_outputs),
         "seed": int(args.seed),
         "workers": int(args.workers),
-        "tool_post_delta_field": str(args.tool_post_delta_field),
+        "include_post_contact": False,
         "weighted_by_contacts": bool(args.weighted_by_contacts),
         "outputs": [],
     }
@@ -285,7 +273,6 @@ def sample_tasks(
     floor_margin: float,
     floor_min_size: float,
     weighted_by_contacts: bool,
-    tool_post_delta_field: str,
 ) -> list[ExportTask]:
     rng = random.Random(seed)
     tasks: list[ExportTask] = []
@@ -316,7 +303,6 @@ def sample_tasks(
                 floor_z=floor_z,
                 floor_margin=floor_margin,
                 floor_min_size=floor_min_size,
-                tool_post_delta_field=tool_post_delta_field,
             )
         )
     return tasks
@@ -349,21 +335,10 @@ def export_one(task: ExportTask) -> dict[str, Any]:
     tool_R = np_array(data["tool_rotation_E"][i], (3, 3), "tool_rotation_E")
     tool_t = np_array(data["tool_translation_E"][i], (3,), "tool_translation_E")
 
-    object_delta = np_array(data["post_object_delta_pose9d_E"][i], (9,), "post_object_delta_pose9d_E")
-    tool_delta_key = task.tool_post_delta_field
-    if tool_delta_key not in data:
-        tool_delta_key = "post_tool_delta_pose9d_E"
-    tool_delta = np_array(data[tool_delta_key][i], (9,), tool_delta_key)
-
-    object_delta_R = rotation_from_pose9d_np(object_delta)
-    tool_delta_R = rotation_from_pose9d_np(tool_delta)
-
     pre_object = transform_vertices(object_local, object_R, object_t)
-    post_object = transform_vertices(object_local, object_delta_R @ object_R, object_t + object_delta[:3])
     pre_tool = transform_vertices(tool_local, tool_R, tool_t)
-    post_tool = transform_vertices(tool_local, tool_delta_R @ tool_R, tool_t + tool_delta[:3])
     floor_vertices, floor_faces = make_floor(
-        [pre_object, post_object, pre_tool, post_tool],
+        [pre_object, pre_tool],
         floor_z=float(task.floor_z),
         margin=float(task.floor_margin),
         min_size=float(task.floor_min_size),
@@ -375,9 +350,7 @@ def export_one(task: ExportTask) -> dict[str, Any]:
     groups = [
         ("floor", floor_vertices, floor_faces),
         ("pre_object", pre_object, object_faces),
-        ("post_object", post_object, object_faces),
         ("pre_tool", pre_tool, tool_faces),
-        ("post_tool", post_tool, tool_faces),
     ]
     write_obj(
         obj_path,
@@ -390,7 +363,7 @@ def export_one(task: ExportTask) -> dict[str, Any]:
             f"object_id {data.get('object_id', '')}",
             f"object_mesh_path {data.get('object_mesh_path', '')}",
             f"tool_mesh_path {data.get('tool_mesh_path', '')}",
-            f"tool_post_delta_field {tool_delta_key}",
+            "include_post_contact false",
             "mesh_transform scaled_vertices_minus_bbox_center_then_env_pose",
         ],
     )
@@ -402,7 +375,7 @@ def export_one(task: ExportTask) -> dict[str, Any]:
         "contact_index": i,
         "tool_id": str(data.get("tool_id", "")),
         "object_id": str(data.get("object_id", "")),
-        "tool_post_delta_field": tool_delta_key,
+        "include_post_contact": False,
     }
 
 

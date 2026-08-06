@@ -179,8 +179,8 @@ class RewardCfg:
     bimanual_arm_proximity_warning_distance: float = 0.20
     bimanual_arm_proximity_failure_distance: float = 0.15
     bimanual_wrist_surface_penalty_weight: float = -5.0
-    bimanual_wrist_surface_warning_height: float = 0.12
-    bimanual_wrist_surface_contact_height: float = 0.06
+    bimanual_wrist_surface_warning_height: float = 0.08
+    bimanual_wrist_surface_contact_height: float = 0.04
     bimanual_tool_proximity_penalty_weight: float = -10.0
     bimanual_tool_proximity_warning_clearance: float = 0.02
     bimanual_tool_proximity_contact_clearance: float = 0.005
@@ -241,6 +241,12 @@ class ObjectPoseSamplingCfg:
     xy_offset_range: float = 0.15
     """Target x/y offset magnitude is sampled from [0.5 * range, range]."""
 
+    secondary_task: str = "random_pose"
+    """Task sampled when stable_pose_probability does not select a stable target."""
+
+    grasp_lift_height: float = 0.05
+    """Lift-current-pose target z offset in meters."""
+
 
 @dataclass
 class RLCurriculumCfg:
@@ -277,7 +283,7 @@ class ActionCfg:
     mode: str = "relative_joint_position"
     action_dim: int = 7
     joint_names: list[str] = field(default_factory=lambda: ["panda_joint.*"])
-    scale: float | list[float] = 0.1
+    scale: float | list[float] = 0.06
     clip: tuple[float, float] = (-1.0, 1.0)
     impedance_mode: str = "fixed"
     include_stiffness: bool = False
@@ -301,14 +307,24 @@ class ObservationCfg:
     previous_action_dim: Optional[int] = None
     relative_goal_dim: int = 9
     object_velocity_dim: int = 0
+    task_embedding_dim: int = 0
     bbox_center_dim: int = 6
     include_object_cloud: bool = True
     include_tool_cloud: bool = True
+    include_kinematic_gripper_clouds: bool = False
     include_bbox_centers: bool = True
+    include_oracle_mesh_sdf: bool = False
+    include_oracle_mesh_unsigned_distance: bool = False
+    point_cloud_noise_enabled: bool = True
     object_cloud_centering: str = "none"
     tool_cloud_centering: str = "none"
     mesh_centering: str = "none"
     model_input_centering: str = "bbox_center"
+    object_cloud_source: str = "preprocessed"
+    object_cloud_preprocessed_dir: str = (
+        "/mnt/project/world_model/tool_generalist/assets/DGN/"
+        "first_hit_fps_pointclouds/npy"
+    )
     tool_cloud_source: str = "adjusted_decomposed_mesh"
     flatten_clouds: bool = True
     layout: list[str] = field(
@@ -340,7 +356,13 @@ class ObservationCfg:
             "tool2_cloud_flat": self.include_tool_cloud,
         }
         cloud_count = sum(1 for name, enabled in cloud_names.items() if enabled and name in self.layout)
-        return cloud_count * self.num_points * self.point_dim
+        kinematic_count = (
+            3
+            if self.include_kinematic_gripper_clouds
+            and "kinematic_gripper_clouds_flat" in self.layout
+            else 0
+        )
+        return (cloud_count + kinematic_count) * self.num_points * self.point_dim
 
     def resolved_previous_action_dim(self, action_dim: int) -> int:
         return self.previous_action_dim if self.previous_action_dim is not None else action_dim
@@ -349,8 +371,17 @@ class ObservationCfg:
         dims = {
             "object_cloud_flat": self.num_points * self.point_dim if self.include_object_cloud else 0,
             "tool_cloud_flat": self.num_points * self.point_dim if self.include_tool_cloud else 0,
+            "kinematic_gripper_clouds_flat": (
+                3 * self.num_points * self.point_dim
+                if self.include_kinematic_gripper_clouds
+                else 0
+            ),
             "tool1_cloud_flat": self.num_points * self.point_dim if self.include_tool_cloud else 0,
             "tool2_cloud_flat": self.num_points * self.point_dim if self.include_tool_cloud else 0,
+            "oracle_mesh_signed_sdf": 2 * self.num_points if self.include_oracle_mesh_sdf else 0,
+            "oracle_mesh_unsigned_distance": (
+                2 * self.num_points if self.include_oracle_mesh_unsigned_distance else 0
+            ),
             "object_bbox_center": 3 if self.include_bbox_centers else 0,
             "tool_bbox_center": 3 if self.include_bbox_centers else 0,
             "tool1_bbox_center": 3 if self.include_bbox_centers else 0,
@@ -364,6 +395,7 @@ class ObservationCfg:
             "previous_action": self.resolved_previous_action_dim(action_dim),
             "relative_goal_pose": self.relative_goal_dim,
             "object_velocity": self.object_velocity_dim,
+            "task_embedding": self.task_embedding_dim,
             "physics": physics_dim,
         }
         return sum(dims.get(name, 0) for name in self.layout)
@@ -372,7 +404,16 @@ class ObservationCfg:
 @dataclass
 class RLEnvCfg:
     robot_mode: str = "tool"
-    """Robot embodiment for Isaac RL. Use ``bare_franka`` for legacy ICP RL."""
+    """Robot embodiment for Isaac RL.
+
+    Supported values:
+    - ``tool``: legacy welded multitool Panda USDs.
+    - ``bare_franka``: legacy ICP arm-only Franka.
+    - ``official_panda_gripper``: IsaacLab Panda with symmetric gripper action.
+    - ``generated_gripper``: manifest-backed generalized gripper USDs.
+    - ``one_dof_gripper``: manifest-backed one-command gripper embodiments.
+    - ``cross_embodiment_gripper``: distributed 50/50 generated/one-DoF rank split.
+    """
 
     # Per-GPU/per-rank environment count.  In distributed multi-GPU RL,
     # total envs = ExpCfg.num_gpus * RLCfg.env.num_envs.
@@ -384,6 +425,19 @@ class RLEnvCfg:
     env_spacing: float = 2.0
     solver_position_iteration_count: int = 8
     solver_velocity_iteration_count: int = 1
+    object_solver_position_iteration_count: int = 16
+    object_solver_velocity_iteration_count: int = 1
+    articulation_solver_position_iteration_count: int = 8
+    articulation_solver_velocity_iteration_count: int = 0
+    max_depenetration_velocity: float = 5.0
+    enable_ccd: bool = False
+    contact_offset: float | None = None
+    rest_offset: float | None = None
+    # Video/interactive visualization preference. The RL training launcher
+    # always disables marker drawing on its instantiated environment config.
+    visualize_tool_pointcloud: bool = True
+    generated_parallel_finger_velocity_limit_m_s: float = 0.05
+    """Per-finger velocity cap for generated parallel grippers."""
 
     @property
     def max_iterations(self) -> None:
@@ -422,6 +476,7 @@ class RLLaunchCfg:
     device: Optional[str] = None
     logger: str = "tensorboard"
     wandb_project: Optional[str] = None
+    wandb_upload_files: bool = False
     run_name: Optional[str] = None
     init_at_random_ep_len: bool = True
     distributed: bool = False
@@ -447,8 +502,19 @@ class RLCfg:
     env: RLEnvCfg = field(default_factory=RLEnvCfg)
     launch: RLLaunchCfg = field(default_factory=RLLaunchCfg)
     encoder_checkpoint: Optional[str] = None
+    init_checkpoint: Optional[str] = None
+    resume_checkpoint: Optional[str] = None
     freeze_encoder: bool = True
     separate_actor_critic_fusion: bool = False
+    hamnet_num_modules: int = 4
+    hamnet_hidden_dims: tuple[int, ...] = (256, 128, 128, 64)
+    hamnet_router_hidden_dims: tuple[int, ...] = (256, 256)
+    output_gate_expert_a_checkpoint: Optional[str] = None
+    output_gate_expert_b_checkpoint: Optional[str] = None
+    output_gate_freeze_experts: bool = True
+    output_gate_hidden_dims: tuple[int, ...] = (64,)
+    output_gate_initial_expert_a_weight: float = 0.8
+    output_gate_per_action: bool = False
     domain_randomization: DomainRandomizationCfg = field(
         default_factory=DomainRandomizationCfg
     )
@@ -517,7 +583,7 @@ class RLCfg:
                         "object_restitution",
                     )
                 )
-            if self.env.robot_mode != "bare_franka":
+            if self.env.robot_mode == "tool":
                 if dr.tool.mass.enabled:
                     fields.append("tool_mass")
                 if dr.tool.material.enabled:

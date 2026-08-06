@@ -67,6 +67,10 @@ def _resolve_checkpoint_arg(runtime_spec_path: str, checkpoint: str | None) -> s
         return checkpoint
 
     spec_dir = Path(runtime_spec_path).parent
+    best_path = spec_dir / "model_best.pt"
+    if best_path.is_file():
+        return str(best_path)
+
     candidates = []
     for path in spec_dir.glob("model_*.pt"):
         match = re.fullmatch(r"model_(\d+)\.pt", path.name)
@@ -81,7 +85,7 @@ def _resolve_checkpoint_arg(runtime_spec_path: str, checkpoint: str | None) -> s
             return str(path)
 
     raise FileNotFoundError(
-        f"--checkpoint was not provided and no model_*.pt/model.pt/best.pt was found in {spec_dir}"
+        f"--checkpoint was not provided and no model_best.pt/model_*.pt/model.pt/best.pt was found in {spec_dir}"
     )
 
 
@@ -125,7 +129,7 @@ parser.add_argument(
     "--checkpoint",
     type=str,
     default=None,
-    help="Path to the RSL-RL checkpoint. Defaults to the latest model_*.pt beside the runtime spec.",
+    help="Path to the RSL-RL checkpoint. Defaults to model_best.pt beside the runtime spec.",
 )
 parser.add_argument("--task", type=str, default=None, help="Name of the task. Defaults to runtime_spec['task_id'].")
 parser.add_argument("--num_envs", type=int, default=64, help="Number of environments to simulate per rank.")
@@ -176,6 +180,18 @@ parser.add_argument(
     action="store_true",
     default=False,
     help="Disable tool point-cloud debug marker rendering in recorded videos.",
+)
+parser.add_argument(
+    "--disable_recording_diagnostics",
+    action="store_true",
+    default=False,
+    help="Disable the top diagnostic text overlay in recorded videos.",
+)
+parser.add_argument(
+    "--disable_head_area_center_rendering",
+    action="store_true",
+    default=False,
+    help="Disable the red head-area/tool-center debug sphere in recorded videos.",
 )
 parser.add_argument("--real_time", action="store_true", default=False, help="Run in real-time, if possible.")
 parser.add_argument("--distributed", action="store_true", default=False, help="Run recording across multiple GPUs.")
@@ -404,14 +420,24 @@ def _make_record_camera_cfg() -> TiledCameraCfg:
 
 def _disable_tool_pointcloud_rendering(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg) -> None:
     for attr in (
+        "visualize_current_object_pose",
+        "visualize_object_pointcloud",
         "visualize_tool_pointcloud",
         "visualize_tool1_pointcloud",
         "visualize_tool2_pointcloud",
         "visualize_tool_head_area",
+        "visualize_head_area_center",
+        "visualize_eef_position",
+        "visualize_object_velocity_mass",
         "visualize_tool_velocity_mass",
     ):
         if hasattr(env_cfg, attr):
             setattr(env_cfg, attr, False)
+
+
+def _disable_head_area_center_rendering(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg) -> None:
+    if hasattr(env_cfg, "visualize_head_area_center"):
+        env_cfg.visualize_head_area_center = False
 
 
 def _start_ffmpeg_writer(path: str) -> subprocess.Popen:
@@ -443,34 +469,29 @@ def _start_ffmpeg_writer(path: str) -> subprocess.Popen:
 
 
 def _apply_recording_visual_overrides(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg) -> None:
-    """Improve contrast for recording without changing training configs."""
+    """Use a minimal deterministic scene for recording without changing physics."""
 
     scene = getattr(env_cfg, "scene", None)
     if scene is None:
         return
 
+    light = getattr(scene, "light", None)
+    light_spawn = getattr(light, "spawn", None)
+    if light_spawn is not None:
+        if hasattr(light_spawn, "color"):
+            light_spawn.color = (0.75, 0.75, 0.75)
+        if hasattr(light_spawn, "intensity"):
+            light_spawn.intensity = 1500.0
+
+    if hasattr(scene, "terrain") and getattr(scene, "terrain") is not None:
+        terrain = getattr(scene, "terrain")
+        if hasattr(terrain, "visual_material"):
+            terrain.visual_material = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.4, 0.4, 0.4))
+
     if hasattr(scene, "table") and getattr(scene, "table") is not None:
         table_spawn = getattr(scene.table, "spawn", None)
         if table_spawn is not None and hasattr(table_spawn, "visual_material"):
-            table_spawn.visual_material = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.10, 0.13, 0.15))
-
-    if hasattr(scene, "object") and getattr(scene, "object") is not None:
-        object_spawn = getattr(scene.object, "spawn", None)
-        assets_cfg = getattr(object_spawn, "assets_cfg", None)
-        if assets_cfg is not None:
-            for asset_cfg in assets_cfg:
-                if hasattr(asset_cfg, "visual_material"):
-                    asset_cfg.visual_material = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.05, 0.42, 0.95))
-
-    for robot_name, color in (
-        ("robot", (0.95, 0.80, 0.35)),
-        ("robot_1", (0.95, 0.78, 0.28)),
-        ("robot_2", (0.35, 0.90, 0.65)),
-    ):
-        robot = getattr(scene, robot_name, None)
-        spawn = getattr(robot, "spawn", None)
-        if spawn is not None and hasattr(spawn, "visual_material"):
-            spawn.visual_material = sim_utils.PreviewSurfaceCfg(diffuse_color=color)
+            table_spawn.visual_material = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.45, 0.45, 0.45))
 
 
 def _close_ffmpeg_writer(writer: subprocess.Popen) -> None:
@@ -571,14 +592,15 @@ def _capture_video_frames(env, video_state: dict, env_ids: set[int] | None = Non
         if frame_tensor.dtype != torch.uint8:
             frame_tensor = torch.clamp(frame_tensor * 255.0, 0.0, 255.0).to(torch.uint8)
         frame = frame_tensor.contiguous().numpy().copy()
-        metrics = recording_debug_metrics(
-            env.unwrapped,
-            env_id,
-            runtime_spec.get("reward_params", {}),
-        )
-        step = video_state.get("current_step")
-        record["last_diag"] = format_recording_diagnostics(metrics, step=step)
-        frame = overlay_recording_diagnostics(frame, metrics, step=step)
+        if not args_cli.disable_recording_diagnostics:
+            metrics = recording_debug_metrics(
+                env.unwrapped,
+                env_id,
+                runtime_spec.get("reward_params", {}),
+            )
+            step = video_state.get("current_step")
+            record["last_diag"] = format_recording_diagnostics(metrics, step=step)
+            frame = overlay_recording_diagnostics(frame, metrics, step=step)
         writer.stdin.write(frame.tobytes())
         record["frames"] = int(record["frames"]) + 1
 
@@ -729,6 +751,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.scene.eval_record_camera = _make_record_camera_cfg()
     if args_cli.disable_tool_pointcloud_rendering:
         _disable_tool_pointcloud_rendering(env_cfg)
+    if args_cli.disable_head_area_center_rendering:
+        _disable_head_area_center_rendering(env_cfg)
     if not args_cli.disable_recording_visual_overrides:
         _apply_recording_visual_overrides(env_cfg)
 

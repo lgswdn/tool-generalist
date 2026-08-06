@@ -95,6 +95,17 @@ def test_diffusion_branch_does_not_condition_on_post_or_physics():
     assert 'require_movement = "postcontact" in cfg.enabled_heads' in train_source
 
 
+def test_object_center_encoder_input_is_explicit_experiment_opt_in():
+    model_source = _source("pretrain/model.py")
+    config_source = _source("configs/experiments/single_unstable_oc_diff_post.py")
+
+    assert 'encoder_input_centering: str = "bbox_center"' in _source("configs/config_pretrain.py")
+    assert 'encoder_tool_points_E_k = tool_points_E_k + rel_tool_object_t_k.unsqueeze(-2)' in model_source
+    assert 'EXP_CFG.pretrain.encoder_input_centering = "object_center"' in config_source
+    assert 'EXP_CFG.rl.observation.model_input_centering = "object_center"' in config_source
+    assert "pretrain_reuse" not in config_source
+
+
 def test_contact_pt_env_v1_schema_and_dataset_static_contract():
     schema_source = _source("utils/contact/schema.py")
     dataset_source = _source("pretrain/dataset.py")
@@ -280,3 +291,34 @@ def test_pretrain_static_boundaries_remove_old_entries_and_keep_stage_lazy():
     assert "run_pretrain" in stage_source
     assert "pretrain.train" in stage_source
     assert '"utils.experiment.pretrain_stage:run_pretrain_stage"' in _source("utils/experiment/stages.py")
+
+
+def test_generated_gripper_unicorn_comparison_differs_only_by_encoder_backend():
+    from dataclasses import asdict
+
+    from configs.panda_experiment_common import generated_gripper_unicorn_rl_cfg
+
+    unicorn = generated_gripper_unicorn_rl_cfg("unicorn", ours_tce=False)
+    ours = generated_gripper_unicorn_rl_cfg("ours", ours_tce=True)
+
+    assert asdict(unicorn.contact_gen) == asdict(ours.contact_gen)
+    assert unicorn.rl.actor_critic_class == ours.rl.actor_critic_class == "ActorCriticTG"
+    assert unicorn.rl.action.scale == ours.rl.action.scale == 0.06
+    assert unicorn.rl.observation.model_input_centering == ours.rl.observation.model_input_centering == "object_center"
+
+    unicorn_pretrain = asdict(unicorn.pretrain)
+    ours_pretrain = asdict(ours.pretrain)
+    for payload in (unicorn_pretrain, ours_pretrain):
+        payload.pop("name")
+        payload.pop("mode")
+        payload.pop("wandb_run_name")
+    assert unicorn_pretrain == ours_pretrain
+
+    unicorn_encoder = unicorn.model.unicorn
+    tce_encoder = ours.model.tce
+    assert unicorn_encoder.num_points == tce_encoder.num_points
+    assert unicorn_encoder.num_patches == tce_encoder.num_points // tce_encoder.patch_size
+    assert unicorn_encoder.patch_size == tce_encoder.patch_size
+    assert unicorn_encoder.encoder_channel == tce_encoder.encoder_channel
+    assert unicorn_encoder.vit_depth == tce_encoder.vit_depth
+    assert unicorn_encoder.vit_heads == tce_encoder.vit_heads

@@ -7,6 +7,20 @@ import random
 
 TOOL_ASSIGNMENT_SALT = 17
 OBJECT_ASSIGNMENT_SALT = 53
+GENERATED_GRIPPER_ASSIGNMENT_SALT = 71
+ONE_DOF_GRIPPER_ASSIGNMENT_SALT = 89
+
+
+def cross_embodiment_mode_for_rank(global_rank: int, world_size: int) -> str:
+    """Assign exactly half of an even distributed world to each gripper topology."""
+
+    global_rank = _require_non_negative_int("global_rank", global_rank)
+    world_size = _require_positive_int("world_size", world_size)
+    if world_size < 2 or world_size % 2 != 0:
+        raise ValueError("cross-embodiment assignment requires an even world_size >= 2")
+    if global_rank >= world_size:
+        raise ValueError("global_rank must be smaller than world_size")
+    return "generated_gripper" if global_rank < world_size // 2 else "one_dof_gripper"
 
 
 def global_env_id(local_env_id: int, num_envs_per_rank: int, global_rank: int) -> int:

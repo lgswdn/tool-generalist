@@ -1,0 +1,5802 @@
+[
+  {
+    "object": "core-bottle-1071fa4cddb2da2fc8724d5673a063a6",
+    "scale": 0.06
+  },
+  {
+    "object": "core-bottle-323705d1a8505cdb498751cf10995c30",
+    "scale": 0.15
+  },
+  {
+    "object": "core-bottle-547fa0085800c5c3846564a8a219239b",
+    "scale": 0.08
+  },
+  {
+    "object": "core-bottle-6e57c665a47d7d7730612f5c0ef21eb8",
+    "scale": 0.15
+  },
+  {
+    "object": "core-bottle-74690ddde9c0182696c2e7960a15c619",
+    "scale": 0.08
+  },
+  {
+    "object": "core-bottle-77699e08e3824eab47765668cf4023ed",
+    "scale": 0.12
+  },
+  {
+    "object": "core-bottle-7984d4980d5b07bceba393d429f71de3",
+    "scale": 0.1
+  },
+  {
+    "object": "core-bottle-81bbf3134d1ca27a58449bd132e3a3fe",
+    "scale": 0.15
+  },
+  {
+    "object": "core-bottle-829ad86e645d11b1bcbe24a1993b1795",
+    "scale": 0.06
+  },
+  {
+    "object": "core-bottle-8d861e4406a9d3258534bca5562e21be",
+    "scale": 0.08
+  },
+  {
+    "object": "core-bottle-91235f7d65aec958ca972daa503b3095",
+    "scale": 0.15
+  },
+  {
+    "object": "core-bottle-940b9e91a4a32a4130612f5c0ef21eb8",
+    "scale": 0.06
+  },
+  {
+    "object": "core-bottle-ac7e1eed3c4ded7db3010b85c6cbc688",
+    "scale": 0.06
+  },
+  {
+    "object": "core-bottle-c6442bba98ad3dcf5e912b2d2934c0b6",
+    "scale": 0.12
+  },
+  {
+    "object": "core-bottle-c82bbd1b1a929c7ce8ed8cf0a077ddf7",
+    "scale": 0.06
+  },
+  {
+    "object": "core-bottle-e4ada697d05ac7acf9907e8bdd53291e",
+    "scale": 0.06
+  },
+  {
+    "object": "core-bottle-ed8aff7768d2cc3e45bcca2603f7a948",
+    "scale": 0.12
+  },
+  {
+    "object": "core-bowl-154ab09c67b9d04fb4971a63df4b1d36",
+    "scale": 0.08
+  },
+  {
+    "object": "core-bowl-188281000adddc9977981b941eb4f5d1",
+    "scale": 0.15
+  },
+  {
+    "object": "core-bowl-1b4d7803a3298f8477bdcb8816a3fac9",
+    "scale": 0.08
+  },
+  {
+    "object": "core-bowl-24907349b2323824664b3b9b23ddfcbc",
+    "scale": 0.15
+  },
+  {
+    "object": "core-bowl-2c1df84ec01cea4e525b133235812833",
+    "scale": 0.15
+  },
+  {
+    "object": "core-bowl-2cfecc8ce6c7cd1f3497637ec59e0374",
+    "scale": 0.12
+  },
+  {
+    "object": "core-bowl-2d2c419136447fe667964ba700cd97f5",
+    "scale": 0.12
+  },
+  {
+    "object": "core-bowl-326c6280eee2bf74257e043ec9630f",
+    "scale": 0.08
+  },
+  {
+    "object": "core-bowl-32f9c710e264388e2150a45ec52bcbd7",
+    "scale": 0.12
+  },
+  {
+    "object": "core-bowl-38d2122b2aa05f92e1b9b7b3765e2bea",
+    "scale": 0.08
+  },
+  {
+    "object": "core-bowl-3f56833e91054d2518e800f0d88f9019",
+    "scale": 0.15
+  },
+  {
+    "object": "core-bowl-4017528ab5816338664b3b9b23ddfcbc",
+    "scale": 0.06
+  },
+  {
+    "object": "core-bowl-4b32d2c623b54dd4fe296ad57d60d898",
+    "scale": 0.06
+  },
+  {
+    "object": "core-bowl-4eefe941048189bdb8046e84ebdc62d2",
+    "scale": 0.1
+  },
+  {
+    "object": "core-bowl-56803af65db53307467ca2ad6571afff",
+    "scale": 0.12
+  },
+  {
+    "object": "core-bowl-5f2ef71aa9b94edbb84959963148f2a2",
+    "scale": 0.15
+  },
+  {
+    "object": "core-bowl-708fce7ba7d911f3d5b5e7c77f0efc2",
+    "scale": 0.08
+  },
+  {
+    "object": "core-bowl-754634abeb7bffc32977b68653eb2e1e",
+    "scale": 0.08
+  },
+  {
+    "object": "core-bowl-7d7bdea515818eb844638317e9e4ff18",
+    "scale": 0.12
+  },
+  {
+    "object": "core-bowl-80608e58db79d4d83b722c86abee0751",
+    "scale": 0.06
+  },
+  {
+    "object": "core-bowl-899af991203577f019790c8746d79a6f",
+    "scale": 0.12
+  },
+  {
+    "object": "core-bowl-8d1f575e9223b28b8183a4a81361b94",
+    "scale": 0.06
+  },
+  {
+    "object": "core-bowl-98d3408054ab409fd261c3d31246fed3",
+    "scale": 0.1
+  },
+  {
+    "object": "core-bowl-9c7edf31042fea84df95dda4222cd1bf",
+    "scale": 0.15
+  },
+  {
+    "object": "core-bowl-a042621b3378bc18a2c59a4d90e63212",
+    "scale": 0.06
+  },
+  {
+    "object": "core-bowl-a0b34a720dd364d9ccdca257be791a55",
+    "scale": 0.12
+  },
+  {
+    "object": "core-bowl-a1393437aac09108d627bfab5d10d45d",
+    "scale": 0.08
+  },
+  {
+    "object": "core-bowl-a1d26a16a0caa78243f1c519d66bb167",
+    "scale": 0.08
+  },
+  {
+    "object": "core-bowl-a29f53390194166665c638ab0bc6bc66",
+    "scale": 0.15
+  },
+  {
+    "object": "core-bowl-a73d531b90965199e5f6d587dbc348b5",
+    "scale": 0.15
+  },
+  {
+    "object": "core-bowl-aad3cd6a40a15cb8664b3b9b23ddfcbc",
+    "scale": 0.1
+  },
+  {
+    "object": "core-bowl-ad8a50aa5894bc40c762eb31f1f0c676",
+    "scale": 0.15
+  },
+  {
+    "object": "core-bowl-ae5c7d8a453d3ef736b0f2a1430e993a",
+    "scale": 0.06
+  },
+  {
+    "object": "core-bowl-aeec00d8dd6e196451a2ad3de1977657",
+    "scale": 0.06
+  },
+  {
+    "object": "core-bowl-b007af6eabaa290dd42b9650f19dd425",
+    "scale": 0.15
+  },
+  {
+    "object": "core-bowl-b195dbe537993945e4e346ee2650d150",
+    "scale": 0.06
+  },
+  {
+    "object": "core-bowl-b5d1f064841b476dba5342d638d0c267",
+    "scale": 0.1
+  },
+  {
+    "object": "core-bowl-b65cbede8f483d51f7de4d28691515e1",
+    "scale": 0.15
+  },
+  {
+    "object": "core-bowl-bec41cc7f631e00b1bf40e92cbe8569f",
+    "scale": 0.1
+  },
+  {
+    "object": "core-bowl-ce48ffb418b99996912a38ce5826ebb8",
+    "scale": 0.06
+  },
+  {
+    "object": "core-bowl-db180e4f9a75ae717ba6f8f10959534c",
+    "scale": 0.1
+  },
+  {
+    "object": "core-bowl-dd381b3459767f7b18f18cdcd25d1bbb",
+    "scale": 0.08
+  },
+  {
+    "object": "core-bowl-e072da5c1e38c11a7548281e465c9303",
+    "scale": 0.12
+  },
+  {
+    "object": "core-bowl-e30e5cbc54a62b023c143af07c12991a",
+    "scale": 0.1
+  },
+  {
+    "object": "core-bowl-f09d5d7ed64b6585eb6db0b349a2b804",
+    "scale": 0.12
+  },
+  {
+    "object": "core-bowl-f0fdca5f5c7a06252dbdfbe028032489",
+    "scale": 0.15
+  },
+  {
+    "object": "core-camera-22217d5660444eeeca93934e5f39869",
+    "scale": 0.06
+  },
+  {
+    "object": "core-camera-235a6dd25c0a6f7b66f19f26ac490096",
+    "scale": 0.15
+  },
+  {
+    "object": "core-camera-3175f1c1d0cca3c6901887a0237c0ac2",
+    "scale": 0.15
+  },
+  {
+    "object": "core-camera-46c09085e451de8fc3c192db90697d8c",
+    "scale": 0.06
+  },
+  {
+    "object": "core-camera-5d42d432ec71bfa1d5004b533b242ce6",
+    "scale": 0.1
+  },
+  {
+    "object": "core-camera-936a458fdb8eb12171dc2053392a6e6f",
+    "scale": 0.08
+  },
+  {
+    "object": "core-camera-9b4953f653bfdd40ea41ceac179ca4d4",
+    "scale": 0.1
+  },
+  {
+    "object": "core-camera-a3c9dcaada9e04d09061da204e7c463c",
+    "scale": 0.12
+  },
+  {
+    "object": "core-camera-a4b0c73d0f12bc75533388d244d29c5c",
+    "scale": 0.08
+  },
+  {
+    "object": "core-camera-a8961c59576972cb57682b709eb0ab19",
+    "scale": 0.08
+  },
+  {
+    "object": "core-camera-b42c3da473bb4226dbe4bc54590e1d59",
+    "scale": 0.1
+  },
+  {
+    "object": "core-camera-c9c9ffd08af8b268b52759c2c2fc0d1e",
+    "scale": 0.06
+  },
+  {
+    "object": "core-camera-cda4fc24b2a602b5b5328fde615e4a0c",
+    "scale": 0.08
+  },
+  {
+    "object": "core-camera-d680d61f934eaa163b211460f022e3d9",
+    "scale": 0.1
+  },
+  {
+    "object": "core-camera-e67273eff31fabce656c3a28e34d04c4",
+    "scale": 0.1
+  },
+  {
+    "object": "core-camera-e85debbd554525d198494085d68ad6a0",
+    "scale": 0.15
+  },
+  {
+    "object": "core-camera-ec28a64bdf9501161bfbba8a5defb02",
+    "scale": 0.1
+  },
+  {
+    "object": "core-camera-f1540b3d6da38fbf1d908355fc20d631",
+    "scale": 0.06
+  },
+  {
+    "object": "core-camera-fb3b5fae94f7b02a3b269928487f8a4c",
+    "scale": 0.12
+  },
+  {
+    "object": "core-camera-fd058128095abf343ce579773d34f5bf",
+    "scale": 0.08
+  },
+  {
+    "object": "core-can-3fd196c22459cc66c8687ff9b0b4e4ac",
+    "scale": 0.12
+  },
+  {
+    "object": "core-can-408028e3bdd8d05b2d6c8e51365a5a87",
+    "scale": 0.08
+  },
+  {
+    "object": "core-can-669033f9b748c292d18ceeb5427760e8",
+    "scale": 0.1
+  },
+  {
+    "object": "core-can-7bd05573c09fb0c2af39ccaab9314b14",
+    "scale": 0.1
+  },
+  {
+    "object": "core-can-8cf26f6912f4a9e34a045a96d74810ea",
+    "scale": 0.08
+  },
+  {
+    "object": "core-can-a087f6b5ea424ccc785f06f424b9d06",
+    "scale": 0.08
+  },
+  {
+    "object": "core-can-a8d4a3b32149d3ae4f0b8af4571b1440",
+    "scale": 0.08
+  },
+  {
+    "object": "core-can-adaaccc7f642dee1288ef234853f8b4d",
+    "scale": 0.08
+  },
+  {
+    "object": "core-can-e532d6bd597d4e91e3e4737f6033f0f8",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-11e925e3ea180b583388c2584b2f0f90",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-128bb46234d7250721844676433a0aca",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-1621e08661de948d7532dfb76fa58e9e",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-16685299c37055c2be40226527c9872",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-16ac60220ed738901cfeae953cc2339d",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-1727e7aeb3d159a57f521a3dcd28e9d2",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-17d4ef9fa59ede481cfeae953cc2339d",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-180ef1cc23b96050bc8c03f74d3af56",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-180f36e0bdb9b33f53de6f45c4ae68a9",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-183e8d61b3c4edcc90b5b1d619d7013b",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-19208607cafce17dcb85f279c97d4c5c",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-1ac1e6fc09611ff049c647f92ae11714",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-1c3795fd5c4c0a3c2efb70bd2c052734",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-1c87049d11292c5d21e2fbffea258ad5",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-1d390d2560fc259336eb9fe355d50fdf",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-1d53adf8f82d223db0a79e28606cb167",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-1e52452aeb4bacbd83156841b8188cc7",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-1e8d859734efb73567a6837216666401",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-1ecbb2ddeca087b5fd71b7a0b881ae82",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-2009fed0ea8d1fc3e2dbe704eec7e8d9",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-20346d307d39aa7eb6a804c25e3218a",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-205b1494d7d3448e21844676433a0aca",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-2274e1f494d6d2c3226bc3b9ce9ff2a1",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-2278cc8b5a50421613fcb9cbc590fba",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-229077bcc4f52356f582eaab37b1c177",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-2293983c6f234d94e304974abc9afad9",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-22fc328d136756361e5d846d206adf3d",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-237b8445c70b1749ce2eca356a0e3474",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-2601fb1cdef9d37223d5a55215ee8f43",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-26175bc1827c3569c4b311ecb3af9fe6",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-267a2d6fbf29c04cbc17518d87dd1f7a",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-27085a2456319497f1cb19f636b1c2bd",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-271421566061988a93d9d97ff82834ba",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-280a42d54e91c6968a02f6ad0818c761",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-280c7836d6302b4bf3f8467cb6fe657e",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-2964d10d72ea38cf4857f88b08630a42",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-298ca71453baf6ee2a9eb0f146e94477",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-29c5585362cf4aa5b4f6326696174df2",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-29f27d4472a17e723fd445ae159c2cb2",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-2acb9ffbc050ac2e48bb2194a2a904f7",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-2b33c33ab4beb7493ce1b993153ccc0e",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-2b48b14e226b131af3b2c084b195b056",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-2bb42eb0676116d41580700c4211a379",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-2c32c1b5d13074431c1943a82a09125f",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-2dccc7cfff6f9a28aca331f9e5d9fa9",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-2df0bc8b46ad3cb858932236a22029d3",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-2eafc16c78c43b35d9f7ce5b19e46227",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-2f468e01f4fdcb54d81a607e3ac2f927",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-3036e6b2a898fc85e85776440ad91264",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-308cce8808b076bff49084215d845d01",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-30efef3eef4b37eb9ed75a6428ac0ca5",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-312c430f8b1a3fc80249ed612e14df4",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-313e9b124e421a4efa9922db9b6aab31",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-325ecc3acd232a5e981b9cd34407d026",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-33cd4232a87e1f416a1f7081746396ba",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-3488722618d61cacd5b6fb666fe071d7",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-34e36249166b8c6bc3f912172873d52f",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-350dad20c76cb54b7ad5140f7d56e11a",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-35d370a1531826adbe5693b333a3dd92",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-35dc3f0f2f5fe8d667a434dda72a2c24",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-3621cec4df1ddf421844676433a0aca",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-388798a892636235d2a526c0a7ff71e",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-38afc0467599bd6bfa13d53e5e4a7d2a",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-39359aaddcc4b761b0a79e28606cb167",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-39b78390f8d5067e983a0c5c52bdbaaa",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-39cd15c429c6007e2826f529d0b74d3a",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-39e571ec1bcd371bb785a4ac4a0dbd73",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-3a3fb2919b1bd92658c2dcb60645f75c",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-3aa2fd5054465056e25336bb76be9963",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-3aa3d13575540a99167196b0ec8ce495",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-3bc6f902628b3f7f85f6153ed2033a1c",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-3d5d7e610fc235cbcce71a7ef3de6f04",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-3f3770476f094a6f2093f68f248ba9f6",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-3f4a507d616678da650fb6b8f6bf3419",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-407e5ee21fb23fd92ffe71e0e78fe3b7",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-4116965029bd24393423610e52061098",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-41d95e8979b8377d251f8cf5c284bd7e",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-424ccff9ceea33451c81652b127a0ec9",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-427d255534038d47e5eda863cef11226",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-428ac05b36bb576d2a9eb0f146e94477",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-434e23fb04effbb86bc30c6a9ae3d46e",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-436d7a114f72dc03d4713685ae50fa13",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-43f7d0cb3f0ace029bc144914804a8be",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-447cb44311eb5dda57e80f5278d5b50",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-44ce10ddb982c8ff72152988eac576ab",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-452b924abd2ece2d58932236a22029d3",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-45301b15dce2724e483a0f6665d9ffe0",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-4546af9a8a67e7439c3dc4e242073921",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-457b4310870bcf047f4e0c14aca1a926",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-48a2000b54f4fc792a56a29c6d979b82",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-4991cd37af08577070346e4935b9a42b",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-49a51e66314253d3f2a0433fb7c53e0f",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-4a0cd042d7479d6810bc2436075f6a52",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-4a48ce1a067f686dfb63369d5dd85d25",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-4a60039ed657d838fe5c7c47101442e0",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-4a7c0d263fa0cc119553267f4c8c48a8",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-4a81237a7fc743763992b1138bb05b3c",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-4b97582ec707108c6ace02f573c40387",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-4bef48f1c1b4a40fbdeec9c43546255e",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-4e8cb66f915fb5ac5fdc2445fe061736",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-504c453471faee3ee304974abc9afad9",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-515b5a63ebb56aad7aeb5bbdd191fd4d",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-5286f018c374d3ec3f7fe3cbfc3d51a7",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-528e6424ccdcf2af21844676433a0aca",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-53cd656555da181db6d41c42f7ade8c8",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-54539e30a59cce413864ee650d9e9c5c",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-54bb14aad2406a124ce28f0f1b509eda",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-5828a8259ba570bbd24e3068806a8c67",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-5a37ad3759b4d93df843a7d4732b1d6",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-5b111b3a3e94b5907e1c85c5c15da7fb",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-5b826c910108d27a684b810d277e0e9b",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-5ba2137f5131db06219e978e6e16d30b",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-5bbf52512a45bddb7525dc2f981e5489",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-5d1652fdd7cd46d0dbb1de10c9529bf7",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-5deb3e8911dbef1adce6ba04fb42df",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-5e5c0391952208e81213f8f7891e7fa0",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-5e6ee0c5d155d2298b13932a0c28e98b",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-5e87bca3231cbdf15b5f05be350ae67e",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-5f919ac1f790280f563028cebd5782b",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-5fea05a3cdcc05756dba92a4e2177102",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-60df2f27d33f3f472eb2c67660ce4f3",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-6167bf752533508dfd6e968ab91bff17",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-623bc1157836ddeff8a51dbffe0021e4",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-625e2b043a61452b80d5f0084d375f75",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-638695025ca04d351d57a73214dd2a04",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-641234f284243decea95e61f66327e28",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-6449223cebdb2dc9c8c3ac9bcbcd9687",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-6475d2eb77c7ed5a59812638b595a4ce",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-64b6ddb847da082d761eb63018291094",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-657fbd67af945c39d9e3837723c05057",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-67524ffa83e3eb7c4948b3842dede005",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-67baf038e83456967f521a3dcd28e9d2",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-67c6c3db87a1d72b7b8e0bea6a77fb50",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-68189c0fdca1a8744db121a0d72356af",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-68b80d0086322ea33615136d92a66ba2",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-68ffa3cd161114cf55f5bce8dd67399d",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-6907dd835a22c32f46895db2a69f45e2",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-692e5fc16bc6ebd23737433332467411",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-69b74f6c66dc2adf5a627be422951096",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-6a0c0c55f355cc23a0eb5a85db887292",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-6b9cd9c72e69fb81d8630b8390e34e0d",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-6bd7f7a17a7bbd2d68acf22a03600648",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-6cc44d39e099bb6b9ef9eb3ddb0818a",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-6e6d7c2ffadc2fad2fffec7af390883",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-6f63df7ca322514f41ced50d3a574698",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-71121add7e94b024fb88c3d40924fb73",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-722acb5e8ccd39391e5d846d206adf3d",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-725cf43af935ee023832db239383a26e",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-72d3c4148500a7fe1bf02ad5664135fe",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-73b87e2025cfdb6daf19fa8e8218bf64",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-748f4a9aee8f610e8463cde8953cc1a5",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-74aab120cfb4d88257de0221db0b9d32",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-758b9da6bf573838d214322c26aa0cfd",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-759c984fa6831ad7bf0defeaa770e93b",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-76781e8b967f98b5a0eb5a85db887292",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-76a4a3e8370bdc24bd2d4107e8dc02b8",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-7731182b7b8702bb357be8fc4a9ec12a",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-77817771db0788d3241d076ab53023c1",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-7a2a5b36831f45501b670e8e7f0f2c3e",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-7af2a3d126ac5e44fdda95e9849ffbd2",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-7afdaca858bb0a964a28575f3344964",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-7d93b8dae79d5bbe7015d3b6f402d5a4",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-7dd788cca7df768495b1245be456cdf5",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-7f5b9c8fdb46cf7c562c8e1ac545ef78",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-7f756e697cd03ac821844676433a0aca",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-7fa841359a3dce3dbcb8492ce3867c34",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-8270c952b147d263b9746cb9e2b9d08",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-83f766eff3c5c12c781fb7da315db2c1",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-84cff93cb8ed08e55acbb5d30672759",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-854ab60bd57d3d6d2f412e1bfcc51526",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-864e5512dd35164b2d477e233bc97afe",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-88c3248ee6950fc3d24be492f98354f",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-8959f06b36d90e6a7c4a9987d1ab61dd",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-8961485f45d94383af4ba3ad8461249b",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-89f17a3563941ba9f2fdbae39bae1eff",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-8b11b38e035143ddb007a3ad40c5add6",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-8b4d28e4df5ac6e8656557acf97c5e2a",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-8cac6df50c515c498be6bc9d57b6a438",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-8caf79a2bf3be9fabfbac23a8087e8f4",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-8ce0fff87979560bed1f9cd2184d7b73",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-8d55c1677626cc48214d974150b798e9",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-8da5c29d14a1003d23247d005da93d43",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-8e00be7402a612e17d6b888b4eb1ac9f",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-8ec3b148b8c608a0562c671ec5000f23",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-8ec44fb44e4a3224795284068bb430b2",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-8ede5d8c00e10a2ff35554ebed2bf2",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-8ef2182a6f91e71e7877a964f5722626",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-8f3dfdb531d1b5dcb4ca066f17bc06cf",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-9028fceed53a144e10bc2436075f6a52",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-92ec69548761efc61f74e5d5bf005208",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-933d5c217d9c01789daa2bf0c68f794f",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-959975a60ae104c48780444eaa02106b",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-975de17c0b5d96cda38e5bd2fdb10d11",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-976a8d10e8423f8d8f15e8aad14ff29e",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-983b045d30322f96b102e855af58e521",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-983b362e25c008b1b36be681f90b79af",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-987662da7f345b272b1c9d869bc37167",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-98eb601db13d2a99611f4167fca99b42",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-9911b2ee8470d6dab2098fa3046754f",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-9952f0dc41b20fcfdd5b23028b480cc3",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-9b608bcc7e62c3e2dbe1e810cdc7471d",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-9cc581a6c5d0b8fcc14f5d127de947a6",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-9cedde0b189fc03824ec4b72ec33390e",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-9d021614c39c53dabee972a203aaf80",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-9dc0c2ca8de18e28b4c18e3209e12990",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-9dcc24af7e0df254525b3f0594400a46",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-9e302a3f21a992c0bb579d1d8d989550",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-9e5b9dd860689c5c217f93816a639386",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-a0efaa2ba04bf091adbfb30d8d1b297e",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-a13cea3066cd5b1746ab0c6c4666145a",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-a1c60f087535c7726fde3adc6768fe52",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-a1e51e185a9f24354b8478bdb97333d3",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-a24fb0602fc7fbf4ec059109909662d2",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-a2953e7ff6dcd4465af22172f09754fd",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-a2dedd1d1369d4ae25bdb70a4d3731d4",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-a3193340929f4bdd146def56c5fc9b3a",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-a4d81a74a416b88948637414dbe9de8d",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-a523f6e5662f8f178ddf0e44d13d17e3",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-a635a6b98eda6c1fa436566ba711d6a7",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-a857d9e7cd90163e10bc2436075f6a52",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-a860adc078391edc6774046e1fe3165b",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-a86eec9735db06a8226bc3b9ce9ff2a1",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-a9c181d7378f92cfbc59a3627d9edb6f",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-aabbfc7463d49368419fdfebc874eb8f",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-aae6554b1abe736c70ed77f7659cc6f",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-aaf1159cdc4e6ce5b2ff1d6fc3caddc1",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-ac0967f9fe8f63f46b2ba76eab0d2b1c",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-ac0a78736d78a5a5dd8524baa80cc603",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-ac1e771d6392e912f594ca916b37180c",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-ac6f6437f9e63981b6d41c42f7ade8c8",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-ac8d3abc6a6f7a939260029564d4cf0",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-ae7b93f3ea4238712f20ec3aefa0fb91",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-ae942af3b88d07af2c557fc696108818",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-aef45c975ed647778768dbb598f40c93",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-afa806973174e442ac4f72bf08dc79a6",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-b02d8e0fb3ec903b4a952171144f2812",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-b1085da37756ddd1d3f1ccf368ff60f9",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-b159743a482e73baa56eeaf8467b96e",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-b1feb3020d9380ba4fb324159a14f34e",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-b35c2da756f8df5aa0eb5a85db887292",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-b45f58361ed3ae739d2375e90e0e0425",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-b4795b53530c26c58b13932a0c28e98b",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-b514d253eefdbfdbddfa02c62bdf0f8f",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-b69603be92146a161ad8041551e9d3c2",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-b8415769dc1bc92821844676433a0aca",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-b854fc846c1fc2ba619a006c72381476",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-b87251d1d4f4b7ab2c216c5e0f221195",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-b91bbf0a0d09d2eb243525d45e430520",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-b9f67617cf320c20de4349e5bfa4fedb",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-ba21b515df2f8a8f19db431d2a67219",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-bbbca195cd6b85f1562c8e1ac545ef78",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-bbd5005058f01a54909425bd531e6033",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-bcf3ca7e860d04eaf0fbb92458462640",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-be66886215eafadd56b70d2dbf032aa1",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-bf1f95958ec4d3e8d485372bb746f3c7",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-bf2f0de18abd3bebdc858d428f2620a3",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-bf8e0289ba786e97487d18402ebe69d5",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-c06c6362fc6d1c9c5677057f93c3c270",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-c1077972752aac54e8deab000196f61d",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-c1ae3b758aa9ea5e6dba92a4e2177102",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-c3b9cb70c6a80ed686a04ec9e4169973",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-c410d13694b8ca1d15e144fc878b7afa",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-c5188dbebddbad3597cfb99c9c9efbb5",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-c56262f4a6a7fbe5fcae16e8230396f7",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-c589332137d854a1808ba9235495a934",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-c65f71b54023ee9897d7ccf55973b548",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-c71acd79ec4cf1cdd11ec2c68afc26e4",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-c7e4a425cebaa04bf9c8feac0b33491e",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-c7ec332bd52f939f04143dfe595ba79",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-c7fef6ae7f7f91814a0be3d856af9ad",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-c87bd717c3640f0f741e88434245c899",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-c8948cb8ec0f10ebc2287ee053005989",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-c978be9ff9bfb9c67d2c763bf3599a8",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-ca2e71c5e101797fa524f6bfc21eae12",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-caf0f73f4a609b7a2c4e8a2f66e4b8a3",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-cb80f0eb9d3566da655b6157f54b4abe",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-cb9e8cd0a29cbb26b6d41c42f7ade8c8",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-cc3f77485b8a18db562c8e1ac545ef78",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-ccfac9fefb0326003f548cb8701b2293",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-ce0d1ea23002e463861d8a7d0e05bb62",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-cea8f15682797fe6eb386a4e845c05f5",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-cf0dc63412541764cf9d394118de0d0",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-cf7973f49aa611346be7f66e5722d994",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-cfc5fce3c76610e3634fff5505144a5",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-d050f7389538de04ae0591d02e40f07b",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-d0b5b899929975558ee99126b119afe5",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-d130a357978694bf58efc722b5cff71c",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-d1b34149a8faba42faab2c6c450c7c1a",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-d21231fb7d7f7337f521a3dcd28e9d2",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-d2636f3af00fb3e2538f655e65b0b57",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-d2f3eb92a31649647c17b7a9bb17a24",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-d37afdca0c48251044b992023e0d3ef0",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-d41b332b9e6efddaa0eb5a85db887292",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-d4407c240737b0c73455cac94a339dea",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-d5561b05a6b84a5489905122ac8b41f3",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-d5fd6679ddfc8ddc59f56ab706e2f74c",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-d659d98d384e2c37e405d2e0f546cab",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-d72b00ba0cbe10a1157f4a560c24391b",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-d7c350e5d29074c9b4c216fa1de7d5a1",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-d8ee6baa8b57a89add62317fcd30f203",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-d932fb5d06d5e4f8da8c8a88ff86c5a7",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-d944c42ad08401651e5d846d206adf3d",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-d9ce2d0be1f3952aa36bec4fa7cd58c9",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-d9d06d2772ecc526c0dc3ed657ab97f0",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-da1fcb7a374f9c43397c13131c65cbca",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-da24f27173874672ed7485a1aa598365",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-db058088ec098d9bdfbc59eb47b047b3",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-dd02413772656bf5f6cc8d1cc08b421",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-dd996020281c929f73caa5ba625b1f4",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-df23ff3151aa1f0a3cb2f20e21cb06ff",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-df816deae044cf448e53975c71cdb91",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-df90c50a892611ca8536be73396b323e",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-e0ccc0cae4dc414cb4e7b68321c9d305",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-e0d9622225e1361883b4bc86420ed21d",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-e13a5d5b3f7581cbecf207e73a787c06",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-e14de927fca30e267a351c9c1f605db0",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-e156db6fe3b9286c87cb3c64e47598b4",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-e33124aa016bd1f19c1db271ad9472a7",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-e33e1483c4c22b1ae71852a7b0e4fcb6",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-e3c02395e83fefaa42dbe6bfe3cdb29d",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-e3e43df4a3fc1870d4d7de9e3c2bb6f4",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-e483787b7f9c606042f892024869e751",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-e48a2eff0b0d0a39a0eb5a85db887292",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-e55c20e95bf299b5fc4d1dd4278b31a5",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-e55ef720305bfcac284432ce2f42f498",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-e6cfa46780f8634de8d86c9b116d4e0c",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-e6f4ceda4907fcc13c47272ccf8f316c",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-e7bb86cd04cfd98758f1d9dcdcb62d55",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-e8d704bfd9b6c7f39af985c9d0dd6085",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-eb61306048b7848c327b5f10f339d9f8",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-ebb6035bab99c3e221844676433a0aca",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-ecab7b7bfef8d7f423575ca8cfe7da9",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-ecbb1c53e881c2b25f4e4793ed432bc1",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-ed004bce9e457ab037c7c775913296f5",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-ed53e90551ef9cb7118f00b061390b2",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-ed5ac4e8c681102e848d333362aaa342",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-ed71d2ed652b911e7f521a3dcd28e9d2",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-ed9149921b734b2941edb96d309c9a23",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-ef16dd3bd944608821844676433a0aca",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-ef57d8665eb5ef7cdb965514105122a4",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-efed528241cd773fa2c7c5886f4bbc93",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-f1b9de7276c1b07fe5562f06ed322f7e",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-f66d8ca1f6b259de2a9eb0f146e94477",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-f75e6866c8965374f1c81a6df84170c9",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-f7fcc773249429a2761eb63018291094",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-f8d97bebf67cad12a0eb5a85db887292",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-f9023b680f219f7c363111a4e20c10d0",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-f9418c13ca82fb887f75fa9740df3aa6",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-fa1088998ad523edf85a324c5324329e",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-fa14355e4b5455d870f7cd075189ddd8",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-fabcaa4858df16e35817e30de1dabac4",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-fddadcb723b843eaafb07a946d621b3c",
+    "scale": 0.06
+  },
+  {
+    "object": "core-cellphone-fe34b663c44baf622ad536a59974757f",
+    "scale": 0.08
+  },
+  {
+    "object": "core-cellphone-fe553cf733e29a349426aa93c5c54668",
+    "scale": 0.15
+  },
+  {
+    "object": "core-cellphone-fe9d97823a25e56d95e43220ee0eb824",
+    "scale": 0.12
+  },
+  {
+    "object": "core-cellphone-ff1e484e02e001bdf8a0d9b8943b4050",
+    "scale": 0.1
+  },
+  {
+    "object": "core-cellphone-ffe8cc1d33f3fb83d954b120b2d50f0f",
+    "scale": 0.12
+  },
+  {
+    "object": "core-jar-1168c9e9db2c1c5066639e628d6519b6",
+    "scale": 0.08
+  },
+  {
+    "object": "core-jar-151a80ff1ad2fe11c8c4893204f16cf",
+    "scale": 0.1
+  },
+  {
+    "object": "core-jar-1da5c02a928b8889dfd1be983f4bd279",
+    "scale": 0.08
+  },
+  {
+    "object": "core-jar-25d459836c571e1e6e130a30b5ed875",
+    "scale": 0.08
+  },
+  {
+    "object": "core-jar-26795095a52c788f664b3b9b23ddfcbc",
+    "scale": 0.06
+  },
+  {
+    "object": "core-jar-3976bd1f61e4b5c95d878ba9ec3c0d6a",
+    "scale": 0.06
+  },
+  {
+    "object": "core-jar-3e82203bf2cf0c81e6597d391ab6fcc1",
+    "scale": 0.06
+  },
+  {
+    "object": "core-jar-470392ec218fb13d63d977b06bbd429d",
+    "scale": 0.15
+  },
+  {
+    "object": "core-jar-477932969f473792433f5a7a254e9685",
+    "scale": 0.15
+  },
+  {
+    "object": "core-jar-56f7b662be65b7824725f67267e31c89",
+    "scale": 0.06
+  },
+  {
+    "object": "core-jar-58c9d6575d62fbaf12bc68f36f3bdd45",
+    "scale": 0.08
+  },
+  {
+    "object": "core-jar-5d636123af31f735e76bc197b3a3ffc0",
+    "scale": 0.12
+  },
+  {
+    "object": "core-jar-6596b4cadc29d0448de42fc1392c2139",
+    "scale": 0.12
+  },
+  {
+    "object": "core-jar-6c7bcc925e7c6fdfb33495457ee36a49",
+    "scale": 0.1
+  },
+  {
+    "object": "core-jar-7de119e0eb48a11e3c8d0fdfb1cc2535",
+    "scale": 0.08
+  },
+  {
+    "object": "core-jar-852e1bca3ec5fdeb5dc9e54641a3f5bb",
+    "scale": 0.12
+  },
+  {
+    "object": "core-jar-85b34acd44a557ae21072d05c97a5e0a",
+    "scale": 0.15
+  },
+  {
+    "object": "core-jar-8ec888ab36f1c5635afa616678601602",
+    "scale": 0.12
+  },
+  {
+    "object": "core-jar-9097ce398b9700a27e561f865dc44fc5",
+    "scale": 0.12
+  },
+  {
+    "object": "core-jar-94f4ad8b9ef500221952fef39dab6347",
+    "scale": 0.12
+  },
+  {
+    "object": "core-jar-a0569f8e769d087467964ba700cd97f5",
+    "scale": 0.1
+  },
+  {
+    "object": "core-jar-a96b8f654eee2e8168825f3d0ad04fa",
+    "scale": 0.15
+  },
+  {
+    "object": "core-jar-abf5f73c5440f78c20d37e3fe8c3f09",
+    "scale": 0.15
+  },
+  {
+    "object": "core-jar-ae9e1f9ff5b492524dff7c27c1f6df72",
+    "scale": 0.08
+  },
+  {
+    "object": "core-jar-bf2106de86fcdb3c9f695af5ccc7d06f",
+    "scale": 0.12
+  },
+  {
+    "object": "core-jar-c4ac6a5f651d12c6c6b4aaa0b0f9d794",
+    "scale": 0.06
+  },
+  {
+    "object": "core-jar-c5351c4aa1011866cef8c6985387af2a",
+    "scale": 0.1
+  },
+  {
+    "object": "core-jar-c59aa436f265a75b8f9c4ecc067067e9",
+    "scale": 0.06
+  },
+  {
+    "object": "core-jar-ca00e43903812f9bf8f2e9a6f7085339",
+    "scale": 0.12
+  },
+  {
+    "object": "core-jar-d31eea002a8dbbd744f73d1b4abfedac",
+    "scale": 0.12
+  },
+  {
+    "object": "core-jar-d3b53f56b4a7b3b3c9f016d57db96408",
+    "scale": 0.15
+  },
+  {
+    "object": "core-jar-dddd30f41cd6543e25e65d4b5f3b6456",
+    "scale": 0.1
+  },
+  {
+    "object": "core-jar-e0a62f7d9bb5cfea36b0f2a1430e993a",
+    "scale": 0.1
+  },
+  {
+    "object": "core-jar-e57f67c2da68cf1d6bc258c0f0234be0",
+    "scale": 0.06
+  },
+  {
+    "object": "core-knife-57a636a6a66cd955f16c469ffeb982e",
+    "scale": 0.06
+  },
+  {
+    "object": "core-knife-7725d5d2067f8fc0dd9394cb5004b836",
+    "scale": 0.08
+  },
+  {
+    "object": "core-knife-80f0436251c2108fb6bde4b7e6c6613",
+    "scale": 0.08
+  },
+  {
+    "object": "core-mug-1c3fccb84f1eeb97a3d0a41d6c77ec7c",
+    "scale": 0.12
+  },
+  {
+    "object": "core-mug-1dd8290a154f4b1534a8988fdcee4fde",
+    "scale": 0.15
+  },
+  {
+    "object": "core-mug-1ea9ea99ac8ed233bf355ac8109b9988",
+    "scale": 0.15
+  },
+  {
+    "object": "core-mug-24651c3767aa5089e19f4cee87249aca",
+    "scale": 0.12
+  },
+  {
+    "object": "core-mug-34869e23f9fdee027528ae0782b54aae",
+    "scale": 0.1
+  },
+  {
+    "object": "core-mug-39361b14ba19303ee42cfae782879837",
+    "scale": 0.15
+  },
+  {
+    "object": "core-mug-3a7439cfaa9af51faf1af397e14a566d",
+    "scale": 0.08
+  },
+  {
+    "object": "core-mug-414772162ef70ec29109ad7f9c200d62",
+    "scale": 0.1
+  },
+  {
+    "object": "core-mug-4b7888feea81219ab5f4a9188bfa0ef6",
+    "scale": 0.1
+  },
+  {
+    "object": "core-mug-5582a89be131867846ebf4f1147c3f0f",
+    "scale": 0.15
+  },
+  {
+    "object": "core-mug-649a51c711dc7f3b32e150233fdd42e9",
+    "scale": 0.08
+  },
+  {
+    "object": "core-mug-64a9d9f6774973ebc598d38a6a69ad2",
+    "scale": 0.15
+  },
+  {
+    "object": "core-mug-6c5ec193434326fd6fa82390eb12174f",
+    "scale": 0.15
+  },
+  {
+    "object": "core-mug-71995893d717598c9de7b195ccfa970",
+    "scale": 0.08
+  },
+  {
+    "object": "core-mug-79e673336e836d1333becb3a9550cbb1",
+    "scale": 0.12
+  },
+  {
+    "object": "core-mug-7d282cc3cedd40c8b5c4f4801d3aada",
+    "scale": 0.08
+  },
+  {
+    "object": "core-mug-83b41d719ea5af3f4dcd1df0d0a62a93",
+    "scale": 0.08
+  },
+  {
+    "object": "core-mug-99eaa69cf6fe8811dec712af445786fe",
+    "scale": 0.08
+  },
+  {
+    "object": "core-mug-9ff8400080c77feac2ad6fd1941624c3",
+    "scale": 0.06
+  },
+  {
+    "object": "core-mug-a1d293f5cc20d01ad7f470ee20dce9e0",
+    "scale": 0.15
+  },
+  {
+    "object": "core-mug-b815d7e084a5a75b8d543d7713b96a41",
+    "scale": 0.08
+  },
+  {
+    "object": "core-mug-b9f9f5b48ab1153626829c11d9aba173",
+    "scale": 0.15
+  },
+  {
+    "object": "core-mug-bcb6be8f0ff4a51872e526c4f21dfca4",
+    "scale": 0.08
+  },
+  {
+    "object": "core-mug-c7f8d39c406fee941050b055aafa6fb8",
+    "scale": 0.15
+  },
+  {
+    "object": "core-mug-dfa8a3a0c8a552b62bc8a44b22fcb3b9",
+    "scale": 0.12
+  },
+  {
+    "object": "core-mug-ec846432f3ebedf0a6f32a8797e3b9e9",
+    "scale": 0.12
+  },
+  {
+    "object": "core-mug-eecb13f61a93b4048f58d8b19de93f99",
+    "scale": 0.1
+  },
+  {
+    "object": "core-mug-f3a7f8198cc50c225f5e789acd4d1122",
+    "scale": 0.06
+  },
+  {
+    "object": "core-mug-f42a9784d165ad2f5e723252788c3d6e",
+    "scale": 0.1
+  },
+  {
+    "object": "core-pillow-1332172ba896e1c2a40f4c396e0c7dce",
+    "scale": 0.1
+  },
+  {
+    "object": "core-pillow-1399af537cd5f80723a295070ca176a0",
+    "scale": 0.15
+  },
+  {
+    "object": "core-pillow-15c98bfa322106a0d291861d5bc3e7c8",
+    "scale": 0.08
+  },
+  {
+    "object": "core-pillow-24dfe6ef933ae9692257a9702919f3a",
+    "scale": 0.15
+  },
+  {
+    "object": "core-pillow-2805a2c180bdebfa38071eaa0d0d49bf",
+    "scale": 0.15
+  },
+  {
+    "object": "core-pillow-2873ef9354972727b376ecd25749b977",
+    "scale": 0.12
+  },
+  {
+    "object": "core-pillow-2b627f36c6777472f51f77a6d7299806",
+    "scale": 0.1
+  },
+  {
+    "object": "core-pillow-2ec52ad731536d294b3c42e318f3affc",
+    "scale": 0.08
+  },
+  {
+    "object": "core-pillow-2fe82cff107cbeaeb357233991a61d01",
+    "scale": 0.15
+  },
+  {
+    "object": "core-pillow-31db3f4dd9d5944c3628a80a75ee02dc",
+    "scale": 0.15
+  },
+  {
+    "object": "core-pillow-359576c82de003cf96907985b34a7ba3",
+    "scale": 0.08
+  },
+  {
+    "object": "core-pillow-3e4659a2dcb7bd3f959a2da56ff43b4",
+    "scale": 0.12
+  },
+  {
+    "object": "core-pillow-3ee02ff403e6e5bc2c6c98851414a9d8",
+    "scale": 0.12
+  },
+  {
+    "object": "core-pillow-3fab1dacfa43a7046163a609fcf6c52",
+    "scale": 0.15
+  },
+  {
+    "object": "core-pillow-4691e0947b1e2a6b685998681d42efb8",
+    "scale": 0.08
+  },
+  {
+    "object": "core-pillow-49cfb88c1291a152fd5b65552e5580b6",
+    "scale": 0.1
+  },
+  {
+    "object": "core-pillow-4c617e5be0596ee2685998681d42efb8",
+    "scale": 0.1
+  },
+  {
+    "object": "core-pillow-51f5522d1b9088e2d7465eca206fda6f",
+    "scale": 0.06
+  },
+  {
+    "object": "core-pillow-530cc7dd793df95f8f5ae2c97614087a",
+    "scale": 0.12
+  },
+  {
+    "object": "core-pillow-55a09adb1315764f8a766d8de50bb39d",
+    "scale": 0.1
+  },
+  {
+    "object": "core-pillow-71dd20123ef5505d5931970d29212910",
+    "scale": 0.06
+  },
+  {
+    "object": "core-pillow-757be11305637a815b68a464a9cbfadf",
+    "scale": 0.08
+  },
+  {
+    "object": "core-pillow-7a555dba7e9f00549276a66e8d922b73",
+    "scale": 0.1
+  },
+  {
+    "object": "core-pillow-7c1194c82d28663d7d910d51d878f708",
+    "scale": 0.08
+  },
+  {
+    "object": "core-pillow-7d9cb088956a9c4993e60794f9200b7",
+    "scale": 0.06
+  },
+  {
+    "object": "core-pillow-81f8252de176a440f37af16b2893f1d4",
+    "scale": 0.1
+  },
+  {
+    "object": "core-pillow-86bcb4eb29d5effe157f5033576317e1",
+    "scale": 0.1
+  },
+  {
+    "object": "core-pillow-9451f92833603bd3630771196b76eab9",
+    "scale": 0.12
+  },
+  {
+    "object": "core-pillow-94e39fb5f01f15118998b3b64a143d42",
+    "scale": 0.06
+  },
+  {
+    "object": "core-pillow-950f71d6c271cbf47676dfce60793e46",
+    "scale": 0.15
+  },
+  {
+    "object": "core-pillow-98159cb7eb8bad07c45c0f305d0b6e87",
+    "scale": 0.08
+  },
+  {
+    "object": "core-pillow-a0903daa3dfa996837b2bb75885cfc44",
+    "scale": 0.08
+  },
+  {
+    "object": "core-pillow-a3efd34601ea92facd6e752154c5afc0",
+    "scale": 0.15
+  },
+  {
+    "object": "core-pillow-a97e7bc8291f73d521788cb501e76904",
+    "scale": 0.12
+  },
+  {
+    "object": "core-pillow-ab60bad52d6244db86052e834fbd2c4a",
+    "scale": 0.1
+  },
+  {
+    "object": "core-pillow-af515313df72452f29dab95fdd4a19d8",
+    "scale": 0.06
+  },
+  {
+    "object": "core-pillow-b4175523993f66e8d330ae3d046a415c",
+    "scale": 0.1
+  },
+  {
+    "object": "core-pillow-b8e55509c5223c09f51f77a6d7299806",
+    "scale": 0.12
+  },
+  {
+    "object": "core-pillow-c13de90da6f6744736902d83e4cc385",
+    "scale": 0.06
+  },
+  {
+    "object": "core-pillow-c1f39c4bcd931875f51f77a6d7299806",
+    "scale": 0.06
+  },
+  {
+    "object": "core-pillow-c665ecfac697faa1222129b9e83640a7",
+    "scale": 0.15
+  },
+  {
+    "object": "core-pillow-c898517ee2fab5ace3f7a74e12a274ef",
+    "scale": 0.06
+  },
+  {
+    "object": "core-pillow-cf2ab5d9bff184ca6325569942918d9f",
+    "scale": 0.08
+  },
+  {
+    "object": "core-pillow-d212b1cf646b23f5fdad967a7c361c07",
+    "scale": 0.06
+  },
+  {
+    "object": "core-pillow-d534e22b823ad56f630771196b76eab9",
+    "scale": 0.12
+  },
+  {
+    "object": "core-pillow-db211dc89ca9e40c29dab95fdd4a19d8",
+    "scale": 0.08
+  },
+  {
+    "object": "core-pillow-e8a13e84cc6db127616f4ad120b6332a",
+    "scale": 0.08
+  },
+  {
+    "object": "core-pillow-efd9fffc04d235dab55fde51a411949f",
+    "scale": 0.08
+  },
+  {
+    "object": "core-pillow-f19f78894858d57c38bf051f9aef03f8",
+    "scale": 0.1
+  },
+  {
+    "object": "core-pillow-f7a1abde2723321e8bd9de6b28931bb0",
+    "scale": 0.06
+  },
+  {
+    "object": "core-pillow-f7a58269c59ada7c4b3c42e318f3affc",
+    "scale": 0.15
+  },
+  {
+    "object": "core-pillow-f83e0334efbe5ac33c702793a783cff1",
+    "scale": 0.1
+  },
+  {
+    "object": "core-pillow-f921237171924e992d9c07d3b9171829",
+    "scale": 0.06
+  },
+  {
+    "object": "core-pillow-fce7f95d023ac364402d272d6d981f21",
+    "scale": 0.06
+  },
+  {
+    "object": "core-pillow-fe2236c135bc169e7676dfce60793e46",
+    "scale": 0.1
+  },
+  {
+    "object": "core-pistol-1115b4018238385ef1714763a5a5ab",
+    "scale": 0.12
+  },
+  {
+    "object": "core-pistol-1171db047e43948b40aa5b072f9ee3d1",
+    "scale": 0.08
+  },
+  {
+    "object": "core-pistol-1374e4af8a3ed46ea6766282ea8c438f",
+    "scale": 0.12
+  },
+  {
+    "object": "core-pistol-1c5d487fd6ab7ee88be2a30dd556a09",
+    "scale": 0.15
+  },
+  {
+    "object": "core-pistol-1e83ef6ed5d0b78b7efb854782e23566",
+    "scale": 0.15
+  },
+  {
+    "object": "core-pistol-263afcd618780865bbace5122b1001f5",
+    "scale": 0.12
+  },
+  {
+    "object": "core-pistol-2a0ac4cb28aeea64eb127ea937b74f9c",
+    "scale": 0.08
+  },
+  {
+    "object": "core-pistol-30195a2d2fe56a1f6887cd98a5557c7b",
+    "scale": 0.06
+  },
+  {
+    "object": "core-pistol-39105892cc0b553753e0a70586b5c8af",
+    "scale": 0.1
+  },
+  {
+    "object": "core-pistol-42358a5cfc9dac388dcf178d0ce30874",
+    "scale": 0.06
+  },
+  {
+    "object": "core-pistol-4a5ed50fe28a7380fef144202cb2b935",
+    "scale": 0.1
+  },
+  {
+    "object": "core-pistol-4a7d8a49bc6365f92f55420fa8e157d3",
+    "scale": 0.15
+  },
+  {
+    "object": "core-pistol-57b571c990cea8a8e1f2a1daf140ac9f",
+    "scale": 0.12
+  },
+  {
+    "object": "core-pistol-5a2bb05af1dedd91e641b9ab504917bf",
+    "scale": 0.08
+  },
+  {
+    "object": "core-pistol-5e895f53b72ad0ba49590df9bee4071",
+    "scale": 0.08
+  },
+  {
+    "object": "core-pistol-5f46578efd2c65e5d4ac2f5fcaa742ac",
+    "scale": 0.15
+  },
+  {
+    "object": "core-pistol-5f540dfb9dd0f21c9f433921788191f3",
+    "scale": 0.12
+  },
+  {
+    "object": "core-pistol-6119e9b1c0566e749f433921788191f3",
+    "scale": 0.12
+  },
+  {
+    "object": "core-pistol-7418810de4b13e8430b6ca3ac82edfa3",
+    "scale": 0.1
+  },
+  {
+    "object": "core-pistol-898424eaa40e821c2bf47341dbd96eb",
+    "scale": 0.15
+  },
+  {
+    "object": "core-pistol-8efdd5a6333179619f433921788191f3",
+    "scale": 0.1
+  },
+  {
+    "object": "core-pistol-948732c47471ea808e75bb5638d14ce9",
+    "scale": 0.08
+  },
+  {
+    "object": "core-pistol-9ab3478772766eec803b54e9738b20a6",
+    "scale": 0.1
+  },
+  {
+    "object": "core-pistol-9accc818df62042146be58202cd6477e",
+    "scale": 0.1
+  },
+  {
+    "object": "core-pistol-a97fdc331fd7c8299cb41f075aef64e4",
+    "scale": 0.1
+  },
+  {
+    "object": "core-pistol-b1bbe535a833635d91f9af3df5b0c8fc",
+    "scale": 0.08
+  },
+  {
+    "object": "core-pistol-b8fc16725ae2daf076a05817943c3b79",
+    "scale": 0.1
+  },
+  {
+    "object": "core-pistol-baaa7b7c8a39bfa5bf8434cfd671215a",
+    "scale": 0.08
+  },
+  {
+    "object": "core-pistol-c045c2df9649384e58da2ab14df356b2",
+    "scale": 0.06
+  },
+  {
+    "object": "core-pistol-cc014e78b5cd9e7ed957eaf7f4edb205",
+    "scale": 0.1
+  },
+  {
+    "object": "core-pistol-d0116dcd5bf9b88fea96bfd37cd8bdfb",
+    "scale": 0.06
+  },
+  {
+    "object": "core-pistol-d13986cc2403a2034b4b3d2a28039009",
+    "scale": 0.12
+  },
+  {
+    "object": "core-pistol-d1ba405fef56efa0fa29682ba98e856d",
+    "scale": 0.15
+  },
+  {
+    "object": "core-pistol-d3baf46b6c8a162fa267c8b6fcca89d9",
+    "scale": 0.12
+  },
+  {
+    "object": "core-pistol-d68f31ea513d3a5d6a816b111e5f1b47",
+    "scale": 0.1
+  },
+  {
+    "object": "core-pistol-d747c1f677349e78803b54e9738b20a6",
+    "scale": 0.1
+  },
+  {
+    "object": "core-pistol-df2e8011beb752dc44608b3255ca1886",
+    "scale": 0.12
+  },
+  {
+    "object": "core-pistol-e318098b6a42cba14968c6db52a4c95d",
+    "scale": 0.06
+  },
+  {
+    "object": "core-pistol-e4b03ae84f8d11394c3466ee2269609a",
+    "scale": 0.08
+  },
+  {
+    "object": "core-pistol-e534d084d3bc37184d0af51460733e47",
+    "scale": 0.12
+  },
+  {
+    "object": "core-pistol-e6017a1e15095b4e6314c3b6a3a65519",
+    "scale": 0.15
+  },
+  {
+    "object": "core-pistol-edec08542b9312b712b38b1d99376c0b",
+    "scale": 0.06
+  },
+  {
+    "object": "core-pistol-f249fdbb14d6c86087302680c759eef4",
+    "scale": 0.15
+  },
+  {
+    "object": "core-pistol-f33f1645e9e35e6ef4de29b99f103946",
+    "scale": 0.15
+  },
+  {
+    "object": "core-pistol-f80c465c9e401dab44608b3255ca1886",
+    "scale": 0.06
+  },
+  {
+    "object": "core-pistol-fe6368e73425bdc8ea70d2e1ac81279b",
+    "scale": 0.06
+  },
+  {
+    "object": "core-pistol-fffbe09e4890f8f36314c3b6a3a65519",
+    "scale": 0.1
+  },
+  {
+    "object": "core-remote-1aa78ce410bdbcd92530f02db7e9157e",
+    "scale": 0.15
+  },
+  {
+    "object": "core-remote-240456647fbca47396d8609ec76a915b",
+    "scale": 0.15
+  },
+  {
+    "object": "core-remote-2c6493d31849c15a75f1efca97bee05a",
+    "scale": 0.15
+  },
+  {
+    "object": "core-remote-49c6003c2248bdd1906ed109a4ea50d6",
+    "scale": 0.12
+  },
+  {
+    "object": "core-remote-7af8b6f6f78d0eddea30b1080420ecf9",
+    "scale": 0.15
+  },
+  {
+    "object": "core-remote-b2c79f7add7cb56ac03df0bb156692e3",
+    "scale": 0.06
+  },
+  {
+    "object": "core-remote-e08c8823d837fceeb2b53d011d5b25b",
+    "scale": 0.12
+  },
+  {
+    "object": "ddg-bigbird_band_aid_sheer_strips",
+    "scale": 0.12
+  },
+  {
+    "object": "ddg-bigbird_blue_clover_baby_toy",
+    "scale": 0.12
+  },
+  {
+    "object": "ddg-bigbird_bumblebee_albacore",
+    "scale": 0.15
+  },
+  {
+    "object": "ddg-bigbird_campbells_chicken_noodle_soup",
+    "scale": 0.15
+  },
+  {
+    "object": "ddg-bigbird_campbells_soup_at_hand_creamy_tomato",
+    "scale": 0.12
+  },
+  {
+    "object": "ddg-bigbird_canon_ack_e10_box",
+    "scale": 0.15
+  },
+  {
+    "object": "ddg-bigbird_clif_crunch_chocolate_chip",
+    "scale": 0.12
+  },
+  {
+    "object": "ddg-bigbird_clif_crunch_peanut_butter",
+    "scale": 0.15
+  },
+  {
+    "object": "ddg-bigbird_clif_z_bar_chocolate_chip",
+    "scale": 0.08
+  },
+  {
+    "object": "ddg-bigbird_clif_zbar_chocolate_brownie",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-bigbird_crayola_yellow_green",
+    "scale": 0.15
+  },
+  {
+    "object": "ddg-bigbird_dove_go_fresh_burst",
+    "scale": 0.15
+  },
+  {
+    "object": "ddg-bigbird_dove_pink",
+    "scale": 0.08
+  },
+  {
+    "object": "ddg-bigbird_fruit_by_the_foot",
+    "scale": 0.15
+  },
+  {
+    "object": "ddg-bigbird_hunts_paste",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-bigbird_hunts_sauce",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-bigbird_krylon_short_cuts",
+    "scale": 0.15
+  },
+  {
+    "object": "ddg-bigbird_nature_valley_crunchy_variety_pack",
+    "scale": 0.06
+  },
+  {
+    "object": "ddg-bigbird_nature_valley_granola_thins_dark_chocolate",
+    "scale": 0.12
+  },
+  {
+    "object": "ddg-bigbird_nature_valley_sweet_and_salty_nut_almond",
+    "scale": 0.08
+  },
+  {
+    "object": "ddg-bigbird_nutrigrain_blueberry",
+    "scale": 0.08
+  },
+  {
+    "object": "ddg-bigbird_nutrigrain_fruit_crunch_apple_cobbler",
+    "scale": 0.06
+  },
+  {
+    "object": "ddg-bigbird_nutrigrain_fruit_crunch_strawberry_parfait",
+    "scale": 0.06
+  },
+  {
+    "object": "ddg-bigbird_nutrigrain_harvest_country_strawberry",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-bigbird_nutrigrain_toffee_crunch_chocolatey_toffee",
+    "scale": 0.08
+  },
+  {
+    "object": "ddg-bigbird_pop_secret_butter",
+    "scale": 0.12
+  },
+  {
+    "object": "ddg-bigbird_pop_tarts_strawberry",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-bigbird_progresso_new_england_clam_chowder",
+    "scale": 0.06
+  },
+  {
+    "object": "ddg-bigbird_quaker_big_chewy_chocolate_chip",
+    "scale": 0.08
+  },
+  {
+    "object": "ddg-bigbird_quaker_chewy_dipps_peanut_butter_chocolate",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-bigbird_quaker_chewy_peanut_butter",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-bigbird_quaker_chewy_peanut_butter_chocolate_chip",
+    "scale": 0.15
+  },
+  {
+    "object": "ddg-bigbird_softsoap_white",
+    "scale": 0.06
+  },
+  {
+    "object": "ddg-bigbird_south_beach_good_to_go_peanut_butter",
+    "scale": 0.15
+  },
+  {
+    "object": "ddg-bigbird_white_rain_sensations_apple_blossom_hydrating_body_wash",
+    "scale": 0.15
+  },
+  {
+    "object": "ddg-gd_avocado_poisson_000",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-gd_binder_poisson_003",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-gd_box_poisson_005",
+    "scale": 0.06
+  },
+  {
+    "object": "ddg-gd_box_poisson_006",
+    "scale": 0.06
+  },
+  {
+    "object": "ddg-gd_box_poisson_013",
+    "scale": 0.15
+  },
+  {
+    "object": "ddg-gd_box_poisson_014",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-gd_box_poisson_015",
+    "scale": 0.06
+  },
+  {
+    "object": "ddg-gd_box_poisson_017",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-gd_box_poisson_019",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-gd_box_poisson_021",
+    "scale": 0.08
+  },
+  {
+    "object": "ddg-gd_box_poisson_023",
+    "scale": 0.06
+  },
+  {
+    "object": "ddg-gd_box_poisson_024",
+    "scale": 0.12
+  },
+  {
+    "object": "ddg-gd_box_poisson_025",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-gd_camera_poisson_007",
+    "scale": 0.06
+  },
+  {
+    "object": "ddg-gd_camera_poisson_011",
+    "scale": 0.08
+  },
+  {
+    "object": "ddg-gd_camera_poisson_012",
+    "scale": 0.06
+  },
+  {
+    "object": "ddg-gd_camera_poisson_014",
+    "scale": 0.15
+  },
+  {
+    "object": "ddg-gd_camera_poisson_015",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-gd_camera_poisson_016",
+    "scale": 0.15
+  },
+  {
+    "object": "ddg-gd_can_poisson_018",
+    "scale": 0.08
+  },
+  {
+    "object": "ddg-gd_can_poisson_022",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-gd_detergent_bottle_poisson_006",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-gd_donut_poisson_002",
+    "scale": 0.12
+  },
+  {
+    "object": "ddg-gd_donut_poisson_003",
+    "scale": 0.15
+  },
+  {
+    "object": "ddg-gd_donut_poisson_005",
+    "scale": 0.06
+  },
+  {
+    "object": "ddg-gd_egg_poisson_000",
+    "scale": 0.08
+  },
+  {
+    "object": "ddg-gd_egg_poisson_012",
+    "scale": 0.06
+  },
+  {
+    "object": "ddg-gd_figurine_poisson_004",
+    "scale": 0.12
+  },
+  {
+    "object": "ddg-gd_jar_poisson_005",
+    "scale": 0.12
+  },
+  {
+    "object": "ddg-gd_jar_poisson_007",
+    "scale": 0.08
+  },
+  {
+    "object": "ddg-gd_jar_poisson_009",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-gd_jar_poisson_019",
+    "scale": 0.15
+  },
+  {
+    "object": "ddg-gd_kettle_poisson_004",
+    "scale": 0.08
+  },
+  {
+    "object": "ddg-gd_kettle_poisson_005",
+    "scale": 0.15
+  },
+  {
+    "object": "ddg-gd_kettle_poisson_008",
+    "scale": 0.12
+  },
+  {
+    "object": "ddg-gd_lemon_poisson_003",
+    "scale": 0.12
+  },
+  {
+    "object": "ddg-gd_lemon_poisson_004",
+    "scale": 0.06
+  },
+  {
+    "object": "ddg-gd_light_bulb_poisson_009",
+    "scale": 0.06
+  },
+  {
+    "object": "ddg-gd_mug_new_poisson_001",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-gd_mushroom_poisson_003",
+    "scale": 0.12
+  },
+  {
+    "object": "ddg-gd_mushroom_poisson_007",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-gd_mushroom_poisson_012",
+    "scale": 0.08
+  },
+  {
+    "object": "ddg-gd_pitcher_poisson_001",
+    "scale": 0.08
+  },
+  {
+    "object": "ddg-gd_pot_poisson_001",
+    "scale": 0.15
+  },
+  {
+    "object": "ddg-gd_pot_poisson_004",
+    "scale": 0.12
+  },
+  {
+    "object": "ddg-gd_rubber_duck_poisson_000",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-gd_rubik_cube_poisson_004",
+    "scale": 0.06
+  },
+  {
+    "object": "ddg-gd_rubik_cube_poisson_005",
+    "scale": 0.08
+  },
+  {
+    "object": "ddg-gd_shampoo_poisson_001",
+    "scale": 0.12
+  },
+  {
+    "object": "ddg-gd_spray_bottle_poisson_002",
+    "scale": 0.12
+  },
+  {
+    "object": "ddg-gd_stapler_poisson_007",
+    "scale": 0.08
+  },
+  {
+    "object": "ddg-gd_stapler_poisson_023",
+    "scale": 0.08
+  },
+  {
+    "object": "ddg-gd_stapler_poisson_024",
+    "scale": 0.08
+  },
+  {
+    "object": "ddg-gd_tape_poisson_000",
+    "scale": 0.15
+  },
+  {
+    "object": "ddg-gd_tape_poisson_002",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-gd_tape_poisson_003",
+    "scale": 0.15
+  },
+  {
+    "object": "ddg-gd_tetra_pak_poisson_002",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-gd_tetra_pak_poisson_018",
+    "scale": 0.06
+  },
+  {
+    "object": "ddg-gd_tetra_pak_poisson_019",
+    "scale": 0.12
+  },
+  {
+    "object": "ddg-gd_tetra_pak_poisson_020",
+    "scale": 0.06
+  },
+  {
+    "object": "ddg-gd_tetra_pak_poisson_021",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-gd_tetra_pak_poisson_025",
+    "scale": 0.08
+  },
+  {
+    "object": "ddg-gd_toaster_poisson_002",
+    "scale": 0.15
+  },
+  {
+    "object": "ddg-gd_toaster_poisson_010",
+    "scale": 0.15
+  },
+  {
+    "object": "ddg-gd_toilet_paper_poisson_007",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-gd_toilet_paper_poisson_008",
+    "scale": 0.15
+  },
+  {
+    "object": "ddg-gd_toy_poisson_003",
+    "scale": 0.06
+  },
+  {
+    "object": "ddg-gd_toy_poisson_016",
+    "scale": 0.06
+  },
+  {
+    "object": "ddg-gd_toy_poisson_022",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-gd_toy_poisson_024",
+    "scale": 0.08
+  },
+  {
+    "object": "ddg-gd_vase_poisson_004",
+    "scale": 0.08
+  },
+  {
+    "object": "ddg-gd_watering_can_poisson_003",
+    "scale": 0.12
+  },
+  {
+    "object": "ddg-gd_watermelon_poisson_000",
+    "scale": 0.06
+  },
+  {
+    "object": "ddg-kit_ChickenSoup",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-kit_ChocMarshmallows",
+    "scale": 0.08
+  },
+  {
+    "object": "ddg-kit_ChocolateBars",
+    "scale": 0.12
+  },
+  {
+    "object": "ddg-kit_CleaningCloths",
+    "scale": 0.15
+  },
+  {
+    "object": "ddg-kit_CoffeeBox",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-kit_CoffeeFilters",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-kit_CoffeeFilters2",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-kit_CoughDropsHoney",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-kit_Deodorant",
+    "scale": 0.12
+  },
+  {
+    "object": "ddg-kit_DropsOrange",
+    "scale": 0.08
+  },
+  {
+    "object": "ddg-kit_FruitBars",
+    "scale": 0.15
+  },
+  {
+    "object": "ddg-kit_Heart1",
+    "scale": 0.08
+  },
+  {
+    "object": "ddg-kit_HotPot2",
+    "scale": 0.06
+  },
+  {
+    "object": "ddg-kit_InstantSauce2",
+    "scale": 0.06
+  },
+  {
+    "object": "ddg-kit_LivioClassicOil",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-kit_MilkRice",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-kit_Moon",
+    "scale": 0.12
+  },
+  {
+    "object": "ddg-kit_OrgFruitTea",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-kit_Patches",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-kit_PatchesSensitive",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-kit_PotatoeDumplings",
+    "scale": 0.06
+  },
+  {
+    "object": "ddg-kit_Rice",
+    "scale": 0.12
+  },
+  {
+    "object": "ddg-kit_Rusk",
+    "scale": 0.12
+  },
+  {
+    "object": "ddg-kit_RuskWholemeal",
+    "scale": 0.12
+  },
+  {
+    "object": "ddg-kit_SardinesCan",
+    "scale": 0.12
+  },
+  {
+    "object": "ddg-kit_SmacksCereals",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-kit_SoftCakeOrange",
+    "scale": 0.12
+  },
+  {
+    "object": "ddg-kit_Sweetener",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-kit_TomatoHerbSauce",
+    "scale": 0.12
+  },
+  {
+    "object": "ddg-kit_VitalisCereals",
+    "scale": 0.12
+  },
+  {
+    "object": "ddg-kit_YellowSaltCube",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-ycb_003_cracker_box",
+    "scale": 0.15
+  },
+  {
+    "object": "ddg-ycb_008_pudding_box",
+    "scale": 0.12
+  },
+  {
+    "object": "ddg-ycb_018_plum",
+    "scale": 0.08
+  },
+  {
+    "object": "ddg-ycb_063-a_marbles",
+    "scale": 0.08
+  },
+  {
+    "object": "ddg-ycb_070-b_colored_wood_blocks",
+    "scale": 0.15
+  },
+  {
+    "object": "ddg-ycb_072-b_toy_airplane",
+    "scale": 0.1
+  },
+  {
+    "object": "ddg-ycb_073-g_lego_duplo",
+    "scale": 0.08
+  },
+  {
+    "object": "ddg-ycb_077_rubiks_cube",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-3D_Dollhouse_Refrigerator",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-3M_Antislip_Surfacing_Light_Duty_White",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-ASICS_GEL1140V_WhiteBlackSilver",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Android_Figure_Chrome",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-Android_Figure_Panda",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-Android_Lego",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Animal_Crossing_New_Leaf_Nintendo_3DS_Game",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Apples_to_Apples_Kids_Edition",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-Asus_80211ac_DualBand_Gigabit_Wireless_Router_RTAC68R",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-Asus_M5A78LMUSB3_Motherboard_Micro_ATX_Socket_AM3",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Asus_M5A99FX_PRO_R20_Motherboard_ATX_Socket_AM3",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Asus_Sabertooth_Z97_MARK_1_Motherboard_ATX_LGA1150_Socket",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Asus_X99Deluxe_Motherboard_ATX_LGA2011v3_Socket",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Asus_Z97IPLUS_Motherboard_Mini_ITX_LGA1150_Socket",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-BIA_Cordon_Bleu_White_Porcelain_Utensil_Holder_900028",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Balderdash_Game",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Beetle_Adventure_Racing_Nintendo_64",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Beta_Glucan",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-Beyonc_Life_is_But_a_Dream_DVD",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Big_O_Sponges_Assorted_Cellulose_12_pack",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-BlueBlack_Nintendo_3DSXL",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-Blue_Jasmine_Includes_Digital_Copy_UltraViolet_DVD",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-Breyer_Horse_Of_The_Year_2015",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Brother_LC_1053PKS_Ink_Cartridge_CyanMagentaYellow_1pack",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-Brother_Printing_Cartridge_PC501",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-CHICKEN_RACER",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Canon_Ink_Cartridge_Green_6",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-Canon_Pixma_Chromalife_100_Magenta_8",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-Canon_Pixma_Ink_Cartridge_251_M",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-Canon_Pixma_Ink_Cartridge_8",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-Canon_Pixma_Ink_Cartridge_8_Green",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-Canon_Pixma_Ink_Cartridge_8_Red",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-Canon_Pixma_Ink_Cartridge_Cyan_251",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Chef_Style_Round_Cake_Pan_9_inch_pan",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Clue_Board_Game_Classic_Edition",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-Cole_Hardware_Antislip_Surfacing_Material_White",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-Cole_Hardware_Dishtowel_Blue",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Cole_Hardware_Dishtowel_BlueWhite",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-Cole_Hardware_Dishtowel_Red",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-Cole_Hardware_Plant_Saucer_Brown_125",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-Cole_Hardware_Plant_Saucer_Glazed_9",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Cole_Hardware_Saucer_Electric",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Connect_4_Launchers",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-Corningware_CW_by_Corningware_3qt_Oblong_Casserole_Dish_Blue",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-Court_Attitude",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-Crayola_Crayons_Washable_24_crayons",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Crayola_Model_Magic_Modeling_Material_Single_Packs_6_pack_05_oz_packs",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-Crayola_Model_Magic_Modeling_Material_White_3_oz",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-Crayola_Washable_Fingerpaint_Red_Blue_Yellow_3_count_8_fl_oz_bottes_each",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Crunch_Girl_Scouts_Candy_Bars_Peanut_Butter_Creme_78_oz_box",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-Dell_Ink_Cartridge",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Dell_Series_9_Color_Ink_Cartridge_MK993_High_Yield",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-Design_Ideas_Drawer_Store_Organizer",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Diet_Pepsi_Soda_Cola12_Pack_12_oz_Cans",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-Eat_to_Live_The_Amazing_NutrientRich_Program_for_Fast_and_Sustained_Weight_Loss_Revised_Edition_Book",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Ecoforms_Plant_Container_QP6CORAL",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-Ecoforms_Plant_Container_S24NATURAL",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-Ecoforms_Plant_Container_S24Turquoise",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-Ecoforms_Plant_Container_URN_SAN",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-Ecoforms_Plant_Plate_S11Turquoise",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Ecoforms_Plant_Saucer_S14MOCHA",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-Ecoforms_Plant_Saucer_S17MOCHA",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-Ecoforms_Plant_Saucer_S20MOCHA",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Ecoforms_Plant_Saucer_SQ8COR",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-Ecoforms_Planter_Pot_QP6Ebony",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Ecoforms_Plate_S20Avocado",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Ecoforms_Pot_Nova_6_Turquoise",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Envision_Home_Dish_Drying_Mat_Red_6_x_18",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Epson_Ink_Cartridge_126_Yellow",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Epson_Ink_Cartridge_Black_200",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Epson_LabelWorks_LC4WBN9_Tape_reel_labels_047_x_295_Roll_Black_on_White",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-Epson_T5803_Ink_Cartridge_Magenta_1pack",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-Epson_UltraChrome_T0548_Ink_Cartridge_Matte_Black_1pack",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-FIRE_TRUCK",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-FRACTION_FUN_n4h4qte23QR",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Final_Fantasy_XIV_A_Realm_Reborn_60Day_Subscription",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-Firefly_Clue_Board_Game",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-FisherPrice_Make_A_Match_Game_Thomas_Friends",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Frozen_Olafs_In_Trouble_PopOMatic_Game",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-Frozen_Olafs_In_Trouble_PopOMatic_Game_OEu83W9T8pD",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Frozen_Scrabble_Jr",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Fruity_Friends",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-GEOMETRIC_PEG_BOARD",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-GEOMETRIC_SORTING_BOARD",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-GRANDFATHER_DOLL",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Ghost_6_GTX_Color_AnthBlckSlvrFernSulphSprng_Size_80",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-Gigabyte_GA78LMTUSB3_50_Motherboard_Micro_ATX_Socket_AM3",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Gigabyte_GA970AUD3P_10_Motherboard_ATX_Socket_AM3",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-Glycerin_11_Color_AqrsDrsdnBluBlkSlvShckOrng_Size_50",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-Google_Cardboard_Original_package",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Granimals_20_Wooden_ABC_Blocks_Wagon_85VdSftGsLi",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Grreatv_Choice_Dog_Bowl_Gray_Bones_Plastic_20_fl_oz_total",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-HP_1800_Tablet_8GB_7",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-Hasbro_Cranium_Performance_and_Acting_Game",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-Hasbro_Dont_Wake_Daddy_Board_Game_NJnjGna4u1a",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-Hasbro_Life_Board_Game",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-Hasbro_Monopoly_Hotels_Game",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Hasbro_Trivial_Pursuit_Family_Edition_Game",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-Hey_You_Pikachu_Nintendo_64",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-Home_Fashions_Washcloth_Linen",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-Horse_Dreams_Pencil_Case",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-House_of_Cards_The_Complete_First_Season_4_Discs_DVD",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-Hyaluronic_Acid",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-HyperX_Cloud_II_Headset_Gun_Metal",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-HyperX_Cloud_II_Headset_Red",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-JBL_Charge_Speaker_portable_wireless_wired_Green",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-JS_WINGS_20_BLACK_FLAG",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-JarroSil_Activated_Silicon_5exdZHIeLAp",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-Jawbone_UP24_Wireless_Activity_Tracker_Pink_Coral_L",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-Just_For_Men_ShampooIn_Haircolor_Light_Brown_25",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Just_For_Men_Shampoo_In_Haircolor_Darkest_Brown_50",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-Justified_The_Complete_Fourth_Season_3_Discs_DVD",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-KS_Chocolate_Cube_Box_Assortment_By_Neuhaus_2010_Ounces",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Kid_Icarus_Uprising_Nintendo_3DS_Game",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Kingston_DT4000MR_G2_Management_Ready_USB_64GB",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-LADYBUG_BEAD",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-LEGO_Fusion_Set_Town_Master",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-Lenovo_Yoga_2_11",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-Little_Big_Planet_3_Plush_Edition",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Little_Debbie_Cloud_Cakes_10_ct",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-Luigis_Mansion_Dark_Moon_Nintendo_3DS_Game",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Mad_Gab_Refresh_Card_Game",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Marc_Anthony_Strictly_Curls_Curl_Envy_Perfect_Curl_Cream_6_fl_oz_bottle",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-Marc_Anthony_True_Professional_Oil_of_Morocco_Argan_Oil_Treatment",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-Marc_Anthony_True_Professional_Strictly_Curls_Curl_Defining_Lotion",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Mattel_SKIP_BO_Card_Game",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-Melissa_Doug_Cart_Turtle_Block",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-Melissa_Doug_Chunky_Puzzle_Vehicles",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Melissa_Doug_Felt_Food_Pizza_Set",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-Melissa_Doug_Jumbo_Knob_Puzzles_Barnyard_Animals",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Melissa_Doug_See_Spell",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Melissa_Doug_Shape_Sorting_Clock",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-Melissa_Doug_Traffic_Signs_and_Vehicles",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Mens_Tremont_Kiltie_Tassel_Loafer_in_Black_Amaretto",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-My_First_Rolling_Lion",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-Neat_Solutions_Character_Bib_2_pack",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-Nescafe_16Count_Dolce_Gusto_Cappuccino_Capsules",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-Nescafe_Tasters_Choice_Instant_Coffee_Decaf_House_Blend_Light_7_oz",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Nestl_Skinny_Cow_Heavenly_Crisp_Candy_Bar_Chocolate_Raspberry_6_pack_462_oz_total",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-Nestle_Candy_19_oz_Butterfinger_Singles_116567",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Nestle_Carnation_Cinnamon_Coffeecake_Kit_1913OZ",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Nestle_Pure_Life_Exotics_Sparkling_Water_Strawberry_Dragon_Fruit_8_count_12_fl_oz_can_aX0ygjh3bxi",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-Nestle_Raisinets_Milk_Chocolate_35_oz_992_g",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-Nestle_Skinny_Cow_Dreamy_Clusters_Candy_Dark_Chocolate_6_pack_1_oz_pouches",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Netgear_N750_Wireless_Dual_Band_Gigabit_Router",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-New_Super_Mario_BrosWii_Wii_Game",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Nightmare_Before_Christmas_Collectors_Edition_Operation",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Nintendo_2DS_Crimson_Red",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-Now_Designs_Bowl_Akita_Black",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-Now_Designs_Dish_Towel_Mojave_18_x_28",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-Now_Designs_Snack_Bags_Bicycle_2_count",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-Office_Depot_Canon_CL211XL_Remanufactured_Ink_Cartridge_TriColor",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Office_Depot_Canon_CLI_221BK_Ink_Cartridge_Black_2946B001",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Office_Depot_Canon_CL_41_Remanufactured_Ink_Cartridge_TriColor",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-Office_Depot_Canon_PGI35_Remanufactured_Ink_Cartridge_Black",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Office_Depot_Dell_Series_11_Remanufactured_Ink_Cartridge_Black",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Office_Depot_Dell_Series_11_Remanufactured_Ink_Cartridge_TriColor",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-Office_Depot_Dell_Series_5_Remanufactured_Ink_Cartridge_Black",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Office_Depot_HP_61Tricolor_Ink_Cartridge",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-Office_Depot_HP_950XL_Ink_Cartridge_Black_CN045AN",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-Office_Depot_HP_98_Remanufactured_Ink_Cartridge_Black",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Olive_Kids_Birdie_Lunch_Box",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-Olive_Kids_Butterfly_Garden_Pencil_Case",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Olive_Kids_Dinosaur_Land_Lunch_Box",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Olive_Kids_Dinosaur_Land_Munch_n_Lunch",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Olive_Kids_Dinosaur_Land_Sidekick_Backpack",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Olive_Kids_Game_On_Lunch_Box",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-Olive_Kids_Game_On_Munch_n_Lunch",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-PINEAPPLE_MARACA_6_PCSSET",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-PUNCH_DROP",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-Paper_Mario_Sticker_Star_Nintendo_3DS_Game",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-Paul_Frank_Dot_Lunch_Box",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-Pepsi_Caffeine_Free_Diet_12_CT",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Perricone_MD_AcylGlutathione_Eye_Lid_Serum",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-Perricone_MD_Best_of_Perricone_7Piece_Collection_MEGsO6GIsyL",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Perricone_MD_Face_Finishing_Moisturizer",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Perricone_MD_Firming_Neck_Therapy_Treatment",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Perricone_MD_Hypoallergenic_Gentle_Cleanser",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-Perricone_MD_Neuropeptide_Firming_Moisturizer",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-Perricone_MD_No_Lipstick_Lipstick",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Perricone_MD_Nutritive_Cleanser",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Perricone_MD_OVM",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Perricone_MD_Photo_Plasma",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Perricone_MD_The_Crease_Cure_Duo",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-Persona_Q_Shadow_of_the_Labyrinth_Nintendo_3DS",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-Phillips_Colon_Health_Probiotic_Capsule",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Pokmon_Conquest_Nintendo_DS_Game",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-Pokmon_X_Nintendo_3DS_Game",
+    "scale": 0.1
+  },
+  {
+    "object": "mujoco-Pok\u00e9mon_Omega_Ruby_Alpha_Sapphire_Dual_Pack_Nintendo_3DS",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-Pok\u00e9mon_Yellow_Special_Pikachu_Edition_Nintendo_Game_Boy_Color",
+    "scale": 0.12
+  },
+  {
+    "object": "mujoco-ProSport_Harness_to_Booster_Seat",
+    "scale": 0.15
+  },
+  {
+    "object": "mujoco-PureConnect_2_Color_AnthrcteKnckoutPnkGrnGecko_Size_50",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-Razer_Abyssus_Ambidextrous_Gaming_Mouse",
+    "scale": 0.06
+  },
+  {
+    "object": "mujoco-Razer_BlackWidow_Stealth_2014_Keyboard_07VFzIVabgh",
+    "scale": 0.08
+  },
+  {
+    "object": "mujoco-ReadytoUse_Rolled_Fondant_Pure_White_24_oz_box",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-BeanBag-4c1d6b12b48a80b0ebd10747ca93b13b",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-BeanBag-4fa3a2c2b7ff8766a1c637e821f12a67",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-BeanBag-5aeefb539699524044b2fa2cac0778f5",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-BeanBag-b5a0c927213ba01dc39a00da16746b95",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-BeanBag-de862f78d1412e5268d4f5a3519f61be",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Bear-1a0312faac503f7dc2c1a442b53fa053",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Bear-66dfcafd1ca29817de1afe4c8aa3dcce",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Bear-762fbaa6bf5823c21c1ef519b9196b63",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Book-11183af410a81c186f525e79a05bbcb3",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Book-13335c01414d6fd85af897847a7513ca",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Book-19f04c7aecfb05a3cc639cc85c8f16df",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Book-1d493a57a21833f2d92c7cdc3939488b",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Book-1e2dcb130b75c6c09251ef7f51226942",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Book-1fd8d3cdf525532b5b5a685c28abd3e",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Book-20dec770602a8ac2331999dc8823fe0d",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Book-22b7066166d83798876972681d7d64db",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Book-2394aad19bdb0ca8e751791317b66d8c",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Book-25dd6051429b804430a87f4918e4b66",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Book-2d3598f0e0a07de7ff8a6b1ceab25ae8",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Book-3c030f8b8f7637eac0d3742cb5ee0e30",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Book-40063a7b95efd3e94e3ba00caff7aecc",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Book-4dc6344e8e357867a0a7b8ecc42036d5",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Book-4e0eab530e900d09bcbccbbd6200163",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Book-4fc472642d8831d32b47ff0229e1155a",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Book-5ba89398d98be20e691def363532c98",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Book-5e90bf1bb411069c115aef9ae267d6b7",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Book-5fb3c24bb78a75976ad1e524762a34d5",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Book-742e14aa241feab67efcee988123ee4c",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Book-77fbfb099946218de7cc0348080803a7",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Book-7899800a75e1ed45c7c51d4ea74651a7",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Book-80302eee16d4e9da384368499a680cf1",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Book-89c7cc9f23c67ed6978cd0e4ce91ea2b",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Book-8daa30dd38bd5f5cd5bd8e7415322d0f",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Book-9ee8ceff2bd0f1adb3480c13e0bfacdf",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Book-a238b2f6f5e2cf66c77016426fd9cf48",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Book-a355beaa0446cee43a9ac064380c69d0",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Book-a793d662d70db6b39774d2c749f8f717",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Book-a7ce5adc817940ab7eb50173c6da3ca0",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Book-aa52d97d28e0269c9a4be081d49fa50d",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Book-ab54d97d4677d537bb4fd842f8631c2b",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Book-b1611143b4da5c783143cfc9128d0843",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Book-b7f90bcd0df05b2fdb8263f95c1cca50",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Book-bf256642fdf506e29a39c6489bdf936f",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Book-bfaaaeae7f08e588b0173158df715b5e",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Book-c5b5fefe11d3d9d28524f7821d57684c",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Book-c7f991b1a9bfcff0fe1e2f026632da15",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Book-c8691c86e110318ef2bc9da1ba799c60",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Book-ca686d7726623dc7fa2e328741dade59",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Book-cc0e864645032185d2d64d0098518cf",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Book-d01a14177316c1c64b957fdbc5213e37",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Book-d6df9bdabdd66e07f256a8c3e3396495",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Book-d8d4004791c4f61b80fa98b5eeb7036c",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Book-de9973cc24c80178d1500d3c97406d29",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Book-e9c15756a9c5c9d5188705959b3fcb07",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Book-ebcd6d6c36a7193a952c493f36a7be8",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Book-f3671892b7732d98f660746ea5b1e425",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Book-f3cd14044560d9f161886ba4a02e7ed6",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Book-fd1843119c00bec7a4e3429ccb8eaf16",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Book-fd9f588d4c9a47121447e7c887285c7c",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Bowl-374acae5bbe12d94906d9b38ee33fcd2",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Bowl-38af522494d535151f6a5b0146bf3030",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Bowl-49a0a84ee5a91344b11c5cce13f76151",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Bowl-53476e51e6bb59eaf35de0153a1c1eca",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Bowl-594b22f21daf33ce6aea2f18ee404fd5",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Bowl-64ccb121147c56af48ce81ccd3000f65",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Bowl-6a772d12b98ab61dc26651d9d35b77ca",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Bowl-7ebbe5e7d05da436f926435cc723d8ad",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Bowl-8bb057d18e2fcc4779368d1198f406e7",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Bowl-8eab5598b81afd7bab5b523beb03efcd",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Bowl-95ac294f47fd7d87e0b49f27ced29e3",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Bowl-fca9fcb710592311d291861d5bc3e7c8",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Calculator-1195f3e9e2d20c31af2bcf0b16fddd8f",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Calculator-1cdb3ab817e6cefdc0dc668541bf405a",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Calculator-28c54e8b42c04eab47a3c30e38e33df7",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Calculator-28cae57a8d9f858b92eb9b3d545b01bd",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Calculator-387e59aec6f5fdc04b836f408176a54c",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Calculator-57f8d6a2c733c5795bbea6ee257e41cc",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Calculator-62b3e184f027575ecd0ef049f5791ffc",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Calculator-62be0f7fe8076ede31fd93e535713515",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Calculator-6ba3f8a4a4750534cc2e054c56e9a85a",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Calculator-88c302d87bda30c65e8f8bafc1052064",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Calculator-9601a3be08cd1dcfc6f38051a0177f8e",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Calculator-98eb939617847c7f3827f738c1a435b",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Calculator-9c9b1758dd61c4168d66b04680005e70",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Calculator-a1a602b6c9467ce1920de219c00d1c3b",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Calculator-ba19649ebdf4e92fa6fdf2685cdc27cd",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Calculator-bd983ce3c4734098303cda9f385c061",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Calculator-c13f22c6d442694a45d5a97317136194",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Calculator-cdf2273b23d3f147f1c83b9415baaca4",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Calculator-d08f980577e061b3689728fb96d00170",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Calculator-ddd053d1db789cca9c6d98002e5b7f0",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Camera-1ab3abb5c090d9b68e940c4e64a94e1e",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Camera-235a6dd25c0a6f7b66f19f26ac490096",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Camera-2693df58698a2ca29c723bc28575d785",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Camera-6ca77b19e3f52c5031c1d3ccd72d7161",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Camera-74ebdf5a3cdf33ebc6966f67e1bb9e90",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Camera-a230560372fd55a410ec06105f027b7d",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Camera-a600991b042b2d5492348cc032adf089",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Camera-c53b764706d3ea0c903ed64490279b2a",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Camera-d6721b4ee3d004b8c7e03242f1bf8d19",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Camera-e5d95c0741290bec53d4d4a926d0dadc",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Cap-c2cf2cf35d08662945c5fa74440a4519",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Car-71ecab71f04e7cd235c52f8f88910645",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Car-da496ba5f90a476a1493b1a3f79fe4c6",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Car-f47765d3d57f4ea8e0ed4664c59dfd1",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Cassette-54878d2b00d673b1819c4700f82fab78",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Cat-2163e8058aaa96a771879a51f4bce289",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-CellPhone-136ef91c95ca5c2d4b9a4e1a888c5f59",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-CellPhone-1984fb95afb6dae5804722305621f918",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-CellPhone-1d7830c5d0322518d95aa859a460a9ec",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-CellPhone-1f4e56064de606093e746e5f1700ce1a",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-CellPhone-24c665b954ccb8c26e4f3fb3ce0feb39",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-CellPhone-2725909a09e1a7961df58f4da76e254b",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-CellPhone-2b221582a01bded2becc5889eb0cb75b",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-CellPhone-30b4eb2b7f2e74e3870115a6947530",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-CellPhone-378bb409b48e53835b6639c43a38be21",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-CellPhone-3c8e65d5e1d5394999b5b8ecc373dd91",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-CellPhone-3e2d210b0c417fd07dc210e0cbe8d6ee",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-CellPhone-471a1ba8c1e1fb0a5b031707d900d7ec",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-CellPhone-48a4adf9f47b08f06810060c16e68d51",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-CellPhone-4ab745d5e834afd23765349fd8e5584",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-CellPhone-4c992058eca403d9980a39e0273687b1",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-CellPhone-4dc4b935b2f43989becc5889eb0cb75b",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-CellPhone-588619a23a5d7812f2f720a563565b58",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-CellPhone-596e06847f9197d0d5a4f8ac20c6e6d5",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-CellPhone-63d7e19327f1bca6fbd525df60e2bb14",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-CellPhone-6c7fc79a5028bd769caad6e0fbf3962c",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-CellPhone-6e6d7c2ffadc2fad2fffec7af390883",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-CellPhone-73d6b5dfb0f2bd8f5c351e299b24e355",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-CellPhone-7ea27ed05044031a6fe19ebe291582",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-CellPhone-85a94f368a791343985b19765176f4ab",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-CellPhone-872cafaa1a4b658878df813b603fccea",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-CellPhone-8aa05d2bb435ab441ac3fdfdb76cf4dc",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-CellPhone-91f2f9df007f4d318fdcd40fee9b11be",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-CellPhone-92f2806d4e79471f138a2eb0b24a9d34",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-CellPhone-93d617cb7bf7558671fd17a89eb6aa70",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-CellPhone-97636c08b1f1c4c2420f2c422430d6fa",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-CellPhone-996fd7ccc0567c3c6b2ba76eab0d2b1c",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-CellPhone-9b3ceb20bc6037d3168540475994a324",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-CellPhone-9ddd4f60765fe56df7a6ba154b1bfb92",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-CellPhone-a0402aeeda1803b264ac3b2f693d10e5",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-CellPhone-a2dedd1d1369d4ae25bdb70a4d3731d4",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-CellPhone-a6188e308c33e146821ccd94ca6205",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-CellPhone-a8924202a504478af325eaa2da7ecc8",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-CellPhone-b1feb3020d9380ba4fb324159a14f34e",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-CellPhone-b91bbf0a0d09d2eb243525d45e430520",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-CellPhone-bb0b34d466dbbda110bc2436075f6a52",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-CellPhone-bfba0e8cdd5462e4fe103fdbd20df6",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-CellPhone-c13ce3bd7153ea262388b9322a31a5",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-CellPhone-c29ff2cbafdcf988bd5b0af7009d604c",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-CellPhone-c346cf8bf70fabc9e615a342a5da23b6",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-CellPhone-caa0cf3c7bf2cc4e50e8879f012090b1",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-CellPhone-cae417bf3a81e663c6d475e0bba8d9c4",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-CellPhone-d1134b5b107fcfedb58c0249f6338472",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-CellPhone-d2023b9e8284e50f719849e3a9efc095",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-CellPhone-dbc10ea4f133b92218e4480467ac75d4",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-CellPhone-dc8108a14b6718ac980a39e0273687b1",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-CellPhone-e1f4c110a670bab48b89df7bead6cd94",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-CellPhone-e679783f54c36220b99a2cc4ddf0d3f9",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-CellPhone-e70daec70daaea412b23f814327082fc",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-CellPhone-ee7ef8b40cc2c90d6b7170bfc4da1f8",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-CellPhone-f0b3e6f5bd34ca3cf0c6f578f0594c3",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-CellPhone-f3aac8f54f5f2a2f983ec12a2b33f18b",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-CellPhone-f42fdbed4f5cae8fbecc5889eb0cb75b",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-CellPhone-f6b4f01d4c9c09e6af1fe3c052ed3a8c",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-CellPhone-f8788ee72552e46d2cb30f9f0e012738",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-CellPhone-f9b16ef975f61442e615a342a5da23b6",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-CellPhone-fe9d97823a25e56d95e43220ee0eb824",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-CerealBox-45628e5fceff8eda39f3410d5f76299b",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-CerealBox-5062771877ee2a229eeafe87febc2d14",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-CerealBox-7685495f6e5aac1339a00425b5e3771a",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-CerealBox-a15f43d04b3d5256c9ea91c70932c737",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-CerealBox-a61cd12446207107d59ff053d1480d84",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-CerealBox-a9beebe1b851adacd59ff053d1480d84",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-CerealBox-abc86fa217ffeeeab3c769e22341ffb4",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-CerealBox-b7d15c3a5784f95460c90262984aef06",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-CerealBox-defe74c05001775c13d6ba6128d0b598",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-CerealBox-e481c3d08c11fc9e2978181091f6882a",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-CerealBox-fbf7021503a2a11fce41b639931f9ca1",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-CerealBox-fc6667707faff16544608b3255ca1886",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Chocolate-27f8f22fea3cc34219cd7d4b344db6b9",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Chocolate-c79da9bcb5c6f6a5a544d74fd0364407",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Clock-5d47a83ce211f6a331387b9bbb0e1fa3",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Clock-b6d7c946f14d345f7c9f6c5864df1a57",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Coin-3114a48018c1b0ba316e398e79bfa21a",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Coin-3268b978e9e5efebd3fb018caad1b802",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Coin-3d218ab9b3ecba8c4768b491c2c6e170",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Coin-49b886b4423ca29c18af33eada386f49",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Coin-88b7181e1b7ff59251ddf7810ac75c3",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Coin-b748261bf05afa1e4dec1b3e5b450774",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Coin-c2817372ece2a8c4b746bebe89abd6b4",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Coin-d85d70ee773585b4158f0afc845a367",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Coin-e777985e27af0ec5b581cc9c4410f841",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Coin-f28ea389bf901129de650492e45fb14f",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Compass-2add5d4bbef562f578832031b48c2b4d",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-ComputerMouse-2a9343e04fa85d132109d639e99c4886",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-ComputerMouse-41a047710c6f0fa1cad45966cda6cfb6",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-ComputerMouse-6ff315614cde9b42e58e58ea74bf6c0a",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-ComputerMouse-787bf704109ef23b89c1825c188af072",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-ComputerMouse-8ffc9e567e5af31a563b10b1d8090f9f",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-ComputerMouse-90490d506c40f6b344ebbc705ad8c07",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-ComputerMouse-be0e483839b977f1ce8bf8bfdf6340e2",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-ComputerMouse-d249653931daa9e6fd56d9106430c3fe",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-ComputerMouse-d578b1493e118a736d07c55cf995503e",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Cookie-2ec24ca1dd42c39f6ad0370a38d43358",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Cookie-6a4bcdda0de2810190a3f8bc630957a8",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Cookie-a8e3118bec4c495f737a00f007529fbf",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Cookie-e1bc84ee7b9ef7f331999dc8823fe0d",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Detergent-91235f7d65aec958ca972daa503b3095",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-DiscCase-2e36b4ec329c0cfe27152572287f9903",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-DiscCase-30bbf4c0046123dad8d2e2560dfff359",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-DiscCase-3b17040c0ed9d9fc8b763cbe52396380",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-DiscCase-3ce52bd08c33e1eadffde7f53a4e1a2",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-DiscCase-527f99b597b9eef9b89c32e5ba005b86",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-DiscCase-5aeb80c9c9ed4c955fae600f2d0e29",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-DiscCase-6268862d43393bdfab0b172d4dea80cd",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-DiscCase-d0d103de6609d3ff94d0c8d8af3cd8ea",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Dog-f2bcfa3ef5f2494ca76cd3c14a882cc8",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-DrinkingUtensil-24651c3767aa5089e19f4cee87249aca",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-DrinkingUtensil-2e8d37b3dd65c312b8f0377fb16daf9d",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-DrinkingUtensil-64ce0c349a57f9ca488887a53f46a53",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-DrinkingUtensil-d7ba704184d424dfd56d9106430c3fe",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-DrinkingUtensil-fc035f7d732166b97b6fd5468f603b31",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Eraser-710d1956e3cbcd8e9f691c76e6f0f71d",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Eraser-a829645a9e2957bb2fb534e18cb8cca",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Eraser-d9dd595ae6cae5bc9f4c3c326d704746",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-FileCabinet-2a9fe1253f9433d1a2651abaf391628e",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-FileCabinet-3711f7ae4f528f7963f393abca61510",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-FileCabinet-6633b658534938ded02b906026bee536",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-FileCabinet-75fe06475f7b7241920de219c00d1c3b",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-FileCabinet-976178c815f234b9df8fce61d01de43d",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-FileCabinet-dde9a107a1b3a3b7c78621ab7e0ef193",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-FileCabinet-ee8c6bdd41cb2f04c56f78d9daf213b",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Fish-2f6c35724496931e4b794094c38db310",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Fish-5e6656b0f124e0f38af30108ea9ccb6c",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Flashlight-d3afd0ef3bf3b87a2c4a81f1d7e1fb38",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-FoodItem-13add1d4cdcea59b73d0d75d212ea96b",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-FoodItem-14d31ee208e1823f48b9fefd9341bfa",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-FoodItem-16afaf11b6a9578444d3a157597f918b",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-FoodItem-198d36bcfacb1a7a4212ff51b27f0221",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-FoodItem-1a10ecfcaac04c882d17d82c03b66",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-FoodItem-1fe6ed518ca583a77215a1e3ffbff428",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-FoodItem-221b8931a2e5d389a02d41ad9f5b13c0",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-FoodItem-27cd39f831e73e03dd37f1676f84f13",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-FoodItem-28b280b06401e17c83b787d4ec835b6b",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-FoodItem-2b967565ac94fe4d996e14ad8f7b2657",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-FoodItem-2cdbefbef5a1319aa72b7c690d778792",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-FoodItem-2ddf6075c2e4fe46b5de9f9c43608e2e",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-FoodItem-31f7320cdeae3c3793b589f517fd7005",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-FoodItem-38b478c245263fce62fb315ae592aae1",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-FoodItem-3fd993924ef28b30cb1981abcfe85234",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-FoodItem-3fe7b80967775f657042b5e7165f598c",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-FoodItem-45b11723630a657e32e150233fdd42e9",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-FoodItem-465defec1de3115699138974c40a17ee",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-FoodItem-49c36594d727bd4c93df8c78d1d8e26d",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-FoodItem-55587f4d6758076425806bb541b18c1d",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-FoodItem-56d943fdd29c7c573d92298d39908b2d",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-FoodItem-5c848a830ec567bb9220647403cfb896",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-FoodItem-60e7807fae256b9edc0dec45107520e9",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-FoodItem-615d0b4bbec771e99a6e43b878d5b335",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-FoodItem-64874803fbb586c95bcfebc04aae4834",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-FoodItem-71ae0db4b6f29376f48b9fefd9341bfa",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-FoodItem-75467099fb4d6984df85db41e3677c28",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-FoodItem-75fb186fe2cd9d2eb1bc1265864958f7",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-FoodItem-7902e438835292de683651cbc8e49e4f",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-FoodItem-794254b87952feaad0a4a80928262549",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-FoodItem-7ca0731f0d86033fb4d994dea15a7f5d",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-FoodItem-835482e5c659ea2b4faf890907a2f219",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-FoodItem-8991b73bfcfb51ea644be92422ae0abe",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-FoodItem-944ce3708f74e150428633fb5d4d2ce5",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-FoodItem-a519b4452df538bb6784d208b59d3e05",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-FoodItem-a9e98d163d59671d73ffdca541f4749c",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-FoodItem-bb9cbdc12c5a92d24361643054305a5c",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-FoodItem-bbeb9bbba056600d97fe54771f5481c7",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-FoodItem-bf5ad2cce102e596692d58186e4c4d6a",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-FoodItem-c083cd7a26f2b3bfe26ff5e8619e4252",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-FoodItem-c8865a653d4ac29c44608b3255ca1886",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-FoodItem-d39ff720d30aa9114f0331b81f3e1ef",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-FoodItem-d41bd3aefe94dc1b77847e52e3fe64b9",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-FoodItem-d5642cb4a832a236cf9bbc203a5cff99",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-FoodItem-d65a2b5811df52f2e10ddc5f810dd417",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-FoodItem-dc85129ccc6b06b344608b3255ca1886",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-FoodItem-df4d8989b038c20a21840212625df50e",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-FoodItem-e0288a1f2db5af1fb363c9b28473c91f",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-FoodItem-e5a4666423674a889f7bbf181f9c6d08",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-FoodItem-eaaf64375a190bab527b62db17b4bab7",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-FoodItem-edd30a99a5e0cc77dc65f24011042f1",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-FoodItem-eed8823f3c060f7d1f933ebd223432ce",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-FoodItem-f09d68eb78b60908b8183a4a81361b94",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-FoodItem-f3b13bf537b3666f8df38a494eb3f194",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-FoodItem-ffb1bd15cf96d55de3f7a74e12a274ef",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Fruit-147cc06e62a3020e3401ec7170d72c6e",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Fruit-b095a1c41447e9da887d2d6e4a6617b3",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Gun-370251fb9ab3240a2a23d93958262ccc",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Gun-a65ffa892dfc8897dd67d490a3e83d9e",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Headphones-2b28e2a5080101d245af43a64155c221",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Headphones-53433f3e15014d831220240e825d0985",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Horse-18277a2b26cce4945932aa8e4205e707",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Horse-b00d28860f3611bde80df3c23687288a",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Horse-bd880918b6c669cf5d4e52dd52abcb3d",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Horse-df98cb748235d867f220c4e9a8cb807d",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Ipad-18049cb71646955253d7642eccaa932a",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Ipad-35f584cf8fd22794e4b68d3b17c43658",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Ipad-474af011baf759749393793f9cf3dbea",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Ipad-5a476554ce6f1b8bbd6868ef6592b424",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Ipad-805a9bf3d265c408d9869786ff7f6a46",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Ipad-834a37ff2966a7aab059c0a0cc66b765",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Ipad-9c6434fe8f328812cdfafe3e224c6d1",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Ipad-b4d5e6283a72759f68e67c91633baa10",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Ipad-c195fc63cf5961c1561dce3fe08634b7",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Ipad-d6a512373ed0cab27298d33994ff64ac",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Ipod-197cd6122af749233cd2494a82e84da",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Ipod-1b068453f00a45df79a3e6d653b9cf50",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Ipod-1b770536109f699e3f99b006c29193b0",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Ipod-20f7a7b5c9ab4bf95e014a070b5e3ea0",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Ipod-26ef635a1dd041026960990b76be3cd",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Ipod-2f72c12b95057e4debbef56ea25e4b3",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Ipod-33502931b1dbbcc5153bcbf7454a9c",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Ipod-3359a25b359f71c6591c6b1cab31f6b9",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Ipod-39c3a58be774a6416c02de3cec685725",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Ipod-4521175b100d29d539a4971adc53c51d",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Ipod-499ce6cfb033ca524dc43f9572c76629",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Ipod-4a48ff3bdc8a48661fa9178506d3df13",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Ipod-4d25b8a3c8f4e11640a92729068b6b39",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Ipod-500ebda6d26180c5f548d6595c11226",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Ipod-5604123bd8798b96f1bbc1fe641b4db7",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Ipod-5fd95475524fc520c1dbab1d1ee81853",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Ipod-649f8749f868834c5e8f6c740cde1ca4",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Ipod-66993624d8b4d2ebbb94613ebae491f",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Ipod-6bed8d24f785a2b2998c00d102bcb284",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Ipod-754b57bb912119eccc9aef62469bcf3c",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Ipod-887df6b1f5df91f11087f57fbbff1df3",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Ipod-8dea72044977fed98b4ae5617b47ce83",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Ipod-9a610cbd11b44029da7fbc266d41ec0e",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Ipod-a4c32dbcb71076d5825732a29ddd146e",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Ipod-a6638386ef36bb79a3433a2494aec779",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Ipod-ac00e79c78c266eba3b36c8802b3ab55",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Ipod-acdd256a922c42651a8deb8a561a9e3c",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Ipod-b48bcf93241f5bfdb9ad65086d99dd44",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Ipod-b6d722928a6ac67d3bb496bfabcec230",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Ipod-c42613c1dd4dc524374eb4f2d2373ac0",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Ipod-e27a0c4865bd3ed18d39f88600062ebd",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Ipod-f144dee3502701d03b276da9ad7698c3",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Ipod-f57907aee385b8407e71a60ea30bcf5",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Ipod-f9f3d1db7650c142d2237bacec12d278",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Key-41128930ff1e7a85763ffa228e9509c8",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Lock-648154d1f8113a502a40bb58e14b2f89",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Lock-6d692e728f8f2a39cec31cf0a48f0eaf",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Lock-77491c6e16cbe9a8ea9b15e3702bc79",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Lock-b6b8011a945519cc20b5d66d1b626d9c",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-MediaChest-9ac71997e9eee1c1af5ada3edc49839",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-MediaDiscs-51a2c9c96543daa5d4045ce83dea1af",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-MediaDiscs-949b5b3e53e1cf6340b559ef47048b86",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-MediaDiscs-bf93619ce0afeb987351883da7cc5907",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-MediaDiscs-c03989366097952a284d7307f93a6e6",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-MediaDiscs-ca05e4cfb246b6fe522fcc08b7c3238",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-MediaDiscs-ee0653d46effbe279041477a84c33d16",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-MilkCarton-673d78d408bf142b9642f282fb76cb9",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-MilkCarton-72110f88e2e51bf450e961cdc6fb5c30",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-MilkCarton-e403646bb3e1e75850e961cdc6fb5c30",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Notepad-1ae8ed2f5bf117f067994ca435825ef",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Notepad-491731fae7b58f4cc2e054c56e9a85a",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Notepad-806a00311afae8e9397a5ce25ba881c1",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Notepad-d2c752b71ef5a7fa58fe5738991208f7",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-PSP-3695689074ea272ad9a849102f04049e",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Palette-bfe01d3ec17f9ef7db4673379779bfbf",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Pan-c8b06a6cb1a910c38e43a810a63361f0",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Pan-e8cd2c495f1a33cdd068168ae86ef29a",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-PersonStanding-4a6b7b8de43bf3925c8e7963449f8577",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Piano-14755c2ee8e693aba508f621166382b0",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Piano-2d830fc20d8095cac2cc019b058015",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Piano-413f8963de404dd6c3c1160502619061",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Piano-5574c469aae489c355005b4420ff0a5",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Piano-6060bfa3909185f78ce35a9a4af57797",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Piano-806fe5ab3145ce01df3253a9a430e4d9",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-PicnicTableSet-66add7facfc1942886b3f898d28dd325",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-PillBottle-bb234652525a68498d969821a85884b2",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Pillow-2a385185a799fe08f2c0658ad22a9a9b",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Pillow-343e3dedabdb067193e60794f9200b7",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Pillow-361e0796bd364244741e88434245c899",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Pillow-57540783188a9cc98b424343280aeccb",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Pillow-7d9cb088956a9c4993e60794f9200b7",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Pillow-953d16ed7eee84d32d7a27ffaafaaddb",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Pillow-95973950e069c6b9b5b6422580b7846d",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Pillow-9d183dcd7261cfffe6e130a30b5ed875",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Pillow-a0903daa3dfa996837b2bb75885cfc44",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Pillow-a136a79481238e046d3e11439c6c22c8",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Pillow-b5cb58fb099204fea5c423249b53dbc4",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Pillow-bb720e7949efc9abe4406b3bf37e6ffe",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Pillow-cf2ab5d9bff184ca6325569942918d9f",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Pillow-f3815806340d0fededa761b10992452d",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Pizza-2780abdb71c9db68f2c30c174d7b3e07",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Pizza-29fe6bf8e9c364a545004a22a9d35958",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Pizza-2b59988661c55c682e27d4b6979a4b81",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Pizza-2d89a3594a33a4a8d81345019d0d7fb2",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Pizza-2ec5cf929da01dbe829f996f73431f83",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Pizza-5f980765137a083b2705e23c3b836e97",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Pizza-6690bde1159376df33f2ccb4064f11c5",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Pizza-6f95c4a222fe84b69de3846f6829ce95",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Pizza-99dadb83b9bcf2498af30108ea9ccb6c",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Pizza-b3a8ebcf6e9ca5852721058c5c629b05",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Pizza-bbff331fad652f79449bde2352ba381a",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Pizza-c2925e9fb9d6125d10fbfd499a09a517",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Pizza-c508182852c9a85844608b3255ca1886",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Pizza-caca4c8d409cddc66b04c0f74e5b376e",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Pizza-da23c34e0d56e85e13b7121b4583dd12",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Pizza-da6b56ef88f6088e3d45b70645f74c5c",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Pizza-df62f7b84fd210ba82cabcc4d06ff984",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Plate-1389e932a2c776d83c143af07c12991a",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Plate-17079f40cfdc719a3f7d5255ff865380",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Plate-17e958fa60740e4c3c143af07c12991a",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Plate-3b8cd62e5842a4c98870030ed2672a1d",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Plate-49675b82efc7dd0536c38c6865b8d471",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Plate-6372c4d2e046d0fd7d3aa3bae1f7b494",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Plate-9969f6178dcd67101c75d484f9069623",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Plate-cc87e29afe238126e20e92c5b8147e4a",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Plate-f151b5b32400054bebe0518a81e2c5c8",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Plate-fbc3702c344581fc5dca6305fb9f97ca",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Radio-21983e6ee8a6992c9d151674c6eace6c",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Radio-52fbb082b3d28d369715146e52a0621c",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Rock-386c91ddd48b956f85b5e1f7eb9f2b9c",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-RubiksCube-1e3d89eb3b5427053bdd31f1cd9eec98",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-RubiksCube-2b78edd5bc31b19ae0681a1280473149",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-RubiksCube-4e7bd9db2fcdc6e01a092e6cb6aaf525",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Scale-47edf107b3ac00aae43969badba53c7b",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Scale-c8c28c8b9ca64290118ddfdb81cc6068",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Scale-cae39ade25a37c3c67964ba700cd97f5",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Scale-d57586d19f114143f7f3ed2c3c690fe",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Shampoo-2ba1891e2b354b219617cbc6647fc553",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Shampoo-f919431276935ea05d8eba92952b9366",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Sheep-554db91bf0835764fbb35151afcb9cd5",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-SkateBoard-d31aaca67fd8ef1827d17dabad15093",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-SoapBar-351dec75ac0619b1827473663798726a",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-SoapBar-5aba32dba149598911f4f6c1a9b8e604",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-SoapBar-8da3c818adf836fcf2c4595240954986",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-SoapBar-b3718bdc7025004813f5ec8466b8a488",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-SoapBar-c96bfdeccb6d92d141b965cb8ba50814",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-SoapBottle-657c79b83ab8d3079a85260e38aed309",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-SodaCan-744a65dd5c5fec90289ae987a66e0b37",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-SodaCan-aaddb845bbed4d2761aca20be67b688e",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-SodaCan-bf974687b678c66e93fb5c975e8de2b7",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-SodaCan-d26241f55fe81e2b5c8e7963449f8577",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-TableClock-1d5a354ee3e977d7ce57d3de4658a486",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-TableClock-1d693a6c9c67857f86d9ac00cacf663a",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-TableClock-299832be465f4037485059ffe7a2f9c7",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-TableClock-4dc5a3cc6eb1e3b75497d5aec9fa2efe",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-TableClock-66e3ee58dd50dfed29131a7a5d37d635",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-TableClock-6d6f9812288c8a43ddc020875fb2e32d",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-TableClock-76d112bb42e575176acd627b0dcb5a1b",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-TableClock-b4ba086ae065fbe3664fd9ccc8bafb2",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-TableClock-bdb0902d42779686c6f86fd24d6c8740",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-TableClock-c367178115b987bdab20a48b288568ae",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-Tank-971582976064edab2c4683dd00deec1",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Tank-cca0b9a74f1e341386459c315bdea98e",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Tape-de31538db6b382cc1c0f52f4ec8b820b",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-TapeDispenser-66b281a91f4da81d749d52b3e269018",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-TapeDispenser-844516b6fe304dafe36f6f37ca7926",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-TapeDispenser-c8fa10f7ae935b042825656dc457df78",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-TapeMeasure-948850694831c2644fdfafc90a1f296",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-TapeMeasure-ab9253297bfa8db3724d867867ccd9fb",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-TapeMeasure-d7ae45c05243250fb85d7b26e23c80bf",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Teapot-c7a70db33a8c900dab5b523beb03efcd",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Telephone-2216e78a43c5d587b8e1b99345a5afd4",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Telephone-34ee6b5a1403ef4a261fdcb864bca54a",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Telephone-48751d0180d21905f91af49d62136752",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Telephone-4e31c3e9575d744b916bc112690303c9",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-Telephone-4f3c487c54ca29f2439292e4b8fd557e",
+    "scale": 0.12
+  },
+  {
+    "object": "sem-Telephone-5148da752bcd11884ce243cdbc967ce2",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Telephone-fb050aca4d5f2573cf1d3d11d6121bb4",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-Thermostat-c2b73966ca4024ef38b28f94c165f833",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-Thumbtack-87ced92ffec180dece2fdea99c5936e8",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-TissueBox-13a913b33fb29f7741f9f28bc4fa9522",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-TissueBox-266911058f9345d8c6e01b363ae6db1b",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-TissueBox-670be347dc6411cd3504403c94a7689",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-TissueBox-a19094fc7dd93bf430766aa6197a119f",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-TissueBox-b11db9eeac44be0550d1fe15308b63aa",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-TissueBox-ddfe181bccc810aea17986c482572fe1",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-TissueBox-f9cf0ccfcb21c2e7899c1686868c4bc",
+    "scale": 0.08
+  },
+  {
+    "object": "sem-TissueBox-ffb4e07d613b6a62bbfa57fc7493b378",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-ToasterOven-95b4eee44e668dfb87a77620548f66e9",
+    "scale": 0.1
+  },
+  {
+    "object": "sem-ToiletPaper-3ae42af85250afde9e40e3e25a634011",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-ToiletPaper-c120d6c6e1df328da50b88953d263a42",
+    "scale": 0.15
+  },
+  {
+    "object": "sem-ToiletPaper-d6c1f9cdecde9605ba2dc6b0ec935a93",
+    "scale": 0.06
+  },
+  {
+    "object": "sem-ToyFigure-3f76a67b083d2a045136774b39da07bf",
+    "scale": 0.06
+  }
+]

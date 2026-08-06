@@ -8,12 +8,9 @@ environment variable has been set.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import os
 import subprocess
 import sys
-import threading
-import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -46,20 +43,15 @@ def _launch_with_isaac(spec: Mapping[str, Any]) -> dict[str, Any]:
     not an unfinished experiment-runner stub.
     """
 
-    _log("before importing isaaclab.app.AppLauncher")
     from isaaclab.app import AppLauncher
 
     sys.argv = [sys.argv[0]]
     app_args = _build_app_launcher_args(AppLauncher, spec)
-    _log(f"before AppLauncher task={spec.get('task_id')} args={vars(app_args)}")
     app_launcher = AppLauncher(app_args)
-    _log("after AppLauncher creation")
     simulation_app = app_launcher.app
     launch_error: BaseException | None = None
     try:
-        _log("before RSL-RL training flow")
         _run_rsl_rl_training(spec, app_launcher)
-        _log("after RSL-RL training flow")
     except SystemExit as exc:
         launch_error = exc
         _log(f"SystemExit during Isaac/RSL-RL launch code={exc.code!r}")
@@ -70,14 +62,7 @@ def _launch_with_isaac(spec: Mapping[str, Any]) -> dict[str, Any]:
         raise
     finally:
         if launch_error is None:
-            _log("closing SimulationApp")
             simulation_app.close()
-            _log("SimulationApp closed")
-        else:
-            _log(
-                "skipping SimulationApp close after launch failure to avoid hiding "
-                f"{type(launch_error).__name__}"
-            )
     return {"launched": True, "task_id": spec["task_id"]}
 
 
@@ -137,42 +122,34 @@ def _build_app_launcher_args(app_launcher_cls: Any, spec: Mapping[str, Any]) -> 
 
 
 def _run_rsl_rl_training(spec: Mapping[str, Any], app_launcher: Any) -> None:
-    _log("before importing gymnasium/torch/IsaacLab/RSL-RL modules")
     import gymnasium as gym
     import torch
     from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent
     from isaaclab_tasks.utils.hydra import hydra_task_config
     from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
     from rsl_rl.runners import OnPolicyRunner
-    _log("after importing gymnasium/torch/IsaacLab/RSL-RL modules")
-    _install_isaac_startup_tracing()
 
     _set_asset_assignment_rank_env(spec, app_launcher)
 
-    _log("before importing isaaclab_tasks")
     import isaaclab_tasks  # noqa: F401
-    _log("after importing isaaclab_tasks")
-    _log("before importing IsaacLab_nonPrehensile.tasks")
     import IsaacLab_nonPrehensile.tasks  # noqa: F401
-    _log("after importing IsaacLab_nonPrehensile.tasks")
-    _log("before importing tool-sdf task registration module")
     import IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile  # noqa: F401
-    _log("after importing tool-sdf task registration module")
 
     task_id = _require_string(spec, "task_id")
     _ensure_gym_task_registered(gym, task_id)
     launch = _mapping(spec.get("launch_params"), "launch_params")
     artifact_dir = Path(_require_string(spec, "artifact_dir"))
     _log(
-        "before hydra task config "
-        f"task={task_id} num_envs={spec.get('num_envs')} "
-        f"max_iterations={spec.get('max_iterations')} artifact={artifact_dir}"
+        f"start task={task_id} num_envs={spec.get('num_envs')} "
+        f"iterations={spec.get('max_iterations')} artifact={artifact_dir}"
     )
 
     @hydra_task_config(task_id, "rsl_rl_cfg_entry_point")
     def _main(env_cfg, agent_cfg):
-        _log("entered hydra main")
         env_cfg.scene.num_envs = int(spec["num_envs"])
+        disabled_markers = _disable_training_visualization_markers(env_cfg)
+        if disabled_markers:
+            _log(f"disabled training visualization markers={','.join(disabled_markers)}")
         if launch.get("device") is not None:
             env_cfg.sim.device = str(launch["device"])
             agent_cfg.device = str(launch["device"])
@@ -193,58 +170,60 @@ def _run_rsl_rl_training(spec: Mapping[str, Any], app_launcher: Any) -> None:
             agent_cfg.logger = str(launch.get("logger", "tensorboard"))
             if launch.get("wandb_project") and hasattr(agent_cfg, "wandb_project"):
                 agent_cfg.wandb_project = str(launch["wandb_project"])
+            if hasattr(agent_cfg, "wandb_upload_files"):
+                agent_cfg.wandb_upload_files = bool(launch.get("wandb_upload_files", False))
             if launch.get("run_name") and hasattr(agent_cfg, "run_name"):
                 agent_cfg.run_name = str(launch["run_name"])
             if launch.get("wandb_project") and hasattr(agent_cfg, "experiment_name"):
                 agent_cfg.experiment_name = str(launch["wandb_project"])
             log_dir = str(artifact_dir)
 
-        _log(
-            "before gym.make "
-            f"task={task_id} env_device={getattr(env_cfg.sim, 'device', None)} "
-            f"agent_device={agent_cfg.device} num_envs={env_cfg.scene.num_envs}"
-        )
-        _summarize_env_cfg_startup(env_cfg)
-        _wrap_scene_spawn_functions(env_cfg.scene)
         try:
-            with _trace_block("gym.make"):
-                env = gym.make(task_id, cfg=env_cfg, render_mode=None)
+            env = gym.make(task_id, cfg=env_cfg, render_mode=None)
         except TypeError as exc:
             raise _concise_gym_make_error(task_id, exc) from (exc.__context__ or exc)
-        _log("after gym.make")
         if isinstance(env.unwrapped, DirectMARLEnv):
-            _log("before multi_agent_to_single_agent")
             env = multi_agent_to_single_agent(env)
-            _log("after multi_agent_to_single_agent")
-        _log("before RslRlVecEnvWrapper")
         env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
-        _log("after RslRlVecEnvWrapper")
 
-        _log(f"before OnPolicyRunner log_dir={log_dir} device={agent_cfg.device}")
         runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
-        _log("after OnPolicyRunner")
+        init_checkpoint = spec.get("rl_init_checkpoint")
+        if isinstance(init_checkpoint, str) and init_checkpoint.strip():
+            init_path = Path(init_checkpoint).expanduser().resolve()
+            if not init_path.is_file():
+                raise FileNotFoundError(f"RL initialization checkpoint does not exist: {init_path}")
+            _log(f"initialize policy weights checkpoint={init_path}")
+            loaded = torch.load(init_path, map_location=agent_cfg.device, weights_only=False)
+            if not isinstance(loaded, dict) or not isinstance(loaded.get("model_state_dict"), dict):
+                raise RuntimeError(
+                    f"RL initialization checkpoint must contain model_state_dict: {init_path}"
+                )
+            runner.alg.policy.load_state_dict(loaded["model_state_dict"], strict=True)
+        resume_checkpoint = spec.get("rl_resume_checkpoint")
+        if isinstance(resume_checkpoint, str) and resume_checkpoint.strip():
+            resume_path = Path(resume_checkpoint).expanduser().resolve()
+            if not resume_path.is_file():
+                raise FileNotFoundError(f"RL resume checkpoint does not exist: {resume_path}")
+            _log(f"resume checkpoint={resume_path}")
+            runner.load(str(resume_path), load_optimizer=True)
         try:
-            _log(
-                "before runner.learn "
-                f"iterations={int(spec['max_iterations'])} "
-                f"init_at_random_ep_len={bool(launch.get('init_at_random_ep_len', False))}"
-            )
+            _log(f"learn iterations={int(spec['max_iterations'])}")
             runner.learn(
                 num_learning_iterations=int(spec["max_iterations"]),
                 init_at_random_ep_len=bool(launch.get("init_at_random_ep_len", False)),
+                print_fine_grained_timing=bool(
+                    launch.get("print_fine_grained_timing", False)
+                ),
             )
-            _log("after runner.learn")
+            _log("learn complete")
         except SystemExit as exc:
             _log(f"SystemExit inside hydra main code={exc.code!r}")
             raise
         finally:
-            _log("closing RL env")
             env.close()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            _log("RL env closed")
 
-    _log("calling hydra main")
     try:
         _main()
     except SystemExit as exc:
@@ -253,7 +232,6 @@ def _run_rsl_rl_training(spec: Mapping[str, Any], app_launcher: Any) -> None:
     except BaseException as exc:
         _log(f"exception from hydra main type={type(exc).__name__} error={exc!r}")
         raise
-    _log("hydra main returned")
 
 
 def _log(message: str) -> None:
@@ -279,169 +257,43 @@ def _truncate_exception_message(exc: BaseException, *, limit: int = 1200) -> str
     return text[:limit].rstrip() + " ... [truncated]"
 
 
-def _trace_enabled() -> bool:
-    value = os.environ.get("TOOL_GENERALIST_TRACE_ISAAC_STARTUP", "1").strip().lower()
-    return value not in {"0", "false", "no", "off"}
+def _disable_training_visualization_markers(env_cfg: Any) -> list[str]:
+    """Disable marker drawing for training without changing video preferences.
 
+    Environment ``visualize_*`` values and command ``debug_vis`` values remain
+    the source of truth for interactive use and video recording.  The training
+    launcher overrides only the instantiated config passed to ``gym.make``.
+    """
 
-@contextlib.contextmanager
-def _trace_block(label: str):
-    if not _trace_enabled():
-        yield
-        return
-
-    start = time.perf_counter()
-    stop_event = threading.Event()
-
-    def _heartbeat() -> None:
-        while not stop_event.wait(30.0):
-            elapsed = time.perf_counter() - start
-            _log(f"startup-trace still running {label} elapsed={elapsed:.1f}s")
-
-    heartbeat = threading.Thread(target=_heartbeat, name=f"tg-startup-trace:{label}", daemon=True)
-    _log(f"startup-trace start {label}")
-    heartbeat.start()
-    try:
-        yield
-    finally:
-        stop_event.set()
-        elapsed = time.perf_counter() - start
-        _log(f"startup-trace done {label} elapsed={elapsed:.1f}s")
-
-
-def _install_isaac_startup_tracing() -> None:
-    """Install lightweight timers around Isaac Lab startup internals."""
-
-    if not _trace_enabled() or getattr(_install_isaac_startup_tracing, "_installed", False):
-        return
-    try:
-        from isaaclab.assets.asset_base import AssetBase
-        from isaaclab.managers import EventManager
-        from isaaclab.scene import InteractiveScene
-        from isaaclab.sim import SimulationContext
-    except Exception as exc:  # pragma: no cover - depends on Isaac runtime imports.
-        _log(f"startup-trace unavailable type={type(exc).__name__} error={exc!r}")
-        return
-
-    _wrap_method(
-        InteractiveScene,
-        "_add_entities_from_cfg",
-        lambda self, _args, _kwargs: (
-            "InteractiveScene._add_entities_from_cfg "
-            f"num_envs={getattr(getattr(self, 'cfg', None), 'num_envs', '?')} "
-            f"replicate_physics={getattr(getattr(self, 'cfg', None), 'replicate_physics', '?')}"
-        ),
-    )
-    _wrap_method(
-        InteractiveScene,
-        "clone_environments",
-        lambda self, _args, _kwargs: (
-            "InteractiveScene.clone_environments "
-            f"num_envs={getattr(getattr(self, 'cfg', None), 'num_envs', '?')} "
-            f"replicate_physics={getattr(getattr(self, 'cfg', None), 'replicate_physics', '?')}"
-        ),
-    )
-    _wrap_method(
-        InteractiveScene,
-        "filter_collisions",
-        lambda self, _args, _kwargs: (
-            "InteractiveScene.filter_collisions "
-            f"num_envs={getattr(getattr(self, 'cfg', None), 'num_envs', '?')}"
-        ),
-    )
-    _wrap_method(
-        EventManager,
-        "__init__",
-        lambda _self, _args, _kwargs: "EventManager.__init__",
-    )
-    _wrap_method(
-        EventManager,
-        "apply",
-        lambda _self, args, kwargs: (
-            "EventManager.apply "
-            f"mode={kwargs.get('mode', args[0] if args else '?')}"
-        ),
-    )
-    _wrap_method(
-        SimulationContext,
-        "reset",
-        lambda self, _args, _kwargs: (
-            "SimulationContext.reset "
-            f"device={getattr(self, 'device', '?')}"
-        ),
-    )
-    _wrap_method(
-        AssetBase,
-        "_initialize_callback",
-        lambda self, _args, _kwargs: (
-            f"{type(self).__name__}._initialize_callback "
-            f"prim_path={getattr(getattr(self, 'cfg', None), 'prim_path', '?')}"
-        ),
-    )
-    setattr(_install_isaac_startup_tracing, "_installed", True)
-    _log("startup-trace installed")
-
-
-def _wrap_method(cls: type, method_name: str, label_fn: Any) -> None:
-    original = getattr(cls, method_name, None)
-    if original is None or getattr(original, "_tool_generalist_trace_wrapped", False):
-        return
-
-    def _wrapped(self, *args, **kwargs):
-        with _trace_block(str(label_fn(self, args, kwargs))):
-            return original(self, *args, **kwargs)
-
-    setattr(_wrapped, "_tool_generalist_trace_wrapped", True)
-    setattr(cls, method_name, _wrapped)
-
-
-def _summarize_env_cfg_startup(env_cfg: Any) -> None:
-    scene = getattr(env_cfg, "scene", None)
-    if scene is None:
-        return
-    _log(
-        "startup-trace env_cfg "
-        f"num_envs={getattr(scene, 'num_envs', None)} "
-        f"replicate_physics={getattr(scene, 'replicate_physics', None)} "
-        f"filter_collisions={getattr(scene, 'filter_collisions', None)} "
-        f"clone_in_fabric={getattr(scene, 'clone_in_fabric', None)}"
-    )
-    for asset_name, asset_cfg in getattr(scene, "__dict__", {}).items():
-        spawn = getattr(asset_cfg, "spawn", None)
-        if spawn is not None:
-            _log(f"startup-trace scene_asset name={asset_name} {_spawn_cfg_summary(spawn)}")
-
-
-def _wrap_scene_spawn_functions(scene_cfg: Any) -> None:
-    if not _trace_enabled():
-        return
-    for asset_name, asset_cfg in getattr(scene_cfg, "__dict__", {}).items():
-        spawn = getattr(asset_cfg, "spawn", None)
-        func = getattr(spawn, "func", None)
-        if func is None or getattr(func, "_tool_generalist_trace_wrapped", False):
+    disabled: list[str] = []
+    for name in dir(env_cfg):
+        if not name.startswith("visualize_"):
             continue
+        try:
+            value = getattr(env_cfg, name)
+        except Exception:
+            continue
+        if isinstance(value, bool):
+            setattr(env_cfg, name, False)
+            if value:
+                disabled.append(name)
 
-        def _wrapped_spawn(prim_path, cfg, *args, _asset_name=asset_name, _func=func, **kwargs):
-            label = f"spawn scene.{_asset_name} prim_path={prim_path} {_spawn_cfg_summary(cfg)}"
-            with _trace_block(label):
-                return _func(prim_path, cfg, *args, **kwargs)
+    commands_cfg = getattr(env_cfg, "commands", None)
+    if commands_cfg is not None:
+        for term_name in dir(commands_cfg):
+            if term_name.startswith("_"):
+                continue
+            try:
+                term_cfg = getattr(commands_cfg, term_name)
+                debug_vis = getattr(term_cfg, "debug_vis", None)
+            except Exception:
+                continue
+            if isinstance(debug_vis, bool):
+                term_cfg.debug_vis = False
+                if debug_vis:
+                    disabled.append(f"commands.{term_name}.debug_vis")
 
-        setattr(_wrapped_spawn, "_tool_generalist_trace_wrapped", True)
-        spawn.func = _wrapped_spawn
-
-
-def _spawn_cfg_summary(spawn_cfg: Any) -> str:
-    assets_cfg = getattr(spawn_cfg, "assets_cfg", None)
-    if assets_cfg is not None:
-        usd_paths = [str(getattr(asset_cfg, "usd_path", "")) for asset_cfg in assets_cfg]
-        unique_usd = len(set(usd_paths)) if usd_paths else 0
-        return f"type={type(spawn_cfg).__name__} assets={len(assets_cfg)} unique_usd={unique_usd}"
-    usd_path = getattr(spawn_cfg, "usd_path", None)
-    if isinstance(usd_path, (list, tuple)):
-        return f"type={type(spawn_cfg).__name__} usd_paths={len(usd_path)} unique_usd={len(set(map(str, usd_path)))}"
-    if usd_path is not None:
-        return f"type={type(spawn_cfg).__name__} usd_path={usd_path}"
-    return f"type={type(spawn_cfg).__name__}"
+    return disabled
 
 
 def _ensure_gym_task_registered(gym_module: Any, task_id: str) -> None:
@@ -449,7 +301,6 @@ def _ensure_gym_task_registered(gym_module: Any, task_id: str) -> None:
     if registry is None:
         raise RuntimeError("Gymnasium registry is unavailable after task imports")
     if task_id in registry:
-        _log(f"gym task registered task={task_id}")
         return
     available = sorted(str(key) for key in registry.keys() if "tool" in str(key).lower())
     raise RuntimeError(

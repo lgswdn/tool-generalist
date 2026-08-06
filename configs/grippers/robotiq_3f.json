@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "grippers": [
+    {
+      "id": "robotiq_3f",
+      "category": "three_finger",
+      "topology_family": "robotiq_3f_basic_synergy",
+      "root_dir": "../../thirdparty/rpdiff/src/rpdiff/descriptions/franka_panda_table",
+      "urdf_path": "panda_3f.urdf",
+      "usd_path": "panda_3f.usd",
+      "palm_body_name": "palm",
+      "ee_body_name": "panda_grasptarget",
+      "grasp_frame": {
+        "body_name": "panda_grasptarget",
+        "offset": {"translation": [0.0, 0.0, 0.0], "quat_wxyz": [1.0, 0.0, 0.0, 0.0]}
+      },
+      "control": {
+        "command_dim": 1,
+        "adapter": "joint_synergy",
+        "actuated_joint_names": [
+          "finger_1_joint_1", "finger_1_joint_2", "finger_1_joint_3",
+          "finger_2_joint_1", "finger_2_joint_2", "finger_2_joint_3",
+          "finger_middle_joint_1", "finger_middle_joint_2", "finger_middle_joint_3"
+        ],
+        "measured_joint_name": "finger_1_joint_1",
+        "open_joint_positions": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        "closed_joint_positions": [
+          1.155, 0.0, -1.2217304764,
+          1.155, 0.0, -1.2217304764,
+          1.155, 0.0, -1.2217304764
+        ],
+        "actuator": {
+          "effort_limit": 30.0,
+          "stiffness": 600.0,
+          "damping": 50.0,
+          "armature": 0.005,
+          "velocity_limit": 2.0
+        }
+      },
+      "cloud_parts": [
+        {"body_name": "palm", "geometry_type": "mesh", "mesh_path": "meshes/robotiq_3f/collision/palm.STL"},
+        {"body_name": "finger_1_link_0", "geometry_type": "mesh", "mesh_path": "meshes/robotiq_3f/collision/link_0.STL", "geometry_to_body": {"translation": [-0.0455, 0.0414, 0.036], "quat_wxyz": [0.0, 0.7071067812, 0.7071067812, 0.0]}},
+        {"body_name": "finger_1_link_1", "geometry_type": "mesh", "mesh_path": "meshes/robotiq_3f/collision/link_1.STL", "geometry_to_body": {"translation": [0.050, -0.028, 0.0], "quat_wxyz": [0.9663899781, 0.0, 0.0, -0.2570805519]}},
+        {"body_name": "finger_1_link_2", "geometry_type": "mesh", "mesh_path": "meshes/robotiq_3f/collision/link_2.STL", "geometry_to_body": {"translation": [0.039, 0.0, 0.0075]}},
+        {"body_name": "finger_1_link_3", "geometry_type": "mesh", "mesh_path": "meshes/robotiq_3f/collision/link_3.STL", "geometry_to_body": {"quat_wxyz": [0.9663899781, 0.0, 0.0, 0.2570805519]}},
+        {"body_name": "finger_2_link_0", "geometry_type": "mesh", "mesh_path": "meshes/robotiq_3f/collision/link_0.STL", "geometry_to_body": {"translation": [-0.0455, 0.0414, 0.036], "quat_wxyz": [0.0, 0.7071067812, 0.7071067812, 0.0]}},
+        {"body_name": "finger_2_link_1", "geometry_type": "mesh", "mesh_path": "meshes/robotiq_3f/collision/link_1.STL", "geometry_to_body": {"translation": [0.050, -0.028, 0.0], "quat_wxyz": [0.9663899781, 0.0, 0.0, -0.2570805519]}},
+        {"body_name": "finger_2_link_2", "geometry_type": "mesh", "mesh_path": "meshes/robotiq_3f/collision/link_2.STL", "geometry_to_body": {"translation": [0.039, 0.0, 0.0075]}},
+        {"body_name": "finger_2_link_3", "geometry_type": "mesh", "mesh_path": "meshes/robotiq_3f/collision/link_3.STL", "geometry_to_body": {"quat_wxyz": [0.9663899781, 0.0, 0.0, 0.2570805519]}},
+        {"body_name": "finger_middle_link_0", "geometry_type": "mesh", "mesh_path": "meshes/robotiq_3f/collision/link_0.STL", "geometry_to_body": {"translation": [-0.0455, 0.0414, 0.036], "quat_wxyz": [0.0, 0.7071067812, 0.7071067812, 0.0]}},
+        {"body_name": "finger_middle_link_1", "geometry_type": "mesh", "mesh_path": "meshes/robotiq_3f/collision/link_1.STL", "geometry_to_body": {"translation": [0.050, -0.028, 0.0], "quat_wxyz": [0.9663899781, 0.0, 0.0, -0.2570805519]}},
+        {"body_name": "finger_middle_link_2", "geometry_type": "mesh", "mesh_path": "meshes/robotiq_3f/collision/link_2.STL", "geometry_to_body": {"translation": [0.039, 0.0, 0.0075]}},
+        {"body_name": "finger_middle_link_3", "geometry_type": "mesh", "mesh_path": "meshes/robotiq_3f/collision/link_3.STL", "geometry_to_body": {"quat_wxyz": [0.9663899781, 0.0, 0.0, 0.2570805519]}}
+      ],
+      "params": {
+        "official_model": "Robotiq 3-Finger Adaptive Gripper",
+        "policy_control_dof": 1,
+        "fixed_grasp_mode": "basic",
+        "source_commit": "45196f6558fe8ba9d89bc8a105396c68c3e7e892"
+      }
+    }
+  ]
+}

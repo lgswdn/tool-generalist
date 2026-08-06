@@ -1,0 +1,33 @@
+# Shared contact-pretrain population for the cross-embodiment comparison.
+dgn:
+  candidates_json: /mnt/project/world_model/tool_generalist/assets/DGN/full_yes.json
+  usd_dir: /mnt/project/world_model/tool_generalist/assets/DGN/coacd_usd
+  obj_dir: /mnt/project/world_model/tool_generalist/assets/DGN/coacd_normalized
+
+objects:
+  candidates_json: /mnt/project/world_model/tool_generalist/assets/DGN/full_yes.json
+  usd_dir: /mnt/project/world_model/tool_generalist/assets/DGN/coacd_usd
+  obj_dir: /mnt/project/world_model/tool_generalist/assets/DGN/coacd_normalized
+
+# 300 exact static contact meshes: 200 newest generated parallel grippers and
+# 100 generated two-finger revolute grippers.
+tools:
+  robots_usd_dir: /mnt/project/world_model/tool_generalist/Robots
+  tools_json: ../generated_gripper_contact_assets_ce/tools_adjusted.json
+  tools_adjusted_json: ../generated_gripper_contact_assets_ce/tools_adjusted.json
+  tools_selected_json: ../generated_gripper_contact_assets_ce/tools_selected.json
+  meshdata_adjusted_root: ../generated_gripper_contact_assets_ce/meshdata_adjusted
+  obj_dir: /mnt/project/world_model/tool_generalist/eef/normalized_models
+  scale: 1.0
+
+generated_grippers:
+  root: /mnt/project/world_model/tool_generalist/gripper_new
+  manifest: /mnt/project/world_model/tool_generalist/gripper_new/generated_grippers.json
+  cloud_cache_dir: ../../gripper/generated_parallel_128/kinematic_cloud_cache
+
+one_dof_grippers:
+  root: ../../gripper/generated_graspgenx
+  manifest: ../../gripper/generated_graspgenx/two_finger_revolute.json
+
+robot:
+  franka_usd: /mnt/afs/zhuwenxuan/project/inp/tool-generalist/bare_panda_instanceable.usd

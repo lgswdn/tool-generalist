@@ -6,21 +6,15 @@ import re
 from pathlib import Path
 
 from configs.config_exp import ExpCfg
-from utils.config.serialization import config_hash
 from utils.config.hash_payloads import (
     CONTACT_ARTIFACT_GENERAL_NAME,
-    contact_hash_payload as _contact_hash_payload,
-    contact_stable_general_payload as _contact_stable_general_payload,
-    location_stable_exp_payload as _location_stable_exp_payload,
-    location_stable_general_payload as _location_stable_general_payload,
-    pretrain_model_hash_payload as _pretrain_model_hash_payload,
-    pretrain_stable_payload as _pretrain_stable_payload,
-    strip_default_condition_normalization as _strip_default_condition_normalization,
-    strip_default_sdf_relative_loss as _strip_default_sdf_relative_loss,
-    strip_inactive_encoder_backend_defaults as _strip_inactive_encoder_backend_defaults,
-    strip_pretrain_logging_fields as _strip_pretrain_logging_fields,
+    contact_general_payload as _contact_general_payload,
+    contact_payload as _contact_payload,
+    experiment_payload as _experiment_payload,
+    pretrain_artifact_payload as _pretrain_artifact_payload,
+    pretrain_namespace as _pretrain_namespace,
 )
-
+from utils.config.serialization import config_hash
 
 
 def sanitize_name(value: str) -> str:
@@ -37,8 +31,8 @@ def contact_artifact_name(cfg: ExpCfg) -> str:
             sanitize_name(cfg.contact_gen.name),
             config_hash(
                 {
-                    "general": _contact_stable_general_payload(cfg),
-                    "contact_gen": _contact_hash_payload(cfg.contact_gen),
+                    "general": _contact_general_payload(cfg),
+                    "contact_gen": _contact_payload(cfg.contact_gen),
                 }
             ),
         )
@@ -50,17 +44,10 @@ def encoder_artifact_name(cfg: ExpCfg) -> str:
     return "/".join(
         (
             "encoder",
-            sanitize_name(cfg.general.name),
+            sanitize_name(_pretrain_namespace(cfg)),
             sanitize_name(cfg.contact_gen.name),
             stage,
-            config_hash(
-                {
-                    "general": _location_stable_general_payload(cfg),
-                    "contact_gen": _contact_hash_payload(cfg.contact_gen),
-                    "pretrain": _pretrain_stable_payload(cfg),
-                    "model": _pretrain_model_hash_payload(cfg),
-                }
-            ),
+            config_hash(_pretrain_artifact_payload(cfg)),
         )
     )
 
@@ -86,7 +73,7 @@ def experiment_artifact_name(cfg: ExpCfg) -> str:
         (
             "experiment",
             sanitize_name(cfg.name),
-            config_hash(_location_stable_exp_payload(cfg)),
+            config_hash(_experiment_payload(cfg)),
         )
     )
 

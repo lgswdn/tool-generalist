@@ -41,7 +41,16 @@ def test_run_experiment_is_single_lightweight_entrypoint():
         and node.args[0].value.startswith("--")
     ]
 
-    assert flags == ["--config", "--mode"]
+    assert flags == [
+        "--config",
+        "--mode",
+        "--curriculum-from-eval",
+        "--curriculum-success-rate-threshold",
+        "--no-curriculum-resume",
+        "--runtime-num-gpus",
+        "--runtime-total-envs",
+        "--print-fine-grained-timing",
+    ]
     assert "choices=(\"run\", \"plan\")" in source
     assert "default=\"run\"" in source
     for item in _top_imports("run_experiment.py"):
@@ -95,6 +104,7 @@ def test_runtime_spec_allows_tg_point2vec_and_legacy_icp_with_policy_specific_fi
     assert "TOOL_GENERALIST_PATHS_YAML" in launcher
     assert "OnPolicyRunner" in launcher
     assert "runner.learn(" in launcher
+    assert "print_fine_grained_timing" in launcher
     assert "torch.distributed.run" in launcher
     assert "--nproc_per_node" in launcher
     assert "LOCAL_RANK" in launcher
@@ -102,6 +112,60 @@ def test_runtime_spec_allows_tg_point2vec_and_legacy_icp_with_policy_specific_fi
     assert "def _local_rank(" in launcher
     assert "def main(" in launcher
     assert "--runtime-spec" in launcher
+
+
+def test_isaac_tg_bridge_forwards_encoder_token_experiment_fields():
+    bridge = _source(
+        "source/IsaacLab_nonPrehensile/IsaacLab_nonPrehensile/tasks/manager_based/"
+        "isaaclab_nonprehensile/agents/config/rsl_rl_ppo_cfg.py"
+    )
+    for field in (
+        "unicorn_token_source",
+        "encoder_token_pca_rank",
+        "encoder_token_pca_path",
+        "encoder_token_bottleneck_rank",
+        "encoder_token_bottleneck_pca_path",
+    ):
+        assert f"{field}:" in bridge
+        assert f'"{field}"' in bridge
+
+
+def test_fine_grained_timing_print_is_runtime_gated():
+    runner = _source("rsl_rl/runners/on_policy_runner.py")
+    ppo = _source("rsl_rl/algorithms/ppo.py")
+
+    assert "print_fine_grained_timing: bool = False" in runner
+    assert 'print_fine_grained_timing and hasattr(self.alg, "collect_timing_summary")' in runner
+    assert "def collect_timing_summary(" in ppo
+    assert "[CollectOtherTiming]" in ppo
+
+    env_tool = _source(
+        "source/IsaacLab_nonPrehensile/IsaacLab_nonPrehensile/tasks/manager_based/"
+        "isaaclab_nonprehensile/env_tool.py"
+    )
+    assert "def _timed_manager_step(" in env_tool
+    assert "[EnvStepTiming]" in env_tool
+
+
+def test_reward_head_area_position_is_cached_per_step_without_changing_hand_state():
+    rewards = _source(
+        "source/IsaacLab_nonPrehensile/IsaacLab_nonPrehensile/tasks/manager_based/"
+        "isaaclab_nonprehensile/mdp/rewards.py"
+    )
+    observations = _source(
+        "source/IsaacLab_nonPrehensile/IsaacLab_nonPrehensile/tasks/manager_based/"
+        "isaaclab_nonprehensile/mdp/observations.py"
+    )
+    step_cache = _source(
+        "source/IsaacLab_nonPrehensile/IsaacLab_nonPrehensile/tasks/manager_based/"
+        "isaaclab_nonprehensile/mdp/step_cache.py"
+    )
+
+    assert "def _reward_head_area_pos_w(" in rewards
+    assert "def _object_ee_distance(" in rewards
+    assert "def _object_ee_within_threshold(" in rewards
+    assert 'getattr(env, "common_step_counter", None)' in step_cache
+    assert "ee_pos_w = get_head_area_pos_w(env)" in observations
 
 
 def test_multi_gpu_env_count_is_documented_as_per_rank():
@@ -395,14 +459,31 @@ def test_train_policy_params_payload_shapes_are_stable():
         "previous_action_dim",
         "relative_goal_dim",
         "object_velocity_dim",
+        "task_embedding_dim",
         "physics_dim",
         "model_input_centering",
+        "sm_num_layers",
+        "sm_num_modules",
+        "sm_module_hidden",
+        "sm_gating_hidden",
+        "sm_num_gating_layers",
+        "sm_cond_ob",
+        "sm_add_bn",
         "activation",
         "init_noise_std",
         "noise_std_type",
     ]
-    tce_keys = shared_tg_keys + ["patch_size", "encoder_channel", "vit_depth", "vit_heads"]
-    unicorn_keys = shared_tg_keys + ["num_patches", "patch_size", "encoder_channel", "vit_depth", "vit_heads"]
+    tce_keys = shared_tg_keys + [
+        "encoder_backend", "patch_size", "encoder_channel", "vit_depth", "vit_heads",
+        "vit_attention_mode",
+        "unicorn_token_source", "encoder_token_pca_rank", "encoder_token_pca_path",
+        "encoder_token_bottleneck_rank", "encoder_token_bottleneck_pca_path",
+        "kinematic_conditioning", "kinematic_attention_layers",
+    ]
+    unicorn_keys = shared_tg_keys + [
+        "encoder_backend", "num_patches", "patch_size", "encoder_channel", "vit_depth", "vit_heads",
+        "unicorn_token_source"
+    ]
     p2v_keys = shared_tg_keys + [
         "token_dim",
         "point2vec_ckpt_path",
@@ -440,6 +521,7 @@ def test_train_policy_params_payload_shapes_are_stable():
         "sd_query_keys",
         "cross_attn_heads",
         "cross_attn_layers",
+        "cross_attn_token_order",
         "cross_attn_ff_dim",
         "cross_attn_dropout",
         "sd_cat_query",
@@ -488,7 +570,20 @@ def test_train_policy_params_payload_shapes_are_stable():
     assert list(unicorn) == unicorn_keys
     assert unicorn["class_name"] == "ActorCriticTGUnicorn"
     assert unicorn["encoder_weights_path"] == checkpoint
+    assert unicorn["encoder_backend"] == "unicorn"
     assert unicorn["num_patches"] == 16
+    assert unicorn["unicorn_token_source"] == "encoder"
+
+    shared_unicorn_cfg = ExpCfg()
+    shared_unicorn_cfg.rl.actor_critic_class = "ActorCriticTG"
+    shared_unicorn_cfg.model.encoder_backend = "unicorn"
+    shared_unicorn_cfg.model.pretrained_encoder.name = "unicorn"
+    shared_unicorn_cfg.model.pretrained_encoder.adapter = "unicorn_strict"
+    shared_unicorn = _build_policy_params(shared_unicorn_cfg, checkpoint)
+    assert list(shared_unicorn) == unicorn_keys
+    assert shared_unicorn["class_name"] == "ActorCriticTG"
+    assert shared_unicorn["encoder_backend"] == "unicorn"
+    assert shared_unicorn["unicorn_token_source"] == "encoder"
     p2v = params_for("ActorCriticPoint2Vec")
     assert list(p2v) == p2v_keys
     assert p2v["class_name"] == "ActorCriticPoint2Vec"
@@ -648,6 +743,13 @@ def test_policy_registry_and_isaac_bridge_are_whitelist_driven():
     assert "if _POLICY_CLASS_NAME == \"ActorCriticPoint2Vec\"" in agent_cfg
     assert "if _POLICY_CLASS_NAME == \"ActorCriticICP\"" in agent_cfg
     assert "class TGActorCriticCfg" in agent_cfg
+    assert 'encoder_backend: str = str(_policy("encoder_backend", "tce"))' in agent_cfg
+    assert 'num_patches: int = int(_policy("num_patches", 16))' in agent_cfg
+    assert (
+        'kinematic_conditioning: bool = bool(_policy("kinematic_conditioning", False))'
+        in agent_cfg
+    )
+    assert '"kinematic_attention_layers", 1' in agent_cfg
     assert "class TGUnicornActorCriticCfg" in agent_cfg
     assert "class TGBimanualActorCriticCfg" in agent_cfg
     assert "class Point2VecActorCriticCfg" in agent_cfg

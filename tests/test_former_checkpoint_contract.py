@@ -83,6 +83,7 @@ def test_former_checkpoint_strict_loads_into_new_tce_encoder() -> None:
             vit_depth=EXPECTED_DIMS["vit_depth"],
             vit_heads=EXPECTED_DIMS["vit_heads"],
             freeze=False,
+            vit_attention_mode="joint_self",
         )
     )
     encoder_state = _extract_encoder_state(_state_dict_from_checkpoint(ckpt))

@@ -65,7 +65,7 @@ def test_pretrain_does_not_import_canonical_contact_generation_entrypoints():
         "contact_generation.batch_generate",
     }
     forbidden_from_contact_generation = {"generator", "batch_generate"}
-    vendored_roots = {"diffusion_policy_repo", "rpdiff"}
+    vendored_roots = {"diffusion_policy_repo"}
     violations: list[str] = []
 
     for path in (ROOT / "pretrain").rglob("*.py"):

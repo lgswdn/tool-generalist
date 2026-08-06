@@ -18,7 +18,7 @@ from utils.artifacts import (
     write_manifest,
 )
 from utils.config import config_hash, load_project_paths, to_plain_data
-from utils.config.hash_payloads import planner_exp_hash_payload as _exp_hash_payload
+from utils.config.hash_payloads import experiment_payload as _experiment_payload
 from utils.config.paths import ProjectPaths
 from utils.experiment.stages import all_stages
 from utils.experiment.runtime import git_metadata, runtime_metadata, utc_timestamp
@@ -53,7 +53,7 @@ def build_experiment_plan(
 ) -> ExperimentPlan:
     timestamp = timestamp or utc_timestamp()
     artifact_root = Path(cfg.general.artifact_root).expanduser()
-    exp_hash = config_hash(_exp_hash_payload(cfg))
+    exp_hash = config_hash(_experiment_payload(cfg))
     experiment_name = experiment_artifact_name(cfg)
     experiment_dir = artifact_dir(artifact_root, experiment_name)
     experiment_plan = StagePlan(

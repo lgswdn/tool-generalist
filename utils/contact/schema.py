@@ -89,6 +89,7 @@ def load_and_validate_contact_pt(
     require_real_physics: bool = False,
     require_complete: bool = True,
     strict_mesh: bool = True,
+    tool_mesh_contract: str = "adjusted_decomposed_mesh",
 ) -> Mapping[str, Any]:
     """Load a torch-saved contact artifact and validate contact_pt_env_v1 semantics."""
 
@@ -106,6 +107,7 @@ def load_and_validate_contact_pt(
         require_real_physics=require_real_physics,
         require_complete=require_complete,
         strict_mesh=strict_mesh,
+        tool_mesh_contract=tool_mesh_contract,
     )
     return data
 
@@ -117,6 +119,7 @@ def validate_contact_dict(
     require_real_physics: bool = False,
     require_complete: bool = True,
     strict_mesh: bool = True,
+    tool_mesh_contract: str = "adjusted_decomposed_mesh",
     rotation_orth_eps: float = 1e-4,
 ) -> None:
     import torch
@@ -141,11 +144,13 @@ def validate_contact_dict(
     if require_real_physics and not bool(data.get("is_real_physics", False)):
         raise ContactSchemaError("contact_pt_env_v1 is not a complete real-physics artifact")
 
-    tool_id = str(data["tool_id"])
-    try:
-        assert_adjusted_decomposed_mesh_path(data["tool_mesh_path"], tool_id)
-    except Exception as exc:
-        raise ContactSchemaError(str(exc)) from exc
+    contract = _resolve_tool_mesh_contract(data, tool_mesh_contract)
+    if contract == "adjusted_decomposed_mesh":
+        tool_id = str(data["tool_id"])
+        try:
+            assert_adjusted_decomposed_mesh_path(data["tool_mesh_path"], tool_id)
+        except Exception as exc:
+            raise ContactSchemaError(str(exc)) from exc
 
     n = int(data["num_contacts"])
     if n < 0:
@@ -186,6 +191,17 @@ def validate_contact_dict(
             data["tool_bbox_extent_M"],
             "tool",
         )
+
+
+def _resolve_tool_mesh_contract(data: Mapping[str, Any], requested: str) -> str:
+    contract = str(requested or "adjusted_decomposed_mesh")
+    if contract == "auto":
+        contract = str(data.get("tool_mesh_contract") or "adjusted_decomposed_mesh")
+    if contract not in {"adjusted_decomposed_mesh", "object_mesh"}:
+        raise ContactSchemaError(
+            "tool_mesh_contract must be 'adjusted_decomposed_mesh', 'object_mesh', or 'auto'"
+        )
+    return contract
 
 
 def _require_shape(data: Mapping[str, Any], key: str, expected: tuple[int, ...]) -> None:

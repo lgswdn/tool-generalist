@@ -29,6 +29,16 @@ class UnicornEncodeResult(NamedTuple):
     patch_centers: torch.Tensor
 
 
+class UnicornPairEncodeResult(NamedTuple):
+    """Paired UniCORN features consumed identically by pretraining and RL."""
+
+    fused_tokens: torch.Tensor
+    tool_patch_idx: torch.Tensor
+    obj_patch_idx: torch.Tensor
+    tool_patch_centers: torch.Tensor
+    obj_patch_centers: torch.Tensor
+
+
 class PatchTokenizer(nn.Module):
     def __init__(self, out_dim: int):
         super().__init__()
@@ -189,19 +199,67 @@ class CMLPResidualBlock(nn.Module):
         return x + F.gelu(y)
 
 
-class UnicornContactDecoder(nn.Module):
-    def __init__(self, token_dim: int, hidden_dims: tuple[int, ...] = (128, 128)):
+class UnicornGlobalTokenConditioner(nn.Module):
+    """Condition local patches on the other cloud's UniCORN global token.
+
+    This is part of the encoder, rather than a disposable pretraining decoder,
+    so RL consumes the same contact-conditioned representation optimized by
+    pretraining.
+    """
+
+    def __init__(self, token_dim: int):
         super().__init__()
-        hidden = int(hidden_dims[0]) if hidden_dims else token_dim
-        self.input = nn.Linear(token_dim, hidden)
-        self.blocks = nn.ModuleList(CMLPResidualBlock(hidden, token_dim) for _ in range(3))
-        self.output = nn.Linear(hidden, 1)
+        self.input = nn.Linear(token_dim, token_dim)
+        self.blocks = nn.ModuleList(CMLPResidualBlock(token_dim, token_dim) for _ in range(3))
 
     def forward(self, local_tokens: torch.Tensor, global_token: torch.Tensor) -> torch.Tensor:
         x = self.input(local_tokens)
         for block in self.blocks:
             x = block(x, global_token)
-        return self.output(x).squeeze(-1)
+        return x
+
+
+class UnicornPairEncoder(nn.Module):
+    """Siamese UniCORN encoder with transferable cross-cloud conditioning."""
+
+    def __init__(self, cfg: UnicornGeometryEncoderCfg):
+        super().__init__()
+        self.cfg = cfg
+        self.cloud_encoder = UnicornGeometryEncoder(cfg)
+        self.global_conditioner = UnicornGlobalTokenConditioner(cfg.encoder_channel)
+
+    @property
+    def feature_dim(self) -> int:
+        return self.cloud_encoder.feature_dim
+
+    @property
+    def num_patches(self) -> int:
+        return self.cloud_encoder.num_patches
+
+    def encode(self, tool_pc: torch.Tensor, obj_pc: torch.Tensor) -> UnicornPairEncodeResult:
+        tool_res = self.cloud_encoder(tool_pc)
+        obj_res = self.cloud_encoder(obj_pc)
+        tool_tokens = self.global_conditioner(tool_res.patch_tokens, obj_res.global_token)
+        obj_tokens = self.global_conditioner(obj_res.patch_tokens, tool_res.global_token)
+        return UnicornPairEncodeResult(
+            fused_tokens=torch.cat((tool_tokens, obj_tokens), dim=1),
+            tool_patch_idx=tool_res.patch_idx,
+            obj_patch_idx=obj_res.patch_idx,
+            tool_patch_centers=tool_res.patch_centers,
+            obj_patch_centers=obj_res.patch_centers,
+        )
+
+    def forward(self, tool_pc: torch.Tensor, obj_pc: torch.Tensor) -> UnicornPairEncodeResult:
+        return self.encode(tool_pc, obj_pc)
+
+
+def _make_relu_mlp(dims: tuple[int, ...]) -> nn.Sequential:
+    layers: list[nn.Module] = []
+    for i in range(len(dims) - 1):
+        layers.append(nn.Linear(dims[i], dims[i + 1]))
+        if i < len(dims) - 2:
+            layers.append(nn.ReLU())
+    return nn.Sequential(*layers)
 
 
 class UnicornPretrainModel(nn.Module):
@@ -221,6 +279,7 @@ class UnicornPretrainModel(nn.Module):
         label_backend: str = "kaolin",
         contact_eps: float = 0.002,
         label_chunk_size: int = 8192,
+        encoder_input_centering: str = "object_center",
     ):
         super().__init__()
         self.model_family = "unicorn"
@@ -230,7 +289,13 @@ class UnicornPretrainModel(nn.Module):
         self.label_backend = str(label_backend)
         self.contact_eps = float(contact_eps)
         self.label_chunk_size = int(label_chunk_size)
-        self.encoder = UnicornGeometryEncoder(
+        self.encoder_input_centering = str(encoder_input_centering)
+        if self.encoder_input_centering not in {"bbox_center", "object_center"}:
+            raise ValueError(
+                "encoder_input_centering must be 'bbox_center' or 'object_center', "
+                f"got {self.encoder_input_centering!r}"
+            )
+        self.encoder = UnicornPairEncoder(
             UnicornGeometryEncoderCfg(
                 num_points=num_points,
                 num_patches=num_patches,
@@ -240,7 +305,9 @@ class UnicornPretrainModel(nn.Module):
                 vit_heads=vit_heads,
             )
         )
-        self.decoder = UnicornContactDecoder(encoder_channel, decoder_hidden_dims)
+        head_hidden = tuple(int(dim) for dim in decoder_hidden_dims)
+        self.tool_contact_head = _make_relu_mlp((encoder_channel,) + head_hidden + (1,))
+        self.obj_contact_head = _make_relu_mlp((encoder_channel,) + head_hidden + (1,))
         self.num_patches = num_patches
         self.enabled_heads = ("contact",)
         self.loss_weights = {"contact": 1.0}
@@ -248,10 +315,9 @@ class UnicornPretrainModel(nn.Module):
     def forward(
         self,
         *,
-        points_A: torch.Tensor,
-        points_B: torch.Tensor,
-        label_points_A_E: torch.Tensor,
-        label_points_B_E: torch.Tensor,
+        tool_points_E_k: torch.Tensor,
+        object_points_E_k: torch.Tensor,
+        rel_tool_object_t_k: torch.Tensor,
         object_mesh_vertices,
         object_mesh_faces,
         tool_mesh_vertices,
@@ -261,8 +327,23 @@ class UnicornPretrainModel(nn.Module):
         tool_rotation_E_k: torch.Tensor,
         tool_translation_E_k: torch.Tensor,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        enc_A = self.encoder(points_A)
-        enc_B = self.encoder(points_B)
+        B, T, N, _ = tool_points_E_k.shape
+        encoder_tool_points = tool_points_E_k
+        encoder_object_points = object_points_E_k
+        if self.encoder_input_centering == "object_center":
+            encoder_tool_points = tool_points_E_k + rel_tool_object_t_k.unsqueeze(-2)
+
+        paired = self.encoder.encode(
+            encoder_tool_points.reshape(B * T, N, 3),
+            encoder_object_points.reshape(B * T, N, 3),
+        )
+        contact_slice = torch.arange(B * T, device=tool_points_E_k.device).reshape(B, T)[:, 0]
+        contact_tokens = paired.fused_tokens.index_select(0, contact_slice)
+        tool_tokens = contact_tokens[:, : self.num_patches, :]
+        obj_tokens = contact_tokens[:, self.num_patches :, :]
+
+        label_points_A_E = tool_points_E_k[:, 0] + tool_translation_E_k[:, 0].unsqueeze(-2)
+        label_points_B_E = object_points_E_k[:, 0] + object_bbox_center_E.unsqueeze(-2)
         labels_A_point, labels_B_point = self._point_contact_labels(
             label_points_A_E=label_points_A_E,
             label_points_B_E=label_points_B_E,
@@ -275,11 +356,13 @@ class UnicornPretrainModel(nn.Module):
             tool_rotation_E_k=tool_rotation_E_k,
             tool_translation_E_k=tool_translation_E_k,
         )
-        labels_A_patch = self._patch_labels(labels_A_point, enc_A.patch_idx)
-        labels_B_patch = self._patch_labels(labels_B_point, enc_B.patch_idx)
+        tool_patch_idx = paired.tool_patch_idx.index_select(0, contact_slice)
+        obj_patch_idx = paired.obj_patch_idx.index_select(0, contact_slice)
+        labels_A_patch = self._patch_labels(labels_A_point, tool_patch_idx)
+        labels_B_patch = self._patch_labels(labels_B_point, obj_patch_idx)
 
-        logits_A = self.decoder(enc_A.patch_tokens, enc_B.global_token)
-        logits_B = self.decoder(enc_B.patch_tokens, enc_A.global_token)
+        logits_A = self.tool_contact_head(tool_tokens).squeeze(-1)
+        logits_B = self.obj_contact_head(obj_tokens).squeeze(-1)
         loss_A, stats_A = self._balanced_bce(logits_A, labels_A_patch)
         loss_B, stats_B = self._balanced_bce(logits_B, labels_B_patch)
         loss = loss_A + loss_B

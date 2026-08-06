@@ -40,6 +40,13 @@ class CommandsCfg:
         debug_vis=True,
         xy_offset_range=_RL_CONTRACT.object_pose_sampling.xy_offset_range,
         initial_position_range=_RL_CONTRACT.object_pose_sampling.initial_position_range,
+        stable_pose_probability=(
+            _RL_CONTRACT.curriculum.start_stable_pose_probability
+            if _RL_CONTRACT.curriculum.enabled
+            else _RL_CONTRACT.curriculum.end_stable_pose_probability
+        ),
+        secondary_task=_RL_CONTRACT.object_pose_sampling.secondary_task,
+        grasp_lift_height=_RL_CONTRACT.object_pose_sampling.grasp_lift_height,
     )
 
 
@@ -67,13 +74,25 @@ class ObservationsCfg:
     class PolicyCfg(ObsGroup):
         object_cloud = ObsTerm(
             func=mdp.get_object_pointcloud_in_env_frame,
-            noise=GaussianNoiseCfg(mean=0.0, std=0.005, operation="add"),
+            noise=(
+                GaussianNoiseCfg(mean=0.0, std=0.005, operation="add")
+                if _RL_CONTRACT.observation.point_cloud_noise_enabled
+                else None
+            ),
         ) if _RL_CONTRACT.observation.include_object_cloud else None
 
         tool_cloud = ObsTerm(
             func=mdp.get_tool_pointcloud_in_env_frame,
-            noise=GaussianNoiseCfg(mean=0.0, std=0.002, operation="add"),
+            noise=(
+                GaussianNoiseCfg(mean=0.0, std=0.002, operation="add")
+                if _RL_CONTRACT.observation.point_cloud_noise_enabled
+                else None
+            ),
         ) if (_RL_CONTRACT.observation.include_tool_cloud and not _USE_BARE_FRANKA) else None
+
+        kinematic_gripper_clouds = ObsTerm(
+            func=mdp.get_generated_gripper_kinematic_state_clouds,
+        ) if _RL_CONTRACT.observation.include_kinematic_gripper_clouds else None
 
         object_bbox_center = ObsTerm(
             func=mdp.get_obj_bbox_center
@@ -106,7 +125,10 @@ class ObservationsCfg:
             noise=GaussianNoiseCfg(mean=0.0, std=0.005, operation="add"),
         )
 
-        object_velocity = ObsTerm(func=mdp.object_root_velocity)
+        task_embedding = ObsTerm(
+            func=mdp.target_pose_task_embedding,
+            params={"command_name": "target_object_pose"},
+        ) if _RL_CONTRACT.observation.task_embedding_dim > 0 else None
 
         phys_params = ObsTerm(
             func=mdp.phys_params,

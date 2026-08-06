@@ -116,10 +116,17 @@ class PPO:
         self.learning_rate = learning_rate
         self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch
         self._use_cached_features = False
+        self._use_cached_preprocessing = False
+        self._shared_actor_critic_observations = True
         self._policy_has_cached_feature_helpers = self._has_cached_feature_helpers()
+        self._policy_has_preprocessing_cache_helpers = self._has_preprocessing_cache_helpers()
         self._collect_timing_seconds = {
             "encoder": 0.0,
             "actor_critic": 0.0,
+            "env_step": 0.0,
+            "transfer_normalize": 0.0,
+            "process_env_step": 0.0,
+            "bookkeeping": 0.0,
         }
         self._track_encoder_feature_calls = bool(getattr(self.policy, "tracks_encoder_feature_calls", False))
         self._encoder_call_stage_names = (
@@ -153,8 +160,45 @@ class PPO:
             self.device,
         )
 
-        # Enable encoder feature caching if policy supports it and encoder is frozen
+        # Cache non-learned discrete preprocessing independently of trainable
+        # encoder weights.  This avoids repeating FPS/KNN for every PPO epoch.
         if (
+            bool(getattr(self.policy, "supports_trainable_preprocessing_cache", False))
+            and self._policy_has_preprocessing_cache_helpers
+            and self._policy_has_cached_feature_helpers
+        ):
+            with torch.no_grad():
+                dummy_obs = torch.zeros(1, actor_obs_shape[0], device=self.device)
+                encoder_features, extra_state = self.policy.get_trainable_preprocessing_cache(
+                    dummy_obs
+                )
+                critic_obs_dim = (
+                    critic_obs_shape[0]
+                    if critic_obs_shape is not None
+                    else actor_obs_shape[0]
+                )
+                dummy_critic_obs = torch.zeros(1, critic_obs_dim, device=self.device)
+                critic_encoder_features, critic_extra_state = (
+                    self.policy.get_trainable_preprocessing_cache(dummy_critic_obs)
+                )
+            self.storage.enable_encoder_feature_cache(
+                encoder_features_shape=encoder_features.shape[1:],
+                extra_state_shape=extra_state.shape[1:],
+                critic_encoder_features_shape=critic_encoder_features.shape[1:],
+                critic_extra_state_shape=critic_extra_state.shape[1:],
+                encoder_features_dtype=encoder_features.dtype,
+                extra_state_dtype=extra_state.dtype,
+                critic_encoder_features_dtype=critic_encoder_features.dtype,
+                critic_extra_state_dtype=critic_extra_state.dtype,
+            )
+            self._use_cached_preprocessing = True
+            self._use_cached_features = False
+            print(
+                "[PPO] Enabled compact trainable preprocessing cache "
+                f"(dtype={encoder_features.dtype}, width={encoder_features.shape[-1]})"
+            )
+        # Enable complete encoder feature caching if the encoder is frozen.
+        elif (
             hasattr(self.policy, 'supports_cached_features')
             and self.policy.supports_cached_features
             and self._policy_has_cached_feature_helpers
@@ -178,6 +222,10 @@ class PPO:
                     extra_state_shape=extra_state.shape[1:],
                     critic_encoder_features_shape=critic_encoder_features.shape[1:],
                     critic_extra_state_shape=critic_extra_state.shape[1:],
+                    encoder_features_dtype=encoder_features.dtype,
+                    extra_state_dtype=extra_state.dtype,
+                    critic_encoder_features_dtype=critic_encoder_features.dtype,
+                    critic_extra_state_dtype=critic_extra_state.dtype,
                 )
                 self._use_cached_features = True
                 print("[PPO] Enabled encoder feature caching for frozen encoder optimization")
@@ -185,14 +233,72 @@ class PPO:
                 self._use_cached_features = False
         else:
             self._use_cached_features = False
+            self._use_cached_preprocessing = False
         self._init_encoder_call_stats()
 
     def act(self, obs, critic_obs):
         if self.policy.is_recurrent:
             self.transition.hidden_states = self.policy.get_hidden_states()
 
-        # Compute encoder features and cache them if enabled
-        if self._use_cached_features:
+        # Cache fixed search indices, then run the trainable PointNet once for
+        # the actor and critic when their observations are shared.
+        if self._use_cached_preprocessing:
+            with torch.no_grad():
+                timing_start = self._collect_timing_start()
+                actor_preprocessing, actor_extra_state = (
+                    self.policy.get_trainable_preprocessing_cache(obs)
+                )
+                actor_encoder_features = self.policy.materialize_trainable_preprocessing(
+                    obs, actor_preprocessing
+                )
+                self._collect_timing_stop("encoder", timing_start)
+                self._record_encoder_feature_calls("collect_cache")
+
+                observations_are_shared = critic_obs is obs
+                self._shared_actor_critic_observations = bool(
+                    self._shared_actor_critic_observations and observations_are_shared
+                )
+                if observations_are_shared:
+                    critic_preprocessing = actor_preprocessing
+                    critic_extra_state = actor_extra_state
+                    critic_encoder_features = actor_encoder_features
+                else:
+                    timing_start = self._collect_timing_start()
+                    critic_preprocessing, critic_extra_state = (
+                        self.policy.get_trainable_preprocessing_cache(critic_obs)
+                    )
+                    critic_encoder_features = (
+                        self.policy.materialize_trainable_preprocessing(
+                            critic_obs, critic_preprocessing
+                        )
+                    )
+                    self._collect_timing_stop("encoder", timing_start)
+                    self._record_encoder_feature_calls("collect_cache")
+
+                self.transition.encoder_features = actor_preprocessing
+                self.transition.extra_state = actor_extra_state
+                self.transition.critic_encoder_features = critic_preprocessing
+                self.transition.critic_extra_state = critic_extra_state
+
+                timing_start = self._collect_timing_start()
+                self.transition.actions = self.policy.act_from_cached_features(
+                    actor_encoder_features,
+                    actor_extra_state,
+                ).detach()
+                self.transition.values = self.policy.evaluate_from_cached_features(
+                    critic_encoder_features,
+                    critic_extra_state,
+                ).detach()
+                self.transition.actions_log_prob = (
+                    self.policy.get_actions_log_prob_from_cached_features(
+                        self.transition.actions
+                    ).detach()
+                )
+                self.transition.action_mean = self.policy.action_mean.detach()
+                self.transition.action_sigma = self.policy.action_std.detach()
+                self._collect_timing_stop("actor_critic", timing_start)
+        # Compute complete encoder features and cache them if enabled.
+        elif self._use_cached_features:
             with torch.no_grad():
                 timing_start = self._collect_timing_start()
                 actor_encoder_features, actor_extra_state = self.policy.get_cached_encoder_features(obs)
@@ -333,7 +439,9 @@ class PPO:
                 self.num_mini_batches,
                 self.num_learning_epochs,
                 include_env_ids=self._track_encoder_feature_calls,
-                include_critic_encoder_features=self._use_cached_features,
+                include_critic_encoder_features=(
+                    self._use_cached_features or self._use_cached_preprocessing
+                ),
             )
 
         # iterate over batches
@@ -409,7 +517,35 @@ class PPO:
             # Recompute actions log prob and entropy for current batch of transitions
             # Note: we need to do this because we updated the policy with the new parameters
             # Use cached features if available (frozen encoder optimization)
-            if self._use_cached_features and encoder_features_batch is not None:
+            if self._use_cached_preprocessing and encoder_features_batch is not None:
+                actor_tokens = self.policy.materialize_trainable_preprocessing(
+                    obs_batch, encoder_features_batch
+                )
+                self.policy.act_from_cached_features(actor_tokens, extra_state_batch)
+                self._record_encoder_feature_calls("learn_actor", env_ids_batch)
+                actions_log_prob_batch = (
+                    self.policy.get_actions_log_prob_from_cached_features(actions_batch)
+                )
+                if self._shared_actor_critic_observations:
+                    critic_tokens = actor_tokens
+                    critic_context = extra_state_batch
+                else:
+                    if critic_encoder_features_batch is None:
+                        raise RuntimeError(
+                            "critic preprocessing cache is missing for distinct critic observations"
+                        )
+                    critic_tokens = self.policy.materialize_trainable_preprocessing(
+                        critic_obs_batch, critic_encoder_features_batch
+                    )
+                    critic_context = critic_extra_state_batch
+                    self._record_encoder_feature_calls("learn_critic", env_ids_batch)
+                value_batch = self.policy.evaluate_from_cached_features(
+                    critic_tokens, critic_context
+                )
+                mu_batch = self.policy.action_mean[:original_batch_size]
+                sigma_batch = self.policy.action_std[:original_batch_size]
+                entropy_batch = self.policy.entropy[:original_batch_size]
+            elif self._use_cached_features and encoder_features_batch is not None:
                 # -- actor (using cached encoder features)
                 self.policy.act_from_cached_features(encoder_features_batch, extra_state_batch)
                 actions_log_prob_batch = self.policy.get_actions_log_prob_from_cached_features(actions_batch)
@@ -605,6 +741,8 @@ class PPO:
             loss_dict["rnd"] = mean_rnd_loss
         if self.symmetry:
             loss_dict["symmetry"] = mean_symmetry_loss
+        if hasattr(self.policy, "diagnostic_stats"):
+            loss_dict.update(self.policy.diagnostic_stats())
 
         return loss_dict
 
@@ -624,14 +762,37 @@ class PPO:
         def pct(seconds: float) -> float:
             return 100.0 * seconds / total if total > 0.0 else 0.0
 
-        cache_status = "on" if self._use_cached_features else "off"
-        return (
+        if self._use_cached_preprocessing:
+            cache_status = "preprocessing"
+        else:
+            cache_status = "on" if self._use_cached_features else "off"
+        summary = (
             f"[CollectTiming][rank {self.gpu_global_rank}/{self.gpu_world_size}][cache={cache_status}] "
             f"iter={iteration} total={total:.3f}s "
             f"encoder={encoder:.3f}s ({pct(encoder):.1f}%) "
             f"actor_critic={actor_critic:.3f}s ({pct(actor_critic):.1f}%) "
             f"other={other:.3f}s ({pct(other):.1f}%)"
         )
+        other_keys = ("env_step", "transfer_normalize", "process_env_step", "bookkeeping")
+        accounted_other = sum(self._collect_timing_seconds[key] for key in other_keys)
+        unaccounted_other = max(other - accounted_other, 0.0)
+        other_detail = " ".join(
+            f"{key}={self._collect_timing_seconds[key]:.3f}s"
+            for key in other_keys
+        )
+        return (
+            f"{summary}\n"
+            f"[CollectOtherTiming][rank {self.gpu_global_rank}/{self.gpu_world_size}] "
+            f"iter={iteration} {other_detail} unaccounted={unaccounted_other:.3f}s"
+        )
+
+    def collect_timing_start(self) -> float:
+        return self._collect_timing_start()
+
+    def collect_timing_stop(self, key: str, start: float):
+        if key not in self._collect_timing_seconds:
+            raise KeyError(f"Unknown collect timing key: {key}")
+        self._collect_timing_stop(key, start)
 
     def sync_collect_timing_cuda(self):
         self._collect_timing_sync_cuda()
@@ -644,6 +805,15 @@ class PPO:
                 "act_from_cached_features",
                 "evaluate_from_cached_features",
                 "get_actions_log_prob_from_cached_features",
+            )
+        )
+
+    def _has_preprocessing_cache_helpers(self) -> bool:
+        return all(
+            hasattr(self.policy, name)
+            for name in (
+                "get_trainable_preprocessing_cache",
+                "materialize_trainable_preprocessing",
             )
         )
 
@@ -705,7 +875,12 @@ class PPO:
         for counts in stage_counts.values():
             per_env.add_(counts)
         return {
-            "cache_enabled": self._use_cached_features,
+            "cache_enabled": self._use_cached_features or self._use_cached_preprocessing,
+            "cache_mode": (
+                "preprocessing"
+                if self._use_cached_preprocessing
+                else ("on" if self._use_cached_features else "off")
+            ),
             "local_envs": self.storage.num_envs,
             "per_env": per_env,
             "stages": stage_counts,
@@ -727,7 +902,7 @@ class PPO:
             if stage_total > 0:
                 stage_parts.append(f"{stage}:{stage_total}")
         stages = ",".join(stage_parts) if stage_parts else "none"
-        cache_status = "on" if stats["cache_enabled"] else "off"
+        cache_status = stats["cache_mode"]
         return (
             f"[EncoderCalls][rank {self.gpu_global_rank}/{self.gpu_world_size}][cache={cache_status}] "
             f"iter={iteration} local_envs={local_envs} total={total} "

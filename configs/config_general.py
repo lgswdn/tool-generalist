@@ -56,6 +56,10 @@ class GeneralCfg:
     num_points: int = 512
     tools_selected_json: Optional[str] = None
     tools_manifest: Optional[str] = None
+    contact_objects_manifest: Optional[str] = None
+    rl_objects_manifest: Optional[str] = None
+    # Compatibility alias for older configs. New Panda configs should use
+    # contact_objects_manifest and rl_objects_manifest explicitly.
     objects_manifest: Optional[str] = None
     randomize_tool_assignment: bool = False
     randomize_object_assignment: bool = False
@@ -69,7 +73,7 @@ class GeneralCfg:
     def paths_yaml(self) -> str:
         """Compatibility alias; ``ExpCfg.paths_yaml`` is canonical."""
 
-        return "paths.yaml"
+        return "configs/paths/default.yaml"
 
     @property
     def output_root(self) -> str:

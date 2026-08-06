@@ -34,7 +34,11 @@ def main() -> int:
     from pretrain.train import build_runtime_config, collate_fn, load_ckpt
 
     cfg = load_exp_cfg(args.config)
-    paths = apply_experiment_path_overrides(cfg, load_project_paths(cfg.paths_yaml))
+    paths = apply_experiment_path_overrides(
+        cfg,
+        load_project_paths(cfg.paths_yaml),
+        stage="contact_gen",
+    )
     artifacts = resolve_artifacts(cfg)
     pretrain_ref = _stage_ref(artifacts, "pretrain")
     runtime = build_runtime_config(cfg, paths, pretrain_ref.directory)
@@ -79,6 +83,7 @@ def main() -> int:
         encoder_channel=runtime.encoder_channel,
         vit_depth=runtime.vit_depth,
         vit_heads=runtime.vit_heads,
+        vit_attention_mode=runtime.vit_attention_mode,
         freeze_encoder=runtime.freeze_encoder,
         cross_attn_heads=runtime.cross_attn_heads,
         cross_attn_layers=runtime.cross_attn_layers,
@@ -104,7 +109,11 @@ def main() -> int:
         sdf_backend=runtime.sdf_backend,
         sdf_chunk_size=runtime.sdf_chunk_size,
     ).to(device)
-    load_ckpt(str(checkpoint), model)
+    load_ckpt(
+        str(checkpoint),
+        model,
+        expected_vit_attention_mode=runtime.vit_attention_mode,
+    )
     model.eval()
 
     with torch.no_grad():

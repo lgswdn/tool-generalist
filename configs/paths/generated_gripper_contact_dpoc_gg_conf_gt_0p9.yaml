@@ -1,0 +1,27 @@
+# DGN object dataset refined from the existing 1450-object GG failure set.
+dgn:
+  candidates_json: /mnt/home/zhengyixin/tool-generalist/configs/object_selections/panda_general_dpoc_gg_no_high_conf_free_but_high_conf_colliding_conf_gt_0p9_listed_scales.json
+  usd_dir: /mnt/project/world_model/tool_generalist/assets/DGN/coacd_usd
+  obj_dir: /mnt/project/world_model/tool_generalist/assets/DGN/coacd_normalized
+
+objects:
+  candidates_json: /mnt/home/zhengyixin/tool-generalist/configs/object_selections/panda_general_dpoc_gg_no_high_conf_free_but_high_conf_colliding_conf_gt_0p9_listed_scales.json
+  usd_dir: /mnt/project/world_model/tool_generalist/assets/DGN/coacd_usd
+  obj_dir: /mnt/project/world_model/tool_generalist/assets/DGN/coacd_normalized
+
+tools:
+  robots_usd_dir: /mnt/project/world_model/tool_generalist/Robots
+  tools_json: /mnt/home/zhengyixin/tool-generalist/configs/generated_gripper_contact_assets/tools_adjusted.json
+  tools_adjusted_json: /mnt/home/zhengyixin/tool-generalist/configs/generated_gripper_contact_assets/tools_adjusted.json
+  tools_selected_json: /mnt/home/zhengyixin/tool-generalist/configs/generated_gripper_contact_assets/tools_selected.json
+  meshdata_adjusted_root: /mnt/home/zhengyixin/tool-generalist/configs/generated_gripper_contact_assets/meshdata_adjusted
+  obj_dir: /mnt/project/world_model/tool_generalist/eef/normalized_models
+  scale: 1.0
+
+generated_grippers:
+  root: /mnt/project/world_model/tool_generalist/gripper
+  manifest: /mnt/project/world_model/tool_generalist/gripper/generated_grippers.json
+  cloud_cache_dir: ../../gripper/generated_parallel_legacy_128/kinematic_cloud_cache
+
+robot:
+  franka_usd: /mnt/afs/zhuwenxuan/project/inp/tool-generalist/bare_panda_instanceable.usd

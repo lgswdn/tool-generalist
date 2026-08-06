@@ -14,15 +14,20 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils.math import matrix_from_quat
 
 from .observations_bimanual import get_head_area_pos_w_for_slot
+from .step_cache import get_or_compute_step_value, object_goal_geometry
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 
 def _bimanual_head_positions_w(env: "ManagerBasedRLEnv") -> tuple[torch.Tensor, torch.Tensor]:
-    return (
-        get_head_area_pos_w_for_slot(env, ee_frame_name="ee_frame_1", offsets_attr="_head_area_offsets_1"),
-        get_head_area_pos_w_for_slot(env, ee_frame_name="ee_frame_2", offsets_attr="_head_area_offsets_2"),
+    return get_or_compute_step_value(
+        env,
+        ("bimanual_head_positions_w",),
+        lambda: (
+            get_head_area_pos_w_for_slot(env, ee_frame_name="ee_frame_1", offsets_attr="_head_area_offsets_1"),
+            get_head_area_pos_w_for_slot(env, ee_frame_name="ee_frame_2", offsets_attr="_head_area_offsets_2"),
+        ),
     )
 
 
@@ -31,10 +36,18 @@ def _farthest_ee_distance_to_object(
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
 ) -> torch.Tensor:
     obj: RigidObject = env.scene[object_cfg.name]
-    ee1_pos, ee2_pos = _bimanual_head_positions_w(env)
-    dist1 = torch.norm(obj.data.root_pos_w - ee1_pos, dim=1)
-    dist2 = torch.norm(obj.data.root_pos_w - ee2_pos, dim=1)
-    return torch.maximum(dist1, dist2)
+
+    def compute():
+        ee1_pos, ee2_pos = _bimanual_head_positions_w(env)
+        dist1 = torch.norm(obj.data.root_pos_w - ee1_pos, dim=1)
+        dist2 = torch.norm(obj.data.root_pos_w - ee2_pos, dim=1)
+        return torch.maximum(dist1, dist2)
+
+    return get_or_compute_step_value(
+        env,
+        ("bimanual_farthest_ee_distance", id(obj)),
+        compute,
+    )
 
 
 def bimanual_object_ee_distance_tanh(
@@ -59,23 +72,22 @@ def bimanual_object_goal_distance_tanh(
     """Object-goal reward gated by both bimanual end-effectors."""
 
     obj: RigidObject = env.scene[object_cfg.name]
-    command = env.command_manager.get_command(command_name)
-    object_ee_distance = _farthest_ee_distance_to_object(env, object_cfg=object_cfg)
-    obj_ee_dist_cond = object_ee_distance < float(obj_ee_distance_threshold)
+    threshold = float(obj_ee_distance_threshold)
+    obj_ee_dist_cond = get_or_compute_step_value(
+        env,
+        ("bimanual_ee_within_threshold", id(obj), threshold),
+        lambda: _farthest_ee_distance_to_object(env, object_cfg=object_cfg) < threshold,
+    )
+    geometry = object_goal_geometry(env, obj, command_name=command_name)
+    combined_key = float(rotation_distance_divisor)
+    combined_distances = geometry["combined_distances"]
+    if combined_key not in combined_distances:
+        combined_distances[combined_key] = geometry["position_distance"] + (
+            torch.clamp(geometry["angular_distance"], max=torch.pi)
+            / float(rotation_distance_divisor)
+        )
 
-    des_pos_env = command[:, :3]
-    object_pos_env = obj.data.root_pos_w[:, :3] - env.scene.env_origins
-    pos_distance = torch.norm(des_pos_env - object_pos_env, dim=1)
-
-    des_rot_env = command[:, 3:7]
-    object_quat_w = obj.data.root_quat_w
-    dot_product = torch.sum(object_quat_w * des_rot_env, dim=1)
-    dot_product = torch.clamp(torch.abs(dot_product), max=1.0)
-    ang_distance = 2 * torch.acos(dot_product)
-    ang_distance = torch.clamp(ang_distance, max=torch.pi)
-    pose_distance = pos_distance + ang_distance / float(rotation_distance_divisor)
-
-    return obj_ee_dist_cond * (1 - torch.tanh(pose_distance / float(std)))
+    return obj_ee_dist_cond * (1 - torch.tanh(combined_distances[combined_key] / float(std)))
 
 
 def bimanual_joint_power_penalty(
@@ -103,10 +115,24 @@ def bimanual_link_min_distance(
 
     robot1 = env.scene[robot1_cfg.name]
     robot2 = env.scene[robot2_cfg.name]
-    pos1 = robot1.data.body_pos_w[:, robot1_cfg.body_ids, :]
-    pos2 = robot2.data.body_pos_w[:, robot2_cfg.body_ids, :]
-    distances = torch.cdist(pos1, pos2)
-    return torch.amin(distances, dim=(1, 2))
+
+    def compute():
+        pos1 = robot1.data.body_pos_w[:, robot1_cfg.body_ids, :]
+        pos2 = robot2.data.body_pos_w[:, robot2_cfg.body_ids, :]
+        distances = torch.cdist(pos1, pos2)
+        return torch.amin(distances, dim=(1, 2))
+
+    return get_or_compute_step_value(
+        env,
+        (
+            "bimanual_link_min_distance",
+            id(robot1),
+            repr(robot1_cfg.body_ids),
+            id(robot2),
+            repr(robot2_cfg.body_ids),
+        ),
+        compute,
+    )
 
 
 def bimanual_link_proximity_penalty(
@@ -235,18 +261,32 @@ def bimanual_tool_pointcloud_min_distance(
 
     robot1 = env.scene[robot1_cfg.name]
     robot2 = env.scene[robot2_cfg.name]
-    body1 = robot1.data.body_state_w[:, robot1_cfg.body_ids[0], :]
-    body2 = robot2.data.body_state_w[:, robot2_cfg.body_ids[0], :]
 
-    points1_w = _transform_tool_points_w(
-        body1,
-        _tool_local_distance_points(env, tool_slot=1, num_points=int(num_points)),
+    def compute():
+        body1 = robot1.data.body_state_w[:, robot1_cfg.body_ids[0], :]
+        body2 = robot2.data.body_state_w[:, robot2_cfg.body_ids[0], :]
+        points1_w = _transform_tool_points_w(
+            body1,
+            _tool_local_distance_points(env, tool_slot=1, num_points=int(num_points)),
+        )
+        points2_w = _transform_tool_points_w(
+            body2,
+            _tool_local_distance_points(env, tool_slot=2, num_points=int(num_points)),
+        )
+        return _batched_pointcloud_min_distance(points1_w, points2_w)
+
+    return get_or_compute_step_value(
+        env,
+        (
+            "bimanual_tool_pointcloud_min_distance",
+            int(num_points),
+            id(robot1),
+            robot1_cfg.body_ids[0],
+            id(robot2),
+            robot2_cfg.body_ids[0],
+        ),
+        compute,
     )
-    points2_w = _transform_tool_points_w(
-        body2,
-        _tool_local_distance_points(env, tool_slot=2, num_points=int(num_points)),
-    )
-    return _batched_pointcloud_min_distance(points1_w, points2_w)
 
 
 def bimanual_tool_proximity_penalty(

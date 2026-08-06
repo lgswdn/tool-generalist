@@ -29,10 +29,10 @@ def test_contact_generation_business_config_lives_in_exp_config():
         "B",
         "M",
         "chunk_B",
-        "contact_mode_prob",
         "epsilon",
         "floor_eps",
         "upright_threshold",
+        "contact_geometry_mode",
         "rotation_selection",
         "tool_source",
         "object_tool_manifest",
@@ -129,16 +129,20 @@ def test_contact_generation_algorithm_contract_is_static_and_explicit():
 
     assert "def generate_contact_candidates(" in gen_contact
     assert "def rejection_sample_candidates(" in gen_contact
-    assert "_sample_tool_anchors_per_pair" in gen_contact
-    assert "choose_head = torch.rand" in gen_contact
+    assert "def bbox_translation_nearest_sample_candidates(" in gen_contact
+    assert "CONTACT_GEOMETRY_BBOX_TRANSLATION_NEAREST" in gen_contact
+    assert "_nearest_surface_pairs" in gen_contact
+    assert "_safe_contact_alpha" in gen_contact
     assert "sample_upright_rotations(M, device" in gen_contact
-    assert "sample_upright_rotations(cb * M" not in gen_contact
-    assert 'torch.einsum("mij,bkj->bmki"' in gen_contact
+    assert "rotations = random_rotation_matrices(M, device)" in gen_contact
+    assert '"bmij,kj->bmki"' in gen_contact
     assert "contact_" + "ok" not in gen_contact
     assert "valid = floor_ok & penetration_ok" in gen_contact
+    assert "final_close_enough = final_min_sdf <= float(cfg.epsilon)" in gen_contact
     assert "penetration_depth <= float(cfg.penetration_eps)" in gen_contact
     assert "ROTATION_SELECTION_RANDOM_LEGAL" in gen_contact
-    assert "use_tool_head_area" in gen_contact
+    assert "contact_mode_prob" not in gen_contact
+    assert "choose_head" not in gen_contact
     assert "candidate_" + "contact_" + "distance" not in gen_contact
     assert "contact_" + "distance" not in gen_contact
     assert "centralize_points_by_bbox" in gen_contact

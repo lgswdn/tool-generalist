@@ -36,6 +36,7 @@ from utils.experiment.validation import (
     validate_for_plan,
     validate_for_run,
     validate_full_config,
+    validate_generated_gripper_manifest_root,
     validate_isaac_task_and_rsl_rl_entrypoint_strings,
     validate_model_general_num_points_match,
     validate_object_tool_manifests_non_empty,
@@ -127,7 +128,6 @@ def test_config_skeleton_exposes_planned_fields():
         "B",
         "M",
         "chunk_B",
-        "contact_mode_prob",
         "epsilon",
         "floor_eps",
         "upright_threshold",
@@ -233,6 +233,7 @@ def test_config_skeleton_exposes_planned_fields():
         "domain_randomization",
         "reward",
         "encoder_checkpoint",
+        "init_checkpoint",
         "freeze_encoder",
     }.issubset(_field_names(RLCfg))
     assert not {
@@ -315,6 +316,52 @@ def test_full_config_validation_catches_empty_contact_manifests(tmp_path):
         assert "objects.candidates_json must contain non-empty JSON" in str(exc)
     else:
         raise AssertionError("validate_full_config accepted an empty object manifest")
+
+
+def test_generated_gripper_manifest_cannot_escape_configured_root(tmp_path):
+    configured_root = tmp_path / "gripper"
+    wrong_root = tmp_path / "gripper_new"
+    configured_root.mkdir()
+    wrong_root.mkdir()
+    manifest = configured_root / "generated_grippers.json"
+    manifest.write_text(
+        "\n".join(
+            [
+                "{",
+                f'  "generated_root": {str(wrong_root)!r},'.replace("'", '"'),
+                '  "grippers": [',
+                f'    {{"id": "000000", "root_dir": {str(wrong_root / "000000")!r}}}'.replace("'", '"'),
+                "  ]",
+                "}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    paths_yaml = tmp_path / "paths_generated.yaml"
+    paths_yaml.write_text(
+        "\n".join(
+            [
+                "generated_grippers:",
+                f"  root: {configured_root}",
+                f"  manifest: {manifest}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    cfg = ExpCfg(name="generated_root_mismatch_unit")
+    cfg.rl.enabled = True
+    cfg.rl.env.robot_mode = "generated_gripper"
+
+    errors = validate_generated_gripper_manifest_root(
+        cfg,
+        load_project_paths(paths_yaml),
+        strict_paths=True,
+    )
+
+    assert any("generated_root must be inside" in error for error in errors)
+    assert any("entry 0 root_dir must be inside" in error for error in errors)
 
 
 def test_general_tools_selected_json_overrides_paths_yaml(tmp_path):
@@ -1240,6 +1287,59 @@ def test_phase_worker_does_not_start_physics_runner_for_all_final_skips(tmp_path
     )
 
     assert result == (0, 0, 1)
+
+
+def test_geometry_resume_regenerates_candidate_missing_manifest(tmp_path, monkeypatch):
+    from contact_generation import batch_generate
+
+    output = batch_generate.output_path(tmp_path, "tool_a", "object_a", 0, 1)
+    candidate = batch_generate.candidate_artifact_path(output)
+    candidate.parent.mkdir(parents=True)
+    candidate.write_text("partial candidate\n", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(
+        batch_generate,
+        "run_pair",
+        lambda *args, **kwargs: calls.append(kwargs["phase"]) or True,
+    )
+
+    result = batch_generate.phase_worker(
+        "geometry",
+        [("tool.obj", "object.obj", "tool_a", "object_a", None)],
+        tmp_path,
+        tmp_path / "tools_adjusted.json",
+        (0.1, 0.1, 0.1),
+        0,
+        ContactGenCfg(),
+        True,
+        1,
+        physics_options={},
+        seed=1,
+    )
+
+    assert result == (1, 0, 0)
+    assert calls == ["geometry"]
+
+
+def test_geometry_existing_count_requires_candidate_and_manifest(tmp_path):
+    from contact_generation import batch_generate
+
+    pairs = [("tool.obj", "object.obj", "tool_a", "object_a", None)]
+    output = batch_generate.output_path(tmp_path, "tool_a", "object_a", 0, 1)
+    candidate = batch_generate.candidate_artifact_path(output)
+    candidate.parent.mkdir(parents=True)
+    candidate.write_text("partial candidate\n", encoding="utf-8")
+
+    assert batch_generate.count_existing_final_outputs(
+        pairs, tmp_path, 1, geometry_only=True
+    ) == 0
+
+    batch_generate.candidate_manifest_path(output).write_text(
+        "{}\n", encoding="utf-8"
+    )
+    assert batch_generate.count_existing_final_outputs(
+        pairs, tmp_path, 1, geometry_only=True
+    ) == 1
 
 
 def test_phase_worker_does_not_block_on_physics_close_by_default(tmp_path, monkeypatch):

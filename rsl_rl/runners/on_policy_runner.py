@@ -138,9 +138,15 @@ class OnPolicyRunner:
         self.tot_timesteps = 0
         self.tot_time = 0
         self.current_learning_iteration = 0
+        self.best_recent_success_rate = float("-inf")
         self.git_status_repos = [rsl_rl.__file__]
 
-    def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False):  # noqa: C901
+    def learn(
+        self,
+        num_learning_iterations: int,
+        init_at_random_ep_len: bool = False,
+        print_fine_grained_timing: bool = False,
+    ):  # noqa: C901
         # initialize writer
         if self.log_dir is not None and self.writer is None and not self.disable_logs:
             # Launch either Tensorboard or Neptune & Tensorboard summary writer(s), default: Tensorboard.
@@ -196,7 +202,6 @@ class OnPolicyRunner:
 
         # Ensure all parameters are in-synced
         if self.is_distributed:
-            print(f"Synchronizing parameters for rank {self.gpu_global_rank}...")
             self.alg.broadcast_parameters()
             # TODO: Do we need to synchronize empirical normalizers?
             #   Right now: No, because they all should converge to the same values "asymptotically".
@@ -209,6 +214,13 @@ class OnPolicyRunner:
                 self.alg.reset_encoder_call_stats()
             if hasattr(self.alg, "reset_collect_timing"):
                 self.alg.reset_collect_timing()
+            timed_env = getattr(self.env, "unwrapped", None)
+            if (
+                print_fine_grained_timing
+                and timed_env is not None
+                and hasattr(timed_env, "reset_fine_grained_timing")
+            ):
+                timed_env.reset_fine_grained_timing()
             if hasattr(self.alg, "sync_collect_timing_cuda"):
                 self.alg.sync_collect_timing_cuda()
             start = time.time()
@@ -218,8 +230,20 @@ class OnPolicyRunner:
                     # Sample actions
                     actions = self.alg.act(obs, privileged_obs)
                     # Step the environment
+                    timing_start = (
+                        self.alg.collect_timing_start()
+                        if print_fine_grained_timing and hasattr(self.alg, "collect_timing_start")
+                        else None
+                    )
                     obs, rewards, dones, infos = self.env.step(actions.to(self.env.device))
+                    if timing_start is not None:
+                        self.alg.collect_timing_stop("env_step", timing_start)
                     # Move to device
+                    timing_start = (
+                        self.alg.collect_timing_start()
+                        if print_fine_grained_timing and hasattr(self.alg, "collect_timing_start")
+                        else None
+                    )
                     obs, rewards, dones = (obs.to(self.device), rewards.to(self.device), dones.to(self.device))
                     # perform normalization
                     obs = self.obs_normalizer(obs)
@@ -229,14 +253,28 @@ class OnPolicyRunner:
                         )
                     else:
                         privileged_obs = obs
+                    if timing_start is not None:
+                        self.alg.collect_timing_stop("transfer_normalize", timing_start)
 
                     # process the step
+                    timing_start = (
+                        self.alg.collect_timing_start()
+                        if print_fine_grained_timing and hasattr(self.alg, "collect_timing_start")
+                        else None
+                    )
                     self.alg.process_env_step(rewards, dones, infos)
+                    if timing_start is not None:
+                        self.alg.collect_timing_stop("process_env_step", timing_start)
 
                     # Extract intrinsic rewards (only for logging)
                     intrinsic_rewards = self.alg.intrinsic_rewards if self.alg.rnd else None
 
                     # book keeping
+                    timing_start = (
+                        self.alg.collect_timing_start()
+                        if print_fine_grained_timing and hasattr(self.alg, "collect_timing_start")
+                        else None
+                    )
                     if self.log_dir is not None:
                         if "episode" in infos:
                             ep_infos.append(infos["episode"])
@@ -264,15 +302,20 @@ class OnPolicyRunner:
                             irewbuffer.extend(cur_ireward_sum[new_ids][:, 0].cpu().numpy().tolist())
                             cur_ereward_sum[new_ids] = 0
                             cur_ireward_sum[new_ids] = 0
+                    if timing_start is not None:
+                        self.alg.collect_timing_stop("bookkeeping", timing_start)
 
                 if hasattr(self.alg, "sync_collect_timing_cuda"):
                     self.alg.sync_collect_timing_cuda()
                 stop = time.time()
                 collection_time = stop - start
-                if hasattr(self.alg, "collect_timing_summary"):
-                    collect_timing_summary = self.alg.collect_timing_summary(it, collection_time)
-                    if collect_timing_summary is not None:
-                        print(collect_timing_summary)
+                if print_fine_grained_timing and hasattr(self.alg, "collect_timing_summary"):
+                    print(
+                        self.alg.collect_timing_summary(it, collection_time),
+                        flush=True,
+                    )
+                    if timed_env is not None and hasattr(timed_env, "fine_grained_timing_summary"):
+                        print(timed_env.fine_grained_timing_summary(it), flush=True)
                 start = time.time()
 
                 # compute returns
@@ -283,18 +326,13 @@ class OnPolicyRunner:
             loss_dict = self.alg.update()
             stop = time.time()
             learn_time = stop - start
-            if hasattr(self.alg, "encoder_call_stats_summary"):
-                encoder_call_summary = self.alg.encoder_call_stats_summary(it)
-                if encoder_call_summary is not None:
-                    print(encoder_call_summary)
             self.current_learning_iteration = it
             # log info. In distributed runs every rank enters log() so metrics can
             # be aggregated before rank 0 writes them.
             if self.log_dir is not None:
-                self.log(locals())
-                # Save model
-                if it % self.save_interval == 0 and not self.disable_logs:
-                    self.save(os.path.join(self.log_dir, f"model_{it}.pt"))
+                log_stats = self.log(locals())
+                if not self.disable_logs:
+                    self._save_best_recent_success(log_stats)
 
             # Clear episode infos
             ep_infos.clear()
@@ -307,9 +345,17 @@ class OnPolicyRunner:
                     for path in git_file_paths:
                         self.writer.save_file(path)
 
-        # Save the final model after training
+        # Preserve the policy at the exact end of the requested training
+        # budget. Transfer experiments use this checkpoint so model selection
+        # on the parent validation curve cannot confound the comparison.
         if self.log_dir is not None and not self.disable_logs:
-            self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
+            self.save(
+                os.path.join(self.log_dir, "model_last.pt"),
+                infos={
+                    "iter": self.current_learning_iteration,
+                    "requested_learning_iterations": int(num_learning_iterations),
+                },
+            )
 
     def log(self, locs: dict, width: int = 80, pad: int = 35):
         # Compute the collection size
@@ -325,7 +371,7 @@ class OnPolicyRunner:
         train_stats = self._distributed_average_stats(self._train_buffer_stats(locs))
 
         if self.disable_logs:
-            return
+            return {"episode": episode_stats, "train": train_stats, "loss": loss_stats}
 
         # -- Episode info
         ep_string = ""
@@ -417,6 +463,25 @@ class OnPolicyRunner:
             )}\n"""
         )
         print(log_string)
+        return {"episode": episode_stats, "train": train_stats, "loss": loss_stats}
+
+    def _save_best_recent_success(self, log_stats: dict | None) -> None:
+        if not log_stats or not self.log_dir:
+            return
+        episode_stats = log_stats.get("episode") or {}
+        if "recent_success_rate" not in episode_stats:
+            return
+        score = float(episode_stats["recent_success_rate"])
+        if score <= self.best_recent_success_rate:
+            return
+        self.best_recent_success_rate = score
+        self.save(
+            os.path.join(self.log_dir, "model_best.pt"),
+            infos={
+                "best_recent_success_rate": score,
+                "iter": self.current_learning_iteration,
+            },
+        )
 
     def _episode_info_stats(self, ep_infos: list[dict]) -> dict[str, tuple[float, int]]:
         stats: dict[str, tuple[float, int]] = {}

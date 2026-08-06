@@ -111,6 +111,22 @@ def test_bbox_is_recomputed_from_scaled_mesh(tmp_path):
         validate_contact_dict(data)
 
 
+def test_object_mesh_tool_contract_allows_object_as_tool_mesh(tmp_path):
+    data = _valid_payload(tmp_path)
+    object_tool_path = tmp_path / "objects" / "tool_as_object.obj"
+    _write_mesh(object_tool_path)
+    center, extent = scaled_mesh_bbox(object_tool_path, [0.1, 0.2, 0.3])
+
+    data["tool_id"] = "tool_as_object-0.100"
+    data["tool_mesh_path"] = str(object_tool_path)
+    data["tool_bbox_center_M"] = torch.tensor(center, dtype=torch.float32)
+    data["tool_bbox_extent_M"] = torch.tensor(extent, dtype=torch.float32)
+
+    with pytest.raises(ContactSchemaError, match="tool mesh must be"):
+        validate_contact_dict(data)
+    validate_contact_dict(data, tool_mesh_contract="object_mesh")
+
+
 @pytest.mark.parametrize("field", ["object_bbox_center_M", "tool_bbox_center_M"])
 def test_bbox_center_is_recomputed_from_scaled_mesh(tmp_path, field):
     data = _valid_payload(tmp_path)

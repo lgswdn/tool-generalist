@@ -31,6 +31,9 @@ class ObservationLayout:
 
     object_cloud: SliceSpec
     tool_cloud: SliceSpec
+    kinematic_gripper_clouds: SliceSpec
+    oracle_mesh_signed_sdf: SliceSpec
+    oracle_mesh_unsigned_distance: SliceSpec
     object_bbox_center: SliceSpec
     tool_bbox_center: SliceSpec
     hand_state: SliceSpec
@@ -38,6 +41,7 @@ class ObservationLayout:
     previous_action: SliceSpec
     relative_goal_pose: SliceSpec
     object_velocity: SliceSpec
+    task_embedding: SliceSpec
     physics: SliceSpec
     total_dim: int
 
@@ -53,6 +57,10 @@ class ObservationLayout:
         relative_goal_dim: int,
         object_velocity_dim: int,
         physics_dim: int,
+        task_embedding_dim: int = 0,
+        oracle_mesh_sdf_dim: int = 0,
+        oracle_mesh_unsigned_distance_dim: int = 0,
+        include_kinematic_gripper_clouds: bool = False,
     ) -> "ObservationLayout":
         offset = 0
 
@@ -64,6 +72,23 @@ class ObservationLayout:
 
         object_cloud = take("object_cloud", num_points * point_dim, (num_points, point_dim))
         tool_cloud = take("tool_cloud", num_points * point_dim, (num_points, point_dim))
+        kinematic_gripper_clouds = take(
+            "kinematic_gripper_clouds",
+            3 * num_points * point_dim if include_kinematic_gripper_clouds else 0,
+            (3, num_points, point_dim)
+            if include_kinematic_gripper_clouds
+            else (0,),
+        )
+        oracle_mesh_signed_sdf = take(
+            "oracle_mesh_signed_sdf",
+            oracle_mesh_sdf_dim,
+            (oracle_mesh_sdf_dim,),
+        )
+        oracle_mesh_unsigned_distance = take(
+            "oracle_mesh_unsigned_distance",
+            oracle_mesh_unsigned_distance_dim,
+            (oracle_mesh_unsigned_distance_dim,),
+        )
         object_bbox_center = take("object_bbox_center", 3, (3,))
         tool_bbox_center = take("tool_bbox_center", 3, (3,))
         hand_state = take("hand_state", hand_state_dim, (hand_state_dim,))
@@ -71,10 +96,14 @@ class ObservationLayout:
         previous_action = take("previous_action", previous_action_dim, (previous_action_dim,))
         relative_goal_pose = take("relative_goal_pose", relative_goal_dim, (relative_goal_dim,))
         object_velocity = take("object_velocity", object_velocity_dim, (object_velocity_dim,))
+        task_embedding = take("task_embedding", task_embedding_dim, (task_embedding_dim,))
         physics = take("physics", physics_dim, (physics_dim,))
         return cls(
             object_cloud=object_cloud,
             tool_cloud=tool_cloud,
+            kinematic_gripper_clouds=kinematic_gripper_clouds,
+            oracle_mesh_signed_sdf=oracle_mesh_signed_sdf,
+            oracle_mesh_unsigned_distance=oracle_mesh_unsigned_distance,
             object_bbox_center=object_bbox_center,
             tool_bbox_center=tool_bbox_center,
             hand_state=hand_state,
@@ -82,6 +111,7 @@ class ObservationLayout:
             previous_action=previous_action,
             relative_goal_pose=relative_goal_pose,
             object_velocity=object_velocity,
+            task_embedding=task_embedding,
             physics=physics,
             total_dim=offset,
         )
@@ -94,11 +124,18 @@ def split_observations(obs: torch.Tensor, layout: ObservationLayout) -> dict[str
             return value.new_zeros((obs.shape[0], 0))
         if len(spec.shape) == 2:
             return value.view(-1, spec.shape[0], spec.shape[1])
+        if len(spec.shape) == 3:
+            return value.view(
+                -1, spec.shape[0], spec.shape[1], spec.shape[2]
+            )
         return value.view(-1, spec.shape[0])
 
     return {
         "object_cloud": take(layout.object_cloud),
         "tool_cloud": take(layout.tool_cloud),
+        "kinematic_gripper_clouds": take(layout.kinematic_gripper_clouds),
+        "oracle_mesh_signed_sdf": take(layout.oracle_mesh_signed_sdf),
+        "oracle_mesh_unsigned_distance": take(layout.oracle_mesh_unsigned_distance),
         "object_bbox_center": take(layout.object_bbox_center),
         "tool_bbox_center": take(layout.tool_bbox_center),
         "hand_state": take(layout.hand_state),
@@ -106,6 +143,7 @@ def split_observations(obs: torch.Tensor, layout: ObservationLayout) -> dict[str
         "previous_action": take(layout.previous_action),
         "relative_goal_pose": take(layout.relative_goal_pose),
         "object_velocity": take(layout.object_velocity),
+        "task_embedding": take(layout.task_embedding),
         "physics": take(layout.physics),
     }
 
@@ -131,6 +169,7 @@ def context_dim(
     relative_goal_dim: int,
     object_velocity_dim: int,
     physics_dim: int,
+    task_embedding_dim: int = 0,
 ) -> int:
     return (
         3
@@ -140,6 +179,7 @@ def context_dim(
         + previous_action_dim
         + relative_goal_dim
         + object_velocity_dim
+        + task_embedding_dim
         + physics_dim
     )
 
@@ -158,6 +198,7 @@ def build_context_vector(parts: Mapping[str, torch.Tensor]) -> torch.Tensor:
             parts["previous_action"],
             parts["relative_goal_pose"],
             parts["object_velocity"],
+            parts["task_embedding"],
             parts["physics"],
         ],
         dim=-1,

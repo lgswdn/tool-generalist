@@ -1,0 +1,34 @@
+# 50/50 distributed cross-embodiment RL assets:
+# newest generated Panda-like parallel grippers and generated revolute grippers.
+dgn:
+  candidates_json: /mnt/project/world_model/tool_generalist/assets/DGN/full_yes.json
+  usd_dir: /mnt/project/world_model/tool_generalist/assets/DGN/coacd_usd
+  obj_dir: /mnt/project/world_model/tool_generalist/assets/DGN/coacd_normalized
+
+objects:
+  candidates_json: /mnt/project/world_model/tool_generalist/assets/DGN/full_yes.json
+  usd_dir: /mnt/project/world_model/tool_generalist/assets/DGN/coacd_usd
+  obj_dir: /mnt/project/world_model/tool_generalist/assets/DGN/coacd_normalized
+
+tools:
+  robots_usd_dir: /mnt/project/world_model/tool_generalist/Robots
+  tools_json: ../generated_gripper_contact_assets_new/tools_adjusted.json
+  tools_adjusted_json: ../generated_gripper_contact_assets_new/tools_adjusted.json
+  tools_selected_json: ../generated_gripper_contact_assets_new/tools_selected.json
+  meshdata_adjusted_root: ../generated_gripper_contact_assets_new/meshdata_adjusted
+  obj_dir: /mnt/project/world_model/tool_generalist/eef/normalized_models
+  scale: 1.0
+
+# The newest uniform-topology set of 200 Panda-like parallel grippers.
+generated_grippers:
+  root: /mnt/project/world_model/tool_generalist/gripper_new
+  manifest: /mnt/project/world_model/tool_generalist/gripper_new/generated_grippers.json
+  cloud_cache_dir: ../../gripper/generated_parallel_128/kinematic_cloud_cache
+
+# The other half of distributed ranks use the generated four-joint revolute family.
+one_dof_grippers:
+  root: ../../gripper/generated_graspgenx
+  manifest: ../../gripper/generated_graspgenx/two_finger_revolute.json
+
+robot:
+  franka_usd: /mnt/afs/zhuwenxuan/project/inp/tool-generalist/bare_panda_instanceable.usd

@@ -38,6 +38,7 @@ class PretrainOptimizerCfg:
     scheduler: str = "cosine"
     min_learning_rate: float = 1e-6
     sam_rho: float = 0.05
+    max_gradient_norm: float = 1.0
 
 
 @dataclass
@@ -64,6 +65,7 @@ class SDFTargetCfg:
 
 @dataclass
 class UnicornLabelCfg:
+    source: str = "mesh_sdf"
     backend: str = "kaolin"
     contact_eps: float = 0.002
     patch_positive_rule: str = "any"
@@ -73,16 +75,18 @@ class UnicornLabelCfg:
 
 @dataclass
 class UnicornAugmentCfg:
-    rotation_range: tuple[float, float] = (-3.141592653589793, 3.141592653589793)
-    translation_range: tuple[float, float] = (-0.1, 0.1)
-    log_scale_range: tuple[float, float] = (-1.0, 1.0)
-    noise_std: float = 0.01
+    paper_pair_augmentation: bool = False
+    rotation_range: tuple[float, float] = (0.0, 0.0)
+    translation_range: tuple[float, float] = (0.0, 0.0)
+    log_scale_range: tuple[float, float] = (0.0, 0.0)
+    noise_std: float = 0.001
 
 
 @dataclass
 class UnicornPretrainCfg:
     num_patches: int = 16
     decoder_hidden_dims: list[int] = field(default_factory=lambda: [128, 128])
+    decoder_type: str = "relu_mlp"
     positive_patch_fraction: float = 0.5
     label: UnicornLabelCfg = field(default_factory=UnicornLabelCfg)
     augment: UnicornAugmentCfg = field(default_factory=UnicornAugmentCfg)
@@ -113,6 +117,8 @@ class PretrainCfg:
     retrain: bool = False
     enabled_heads: list[str] = field(default_factory=lambda: ["diff", "postcontact"])
     dataset_manifest: Optional[str] = None
+    use_geometry_candidates: bool = False
+    max_contacts_per_file: int = 0
     max_files: int = 0
     val_ratio: float = 0.1
     augment: bool = True
@@ -141,10 +147,11 @@ class PretrainCfg:
     denoise_head_hidden_dims: list[int] = field(default_factory=lambda: [512, 256, 128])
     postcontact_head_hidden_dims: list[int] = field(default_factory=lambda: [512, 256, 128])
     denoise_target_mode: str = "one_step"
+    encoder_input_centering: str = "bbox_center"
     validation_noising_seed: int = 12345
     fixed_validation_sampling: bool = True
     batch: PretrainBatchCfg = field(default_factory=PretrainBatchCfg)
-    epochs: int = 20
+    epochs: int = 40
     device: Optional[str] = None
     optimizer: PretrainOptimizerCfg = field(default_factory=PretrainOptimizerCfg)
     log_interval: int = 10
@@ -314,16 +321,20 @@ UNICORN_CONTACT_CFG: PretrainCfg = PretrainCfg(
     mode="unicorn_contact",
     enabled=True,
     enabled_heads=["contact"],
+    encoder_input_centering="object_center",
     augment=True,
     num_precontact_steps=0,
-    batch=PretrainBatchCfg(batch_size=1024, num_workers=0),
-    epochs=20,
+    translation_noise_range=(0.0, 0.2),
+    rotation_noise_range_deg=(0.0, 0.0),
+    condition_normalization=True,
+    batch=PretrainBatchCfg(batch_size=128, num_workers=0),
+    epochs=40,
     optimizer=PretrainOptimizerCfg(
-        name="sam",
-        learning_rate=2e-4,
-        weight_decay=0.001,
+        name="adamw",
+        learning_rate=3e-4,
+        weight_decay=0.0,
         scheduler="cosine",
-        min_learning_rate=1e-6,
+        min_learning_rate=3e-5,
         sam_rho=0.05,
     ),
     tasks=PretrainTaskCfg(

@@ -7,7 +7,9 @@
 
 from __future__ import annotations
 
+import numpy as np
 import torch
+from pathlib import Path
 from typing import TYPE_CHECKING
 from isaaclab.assets import RigidObject
 from isaaclab.managers import SceneEntityCfg
@@ -62,7 +64,7 @@ def reset_initial_object_position(
     
     # Per-env sampling from stable pose with random yaw offset
     from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
-        get_cached_cloud,
+        get_cached_object_cloud,
         get_object_asset_cfg_for_env,
     )
     scales = get_rigid_body_scale(env, SceneEntityCfg("object"), env_ids)
@@ -74,7 +76,7 @@ def reset_initial_object_position(
         scale_tensor = scales[i]
         scale = tuple(scale_tensor.cpu().numpy())
 
-        object_cloud = get_cached_cloud(obj_path)
+        object_cloud = get_cached_object_cloud(obj_path)
         obj_pts_local = object_cloud._get_vertices_torch(env.device).float() * scale_tensor.float()
         sample_pose = object_cloud.sample_stable_pose_trimesh(scale=scale)
         _, quat = sample_pose  # (position, quaternion)
@@ -165,6 +167,122 @@ def get_rigid_body_scale(
 
     # assemble output in request order
     return torch.stack([env._scale_cache[eid] for eid in requested], dim=0)
+
+
+def preload_object_pointclouds(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor | list[int] | None,
+    object_cloud_source: str,
+    preprocessed_dir: str,
+    num_points: int,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+) -> None:
+    """Load every locally assigned object cloud and move the full batch to the GPU.
+
+    This is a prestartup event and must run after object scale randomization. The
+    cached tensor is already expanded per environment and has each environment's
+    actual USD scale baked into its local-frame points.
+    """
+    if env_ids is not None:
+        raise ValueError("preload_object_pointclouds must run globally with env_ids=None")
+    if object_cloud_source not in {"preprocessed", "mesh_sampled"}:
+        raise ValueError(
+            "object_cloud_source must be 'preprocessed' or 'mesh_sampled', got "
+            f"{object_cloud_source!r}"
+        )
+    num_points = int(num_points)
+    if num_points <= 0:
+        raise ValueError(f"num_points must be positive, got {num_points}")
+
+    from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
+        get_object_asset_cfg_for_env,
+    )
+
+    num_envs = int(env.scene.num_envs)
+    assigned_assets = [get_object_asset_cfg_for_env(env_id) for env_id in range(num_envs)]
+    object_ids = [Path(asset.obj_path).stem for asset in assigned_assets]
+    unique_assets = {}
+    for object_id, asset in zip(object_ids, assigned_assets):
+        unique_assets.setdefault(object_id, asset)
+
+    points_by_object: dict[str, np.ndarray] = {}
+    if object_cloud_source == "preprocessed":
+        pointcloud_dir = Path(preprocessed_dir).expanduser()
+        if not pointcloud_dir.is_dir():
+            raise FileNotFoundError(
+                "Preprocessed object point-cloud directory does not exist or is not a directory: "
+                f"{pointcloud_dir}"
+            )
+        paths_by_object = {
+            object_id: pointcloud_dir / f"{object_id}_first_hit_fps_{num_points}.npy"
+            for object_id in unique_assets
+        }
+        missing = [
+            (object_id, path)
+            for object_id, path in paths_by_object.items()
+            if not path.is_file()
+        ]
+        if missing:
+            preview = "\n".join(
+                f"  {object_id}: {path}" for object_id, path in missing[:20]
+            )
+            suffix = "" if len(missing) <= 20 else f"\n  ... and {len(missing) - 20} more"
+            raise FileNotFoundError(
+                f"Missing preprocessed point clouds for {len(missing)} of "
+                f"{len(unique_assets)} assigned objects:\n{preview}{suffix}"
+            )
+
+        for object_id, path in paths_by_object.items():
+            try:
+                points = np.load(path, allow_pickle=False)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Failed to load preprocessed point cloud for {object_id!r}: {path}"
+                ) from exc
+            points = np.asarray(points)
+            if points.shape != (num_points, 3):
+                raise RuntimeError(
+                    f"Preprocessed point cloud has invalid shape for {object_id!r}: "
+                    f"{path} has {points.shape}, expected {(num_points, 3)}"
+                )
+            if not np.issubdtype(points.dtype, np.number) or not np.isfinite(points).all():
+                raise RuntimeError(
+                    f"Preprocessed point cloud contains non-numeric or non-finite data: {path}"
+                )
+            points_by_object[object_id] = points.astype(np.float32, copy=False)
+        source_description = str(pointcloud_dir)
+    else:
+        from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.cloud import Cloud
+
+        for object_id, asset in unique_assets.items():
+            cloud = Cloud(
+                asset.obj_path,
+                target_num_points=num_points,
+                device=torch.device("cpu"),
+                dtype=torch.float32,
+            )
+            points_by_object[object_id] = cloud.points.numpy()
+        source_description = "mesh sampling / per-mesh pc_npy_cache"
+
+    points_np = np.stack([points_by_object[object_id] for object_id in object_ids], axis=0)
+    points_l = torch.from_numpy(points_np).to(device=env.device, dtype=torch.float32)
+    scales = get_rigid_body_scale(
+        env,
+        asset_cfg,
+        list(range(num_envs)),
+    ).to(device=env.device, dtype=torch.float32)
+    env._object_pointcloud_points_l = (points_l * scales.unsqueeze(1)).contiguous()
+    env._object_pointcloud_scales = scales.contiguous()
+    env._object_pointcloud_source = object_cloud_source
+
+    memory_mib = env._object_pointcloud_points_l.numel() * 4 / (1024.0 * 1024.0)
+    print(
+        "[ObjectPointCloudPreload] "
+        f"source={object_cloud_source} envs={num_envs} unique_objects={len(unique_assets)} "
+        f"shape={tuple(env._object_pointcloud_points_l.shape)} device={env.device} "
+        f"memory={memory_mib:.1f}MiB path={source_description}",
+        flush=True,
+    )
 
 
 def randomize_terrain_material(

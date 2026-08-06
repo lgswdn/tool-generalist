@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from utils.config.hash import (
     _hash_payload,
-    _strip_hash_compat_defaults,
     config_hash,
     short_hash,
 )
@@ -15,7 +14,6 @@ hash_short = short_hash
 
 __all__ = [
     "_hash_payload",
-    "_strip_hash_compat_defaults",
     "canonical_json",
     "config_hash",
     "hash_short",

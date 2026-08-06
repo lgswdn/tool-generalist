@@ -23,7 +23,9 @@ import torch.nn.functional as F
 from utils.geometry.sdf import mutual_signed_sdf_labels_env_frame
 from utils.geometry.pose import rotation_from_pose9d
 
-_RPDIFF_SRC = Path(__file__).resolve().parent / "rpdiff" / "src"
+_RPDIFF_SRC = (
+    Path(__file__).resolve().parents[1] / "thirdparty" / "rpdiff" / "src"
+)
 if _RPDIFF_SRC.exists() and str(_RPDIFF_SRC) not in sys.path:
     sys.path.insert(0, str(_RPDIFF_SRC))
 from rpdiff.training.losses import TransformChamferWrapper
@@ -49,6 +51,9 @@ class TCEPointCloudEncoderCfg:
     vit_depth: int
     vit_heads: int
     freeze: bool
+    vit_attention_mode: str | None = None
+    kinematic_conditioning: bool = False
+    kinematic_attention_layers: int = 1
 
 
 class TCEEncodeResult(NamedTuple):
@@ -111,9 +116,11 @@ class _FormerViTBlock(nn.Module):
             nn.Dropout(dropout),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, attn_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
         y = self.norm1(x)
-        y, _ = self.attn(y, y, y, need_weights=False)
+        y, _ = self.attn(y, y, y, attn_mask=attn_mask, need_weights=False)
         x = x + self.drop(y)
         return x + self.ffn(self.norm2(x))
 
@@ -126,6 +133,11 @@ class TCEPointCloudEncoder(nn.Module):
         self.cfg = cfg
         self._P = max(1, cfg.num_pts // cfg.patch_size)
         self._D = cfg.encoder_channel
+        if cfg.vit_attention_mode not in {"joint_self", "cross_only"}:
+            raise ValueError(
+                "vit_attention_mode is required and must be joint_self or cross_only, got "
+                f"{cfg.vit_attention_mode!r}"
+            )
         self.patch_enc = _FormerPatchEncoder(cfg.encoder_channel)
         self.pos_embed = _FormerPosEmbed(cfg.encoder_channel)
         self.type_embed = nn.Parameter(torch.zeros(2, cfg.encoder_channel))
@@ -139,6 +151,37 @@ class TCEPointCloudEncoder(nn.Module):
             ]
         )
         self.norm = nn.LayerNorm(cfg.encoder_channel)
+        if cfg.kinematic_conditioning:
+            if int(cfg.kinematic_attention_layers) < 1:
+                raise ValueError("kinematic_attention_layers must be >= 1")
+            self.kinematic_state_embed = nn.Parameter(
+                torch.zeros(3, cfg.encoder_channel)
+            )
+            nn.init.normal_(self.kinematic_state_embed, std=0.02)
+            self.kinematic_vit = nn.ModuleList(
+                [
+                    _FormerViTBlock(
+                        cfg.encoder_channel,
+                        cfg.vit_heads,
+                        mlp_ratio=4.0,
+                        dropout=0.0,
+                    )
+                    for _ in range(int(cfg.kinematic_attention_layers))
+                ]
+            )
+            self.kinematic_norm = nn.LayerNorm(cfg.encoder_channel)
+            self.geometry_kinematic_vit = nn.ModuleList(
+                [
+                    _FormerViTBlock(
+                        cfg.encoder_channel,
+                        cfg.vit_heads,
+                        mlp_ratio=4.0,
+                        dropout=0.0,
+                    )
+                    for _ in range(int(cfg.kinematic_attention_layers))
+                ]
+            )
+            self.geometry_kinematic_norm = nn.LayerNorm(cfg.encoder_channel)
         if cfg.freeze:
             for param in self.parameters():
                 param.requires_grad_(False)
@@ -210,7 +253,49 @@ class TCEPointCloudEncoder(nn.Module):
         centers = torch.cat((centers, centers[:, -1:, :].expand(B, pad_p, 3)), dim=1)
         return tokens, idx, centers
 
-    def encode(self, tool_pc: torch.Tensor, obj_pc: torch.Tensor) -> TCEEncodeResult:
+    def _encode_kinematic_states(
+        self, kinematic_tool_clouds: torch.Tensor
+    ) -> torch.Tensor:
+        if tuple(kinematic_tool_clouds.shape[1:]) != (
+            3,
+            self.cfg.num_pts,
+            3,
+        ):
+            raise ValueError(
+                "kinematic_tool_clouds must have shape "
+                f"(B, 3, {self.cfg.num_pts}, 3), got "
+                f"{tuple(kinematic_tool_clouds.shape)}"
+            )
+        state_tokens = []
+        for state_index in range(3):
+            tokens, indices, centers = self._encode_one(
+                kinematic_tool_clouds[:, state_index], type_id=0
+            )
+            tokens, _, _ = self._pad_to_num_patches(tokens, indices, centers)
+            state_tokens.append(
+                tokens.mean(dim=1)
+                + self.kinematic_state_embed[state_index].view(1, -1)
+            )
+        kinematic_tokens = torch.stack(state_tokens, dim=1)
+        for block in self.kinematic_vit:
+            kinematic_tokens = block(kinematic_tokens)
+        return self.kinematic_norm(kinematic_tokens)
+
+    def encode(
+        self,
+        tool_pc: torch.Tensor,
+        obj_pc: torch.Tensor,
+        *,
+        kinematic_tool_clouds: torch.Tensor | None = None,
+    ) -> TCEEncodeResult:
+        if self.cfg.kinematic_conditioning and kinematic_tool_clouds is None:
+            raise ValueError(
+                "kinematic_tool_clouds is required by this TCE encoder"
+            )
+        if not self.cfg.kinematic_conditioning and kinematic_tool_clouds is not None:
+            raise ValueError(
+                "kinematic_tool_clouds was supplied to a standard TCE encoder"
+            )
         tool_tok, tool_idx, tool_centers = self._encode_one(tool_pc, type_id=0)
         obj_tok, obj_idx, obj_centers = self._encode_one(obj_pc, type_id=1)
         tool_tok, tool_idx, tool_centers = self._pad_to_num_patches(tool_tok, tool_idx, tool_centers)
@@ -218,10 +303,29 @@ class TCEPointCloudEncoder(nn.Module):
         fused = torch.cat((tool_tok, obj_tok), dim=1)
         cls = self.cls_token.expand(fused.shape[0], -1, -1)
         fused = torch.cat((cls, fused), dim=1)
+        attn_mask = None
+        if self.cfg.vit_attention_mode == "cross_only":
+            # [CLS, tool_0..tool_P-1, object_0..object_P-1]. Patch-token
+            # queries may read only the opposite body. CLS may summarize all
+            # tokens, but patch queries cannot read CLS, preventing a global
+            # shortcut through this one simultaneous attention update.
+            size = 1 + 2 * self._P
+            attn_mask = torch.ones(size, size, dtype=torch.bool, device=fused.device)
+            attn_mask[0, :] = False
+            attn_mask[1 : 1 + self._P, 1 + self._P :] = False
+            attn_mask[1 + self._P :, 1 : 1 + self._P] = False
         for block in self.vit:
-            fused = block(fused)
+            fused = block(fused, attn_mask=attn_mask)
         fused = self.norm(fused)
         fused = fused[:, 1:, :]
+        if self.cfg.kinematic_conditioning:
+            kinematic_tokens = self._encode_kinematic_states(
+                kinematic_tool_clouds
+            )
+            fused = torch.cat((fused, kinematic_tokens), dim=1)
+            for block in self.geometry_kinematic_vit:
+                fused = block(fused)
+            fused = self.geometry_kinematic_norm(fused)
         return TCEEncodeResult(
             fused_tokens=fused,
             tool_patch_idx=tool_idx,
@@ -230,8 +334,18 @@ class TCEPointCloudEncoder(nn.Module):
             obj_patch_centers=obj_centers,
         )
 
-    def forward(self, tool_pc: torch.Tensor, obj_pc: torch.Tensor) -> TCEEncodeResult:
-        return self.encode(tool_pc, obj_pc)
+    def forward(
+        self,
+        tool_pc: torch.Tensor,
+        obj_pc: torch.Tensor,
+        *,
+        kinematic_tool_clouds: torch.Tensor | None = None,
+    ) -> TCEEncodeResult:
+        return self.encode(
+            tool_pc,
+            obj_pc,
+            kinematic_tool_clouds=kinematic_tool_clouds,
+        )
 
 
 class SinusoidalPosEmb(nn.Module):
@@ -323,7 +437,7 @@ def _aggregate_sdf(
 
 def _split_tokens(res, P: int):
     """Split fused_tokens (B, 2P, D) into tool_tokens and obj_tokens."""
-    return res.fused_tokens[:, :P, :], res.fused_tokens[:, P:, :]
+    return res.fused_tokens[:, :P, :], res.fused_tokens[:, P : 2 * P, :]
 
 
 # ============================================================================ #
@@ -471,6 +585,78 @@ def _make_relu_mlp(dims: tuple[int, ...]) -> nn.Sequential:
         if i < len(dims) - 2:
             layers.append(nn.ReLU())
     return nn.Sequential(*layers)
+
+
+class _ConditionalBatchNorm1d(nn.Module):
+    """Conditional BN used by the UniCORN paper contact decoder."""
+
+    def __init__(self, num_features: int, condition_dim: int):
+        super().__init__()
+        self.bn = nn.BatchNorm1d(num_features, affine=False)
+        self.affine = nn.Linear(condition_dim, 2 * num_features)
+        with torch.no_grad():
+            self.affine.weight.zero_()
+            self.affine.bias[:num_features].fill_(1.0)
+            self.affine.bias[num_features:].zero_()
+
+    def forward(self, features: torch.Tensor, condition: torch.Tensor) -> torch.Tensor:
+        batch, patches, channels = features.shape
+        normalized = self.bn(features.reshape(batch * patches, channels)).reshape(
+            batch, patches, channels
+        )
+        gamma, beta = self.affine(condition).chunk(2, dim=-1)
+        return normalized * gamma.unsqueeze(1) + beta.unsqueeze(1)
+
+
+class _PaperContactCMLP(nn.Module):
+    """Three-layer conditional MLP with two 128D CBN hidden layers."""
+
+    def __init__(
+        self,
+        token_dim: int,
+        hidden_dims: tuple[int, ...],
+        condition_dim: int,
+    ):
+        super().__init__()
+        if tuple(hidden_dims) != (128, 128):
+            raise ValueError(
+                "paper_cmlp_cbn requires decoder hidden dimensions (128, 128)"
+            )
+        self.input = nn.Linear(token_dim, hidden_dims[0])
+        self.hidden = nn.Linear(hidden_dims[0], hidden_dims[1])
+        self.cbn_input = _ConditionalBatchNorm1d(hidden_dims[0], condition_dim)
+        self.cbn_hidden = _ConditionalBatchNorm1d(hidden_dims[1], condition_dim)
+        self.output = nn.Linear(hidden_dims[1], 1)
+
+    def forward(self, tokens: torch.Tensor, opposite_global: torch.Tensor) -> torch.Tensor:
+        features = F.gelu(self.cbn_input(self.input(tokens), opposite_global))
+        residual = features
+        features = F.gelu(
+            self.cbn_hidden(self.hidden(features), opposite_global)
+        )
+        return self.output(features + residual).squeeze(-1)
+
+
+def _euler_xyz_rotation_matrices(angles: torch.Tensor) -> torch.Tensor:
+    """Return batched Rz @ Ry @ Rx matrices for XYZ Euler samples."""
+
+    ax, ay, az = angles.unbind(dim=-1)
+    sx, sy, sz = torch.sin(ax), torch.sin(ay), torch.sin(az)
+    cx, cy, cz = torch.cos(ax), torch.cos(ay), torch.cos(az)
+    return torch.stack(
+        (
+            cy * cz,
+            cz * sx * sy - cx * sz,
+            sx * sz + cx * cz * sy,
+            cy * sz,
+            cx * cz + sx * sy * sz,
+            cx * sy * sz - cz * sx,
+            -sy,
+            cy * sx,
+            cx * cy,
+        ),
+        dim=-1,
+    ).reshape(-1, 3, 3)
 
 
 class Pose9DHead(nn.Module):
@@ -632,7 +818,10 @@ class ContactDiffusionModel(nn.Module):
         encoder_channel: int = 128,
         vit_depth: int = 4,
         vit_heads: int = 4,
+        vit_attention_mode: str | None = None,
         freeze_encoder: bool = False,
+        kinematic_conditioning: bool = False,
+        kinematic_attention_layers: int = 1,
         # Cross-attention
         cross_attn_heads: int = 4,
         cross_attn_layers: int = 2,
@@ -663,17 +852,35 @@ class ContactDiffusionModel(nn.Module):
         sdf_chunk_size: int = 8192,
         sdf_relative_loss: bool = False,
         sdf_relative_eps: float = 0.005,
+        encoder_input_centering: str = "bbox_center",
+        contact_eps: float = 0.002,
+        contact_label_source: str = "mesh_sdf",
+        contact_positive_patch_fraction: float = 0.5,
+        contact_patch_positive_rule: str = "any",
+        contact_positive_min_points: int = 1,
+        contact_decoder_type: str = "relu_mlp",
+        contact_decoder_hidden: tuple[int, ...] = (128, 128),
+        contact_pair_augmentation: bool = False,
+        contact_aug_rotation_range: tuple[float, float] = (0.0, 0.0),
+        contact_aug_translation_range: tuple[float, float] = (0.0, 0.0),
+        contact_aug_log_scale_range: tuple[float, float] = (0.0, 0.0),
+        contact_aug_noise_std: float = 0.0,
         # Task
         task: str = "sdf-diff",
         enabled_heads: tuple[str, ...] | list[str] | None = None,
     ):
         super().__init__()
+        if vit_attention_mode not in {"joint_self", "cross_only"}:
+            raise ValueError(
+                "vit_attention_mode is required and must be joint_self or "
+                f"cross_only, got {vit_attention_mode!r}"
+            )
         assert head_mode in ("point", "patch")
         assert task in ("sdf", "sdf-diff")
         if enabled_heads is None:
             enabled_heads = ("sdf", "diff") if task == "sdf-diff" else ("sdf",)
         enabled_heads = tuple(enabled_heads)
-        invalid_heads = sorted(set(enabled_heads).difference({"sdf", "diff", "postcontact"}))
+        invalid_heads = sorted(set(enabled_heads).difference({"sdf", "diff", "postcontact", "contact"}))
         if invalid_heads:
             raise ValueError(f"Unknown enabled_heads: {invalid_heads}")
 
@@ -685,12 +892,79 @@ class ContactDiffusionModel(nn.Module):
         self.sdf_chunk_size = int(sdf_chunk_size)
         self.sdf_relative_loss = bool(sdf_relative_loss)
         self.sdf_relative_eps = float(sdf_relative_eps)
+        self.encoder_input_centering = str(encoder_input_centering)
+        self.contact_eps = float(contact_eps)
+        self.contact_label_source = str(contact_label_source)
+        self.contact_positive_patch_fraction = float(contact_positive_patch_fraction)
+        self.contact_patch_positive_rule = str(contact_patch_positive_rule)
+        self.contact_positive_min_points = int(contact_positive_min_points)
+        self.contact_decoder_type = str(contact_decoder_type)
+        self.contact_decoder_hidden = tuple(int(v) for v in contact_decoder_hidden)
+        self.contact_pair_augmentation = bool(contact_pair_augmentation)
+        self.contact_aug_rotation_range = tuple(
+            float(v) for v in contact_aug_rotation_range
+        )
+        self.contact_aug_translation_range = tuple(
+            float(v) for v in contact_aug_translation_range
+        )
+        self.contact_aug_log_scale_range = tuple(
+            float(v) for v in contact_aug_log_scale_range
+        )
+        self.contact_aug_noise_std = float(contact_aug_noise_std)
+        self.kinematic_conditioning = bool(kinematic_conditioning)
+        self.kinematic_attention_layers = int(kinematic_attention_layers)
+        if self.kinematic_conditioning:
+            if set(self.enabled_heads) != {"contact"}:
+                raise ValueError(
+                    "Kinematic conditioning is defined only for binary contact pretraining"
+                )
+            if self.contact_decoder_type != "paper_cmlp_cbn":
+                raise ValueError(
+                    "Kinematic conditioning requires contact_decoder_type='paper_cmlp_cbn'"
+                )
+        if self.encoder_input_centering not in {"bbox_center", "object_center"}:
+            raise ValueError(
+                "encoder_input_centering must be 'bbox_center' or "
+                f"'object_center', got {self.encoder_input_centering!r}"
+            )
         if self.sdf_relative_eps <= 0.0:
             raise ValueError("sdf_relative_eps must be > 0")
+        if self.contact_eps < 0.0:
+            raise ValueError("contact_eps must be >= 0")
+        if self.contact_label_source not in {
+            "mesh_sdf",
+            "precomputed_convex_union",
+            "precomputed_mesh_sdf",
+        }:
+            raise ValueError(
+                "contact_label_source must be mesh_sdf, "
+                "precomputed_convex_union, or precomputed_mesh_sdf"
+            )
+        if (
+            "sdf" in self.enabled_heads
+            and self.contact_label_source == "precomputed_mesh_sdf"
+            and (
+                self.contact_aug_log_scale_range != (0.0, 0.0)
+                or self.contact_aug_noise_std != 0.0
+            )
+        ):
+            raise ValueError(
+                "Precomputed SDF regression requires zero scale augmentation "
+                "and zero point jitter"
+            )
+        if not 0.0 < self.contact_positive_patch_fraction < 1.0:
+            raise ValueError("contact_positive_patch_fraction must be in (0, 1)")
+        if self.contact_patch_positive_rule not in {"any", "count"}:
+            raise ValueError("contact_patch_positive_rule must be 'any' or 'count'")
+        if self.contact_decoder_type not in {"relu_mlp", "paper_cmlp_cbn"}:
+            raise ValueError(
+                "contact_decoder_type must be relu_mlp or paper_cmlp_cbn"
+            )
         merged_weights = {
             "sdf": float(sdf_weight),
             "diff": float(denoise_weight),
             "postcontact": float(postcontact_weight),
+            "contact": 1.0,
         }
         if loss_weights:
             merged_weights.update({str(k): float(v) for k, v in loss_weights.items()})
@@ -740,6 +1014,9 @@ class ContactDiffusionModel(nn.Module):
             vit_depth=vit_depth,
             vit_heads=vit_heads,
             freeze=freeze_encoder,
+            vit_attention_mode=vit_attention_mode,
+            kinematic_conditioning=self.kinematic_conditioning,
+            kinematic_attention_layers=self.kinematic_attention_layers,
         )
         self.encoder = TCEPointCloudEncoder(enc_cfg)
         D = self.encoder.feature_dim
@@ -758,20 +1035,21 @@ class ContactDiffusionModel(nn.Module):
                 self.obj_sdf_head = _make_mlp((D,) + head_hidden + (1,))
 
         # ── Pose conditioning (cross-attention) ─────────────────────────
-        # Built for BOTH tasks: sdf-only needs it to inject translation so
-        # the SDF head knows where the tool is relative to the object.
-        self.pose_cross_attn = PoseCrossAttention(
-            token_dim=D,
-            pose_dim=pose_dim,
-            movement_cond_dim=movement_cond_dim,
-            n_heads=cross_attn_heads,
-            n_layers=cross_attn_layers,
-            condition_mlp_hidden_dims=condition_mlp_hidden_dims,
-            num_query_A=num_query_A,
-            num_query_B=num_query_B,
-            num_query_C=num_query_C,
-            num_query_D=num_query_D,
-        )
+        # SDF/diff/postcontact need pose conditioning. Contact-only TCE
+        # pretraining keeps this module absent so DDP has no unused params.
+        if {"sdf", "diff", "postcontact"}.intersection(self.enabled_heads):
+            self.pose_cross_attn = PoseCrossAttention(
+                token_dim=D,
+                pose_dim=pose_dim,
+                movement_cond_dim=movement_cond_dim,
+                n_heads=cross_attn_heads,
+                n_layers=cross_attn_layers,
+                condition_mlp_hidden_dims=condition_mlp_hidden_dims,
+                num_query_A=num_query_A,
+                num_query_B=num_query_B,
+                num_query_C=num_query_C,
+                num_query_D=num_query_D,
+            )
 
         if "diff" in self.enabled_heads:
             self.diff_time_emb = SinusoidalPosEmb(dim=2 * D, max_pos=num_diffusion_steps + 1)
@@ -783,6 +1061,26 @@ class ContactDiffusionModel(nn.Module):
             self.postcontact_head = _make_relu_mlp(
                 (2 * D,) + postcontact_hidden + (9,)
             )
+        if "contact" in self.enabled_heads:
+            if self.kinematic_conditioning:
+                self.openness_delta_embed = _make_relu_mlp((1, D, D))
+            if self.contact_decoder_type == "paper_cmlp_cbn":
+                contact_condition_dim = (
+                    2 * D if self.kinematic_conditioning else D
+                )
+                self.tool_contact_head = _PaperContactCMLP(
+                    D, self.contact_decoder_hidden, contact_condition_dim
+                )
+                self.obj_contact_head = _PaperContactCMLP(
+                    D, self.contact_decoder_hidden, contact_condition_dim
+                )
+            else:
+                self.tool_contact_head = _make_relu_mlp(
+                    (D,) + head_hidden + (1,)
+                )
+                self.obj_contact_head = _make_relu_mlp(
+                    (D,) + head_hidden + (1,)
+                )
 
     # ── SDF prediction (point mode) ──────────────────────────────────────
 
@@ -828,6 +1126,87 @@ class ContactDiffusionModel(nn.Module):
         """Per-patch SDF prediction. Same logic as SDFSegmentor._predict_patch."""
         return head(patch_tokens).squeeze(-1)
 
+    def _patch_contact_labels(
+        self,
+        point_labels: torch.Tensor,
+        patch_idx: torch.Tensor,
+    ) -> torch.Tensor:
+        B, P, K = patch_idx.shape
+        gathered = point_labels.gather(1, patch_idx.reshape(B, P * K)).view(B, P, K)
+        if self.contact_patch_positive_rule == "count":
+            return (gathered.sum(dim=-1) >= max(1, self.contact_positive_min_points)).to(point_labels.dtype)
+        return gathered.any(dim=-1).to(point_labels.dtype)
+
+    def _balanced_contact_bce(
+        self,
+        logits: torch.Tensor,
+        labels: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        raw = F.binary_cross_entropy_with_logits(logits, labels, reduction="none")
+        pos = labels > 0.5
+        neg = ~pos
+        num_pos = pos.sum().to(raw.dtype)
+        num_neg = neg.sum().to(raw.dtype)
+        pos_mass = raw.new_tensor(self.contact_positive_patch_fraction)
+        neg_mass = torch.where(num_pos > 0, raw.new_tensor(1.0) - pos_mass, raw.new_tensor(1.0))
+        weights = (
+            pos.to(raw.dtype) * pos_mass / num_pos.clamp_min(1.0)
+            + neg.to(raw.dtype) * neg_mass / num_neg.clamp_min(1.0)
+        )
+        return (raw * weights).sum(), {"empty_positive_patch_count": float((num_pos <= 0).detach().cpu())}
+
+    def _augment_contact_pair_inputs(
+        self,
+        tool_points: torch.Tensor,
+        object_points: torch.Tensor,
+        rel_tool_object_t: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Apply the paper's shared rigid/scale augmentation plus point noise."""
+
+        if not (self.training and self.contact_pair_augmentation):
+            return tool_points, object_points, rel_tool_object_t
+        batch = int(tool_points.shape[0])
+        dtype = tool_points.dtype
+        device = tool_points.device
+
+        rotation_low, rotation_high = self.contact_aug_rotation_range
+        angles = torch.empty(batch, 3, dtype=dtype, device=device).uniform_(
+            rotation_low, rotation_high
+        )
+        rotation = _euler_xyz_rotation_matrices(angles)
+        log_scale_low, log_scale_high = self.contact_aug_log_scale_range
+        scale = torch.empty(batch, 1, 1, dtype=dtype, device=device).uniform_(
+            log_scale_low, log_scale_high
+        ).exp()
+        translation_low, translation_high = self.contact_aug_translation_range
+        translation = torch.empty(
+            batch, 1, 3, dtype=dtype, device=device
+        ).uniform_(translation_low, translation_high)
+
+        tool_aug = (
+            torch.einsum("bij,bnj->bni", rotation, tool_points) * scale
+            + translation
+        )
+        object_aug = (
+            torch.einsum("bij,bnj->bni", rotation, object_points) * scale
+            + translation
+        )
+        rel_aug = (
+            torch.einsum("bij,bj->bi", rotation, rel_tool_object_t)
+            * scale.squeeze(-1)
+        )
+        if self.contact_aug_noise_std > 0.0:
+            tool_aug = tool_aug + torch.randn_like(tool_aug) * self.contact_aug_noise_std
+            object_aug = (
+                object_aug
+                + torch.randn_like(object_aug) * self.contact_aug_noise_std
+            )
+        return (
+            tool_aug.contiguous(),
+            object_aug.contiguous(),
+            rel_aug.contiguous(),
+        )
+
     # ── Forward (routes to loss for DDP) ──────────────────────────────────
 
     def forward(self, *args, **kwargs):
@@ -858,7 +1237,7 @@ class ContactDiffusionModel(nn.Module):
     def _pool_conditioned_tokens(self, fused_tokens: torch.Tensor) -> torch.Tensor:
         P = self.num_patches
         tool_cond = fused_tokens[:, :P, :]
-        obj_cond = fused_tokens[:, P:, :]
+        obj_cond = fused_tokens[:, P : 2 * P, :]
         return torch.cat((tool_cond.mean(dim=1), obj_cond.mean(dim=1)), dim=-1)
 
     def _signed_mesh_sdf_labels(
@@ -925,39 +1304,230 @@ class ContactDiffusionModel(nn.Module):
         object_bbox_center_E: torch.Tensor | None = None,
         tool_rotation_E_k: torch.Tensor | None = None,
         tool_translation_E_k: torch.Tensor | None = None,
+        tool_point_inside_object: torch.Tensor | None = None,
+        object_point_inside_tool: torch.Tensor | None = None,
+        tool_point_object_signed_sdf: torch.Tensor | None = None,
+        object_point_tool_signed_sdf: torch.Tensor | None = None,
+        kinematic_tool_clouds: torch.Tensor | None = None,
+        openness_delta: torch.Tensor | None = None,
         target_tool_denoise_pose9d_k: torch.Tensor | None = None,
         target_object_post_delta9d: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict]:
         B, T, N, _ = tool_points_E_k.shape
+        if self.kinematic_conditioning:
+            if T != 1:
+                raise ValueError(
+                    "Kinematic contact pretraining requires one contact state per sample"
+                )
+            if kinematic_tool_clouds is None or openness_delta is None:
+                raise ValueError(
+                    "Kinematic contact pretraining requires kinematic_tool_clouds "
+                    "and openness_delta"
+                )
+            if tuple(openness_delta.shape) != (B,):
+                raise ValueError(
+                    f"openness_delta must have shape ({B},), got "
+                    f"{tuple(openness_delta.shape)}"
+                )
+        elif kinematic_tool_clouds is not None or openness_delta is not None:
+            raise ValueError(
+                "Kinematic inputs were supplied to a standard contact model"
+            )
         device = tool_points_E_k.device
         K = max(T - 1, 0)
-        tool_flat = tool_points_E_k.reshape(B * T, N, 3)
-        obj_flat = object_points_E_k.reshape(B * T, N, 3)
+        encoder_tool_points_E_k = tool_points_E_k
+        encoder_object_points_E_k = object_points_E_k
+        if self.encoder_input_centering == "object_center":
+            if rel_tool_object_t_k is None:
+                raise ValueError("object_center encoder input requires rel_tool_object_t_k")
+            encoder_tool_points_E_k = tool_points_E_k + rel_tool_object_t_k.unsqueeze(-2)
+        tool_flat = encoder_tool_points_E_k.reshape(B * T, N, 3)
+        obj_flat = encoder_object_points_E_k.reshape(B * T, N, 3)
         rel_flat = rel_tool_object_t_k.reshape(B * T, 3)
+        if (
+            "contact" in self.enabled_heads
+            or (
+                "sdf" in self.enabled_heads
+                and self.contact_label_source == "precomputed_mesh_sdf"
+            )
+        ):
+            tool_flat, obj_flat, rel_flat = self._augment_contact_pair_inputs(
+                tool_flat, obj_flat, rel_flat
+            )
 
-        encoder_result = self.encoder.encode(tool_flat, obj_flat)
+        encoder_result = self.encoder.encode(
+            tool_flat,
+            obj_flat,
+            kinematic_tool_clouds=kinematic_tool_clouds,
+        )
         fused = encoder_result.fused_tokens
         metrics: dict[str, float] = {}
         total_loss = tool_flat.new_zeros(())
+
+        if "contact" in self.enabled_heads:
+            contact_slice = torch.arange(B * T, device=device).reshape(B, T)[:, 0]
+            P = self.num_patches
+            contact_fused = fused.index_select(0, contact_slice)
+            tool_contact_tok = contact_fused[:, :P, :]
+            obj_contact_tok = contact_fused[:, P : 2 * P, :]
+            if self.contact_label_source == "precomputed_convex_union":
+                if (
+                    tool_point_inside_object is None
+                    or object_point_inside_tool is None
+                ):
+                    raise ValueError(
+                        "precomputed_convex_union contact labels are required "
+                        "but missing from the candidate dataset"
+                    )
+                tool_contact_points = tool_point_inside_object.to(
+                    device=device, dtype=tool_flat.dtype
+                )
+                obj_contact_points = object_point_inside_tool.to(
+                    device=device, dtype=tool_flat.dtype
+                )
+            elif self.contact_label_source == "precomputed_mesh_sdf":
+                if (
+                    tool_point_object_signed_sdf is None
+                    or object_point_tool_signed_sdf is None
+                ):
+                    raise ValueError(
+                        "precomputed_mesh_sdf contact labels are required "
+                        "but missing from the candidate dataset"
+                    )
+                tool_contact_points = (
+                    tool_point_object_signed_sdf.to(device=device)
+                    <= self.contact_eps
+                ).to(tool_flat.dtype)
+                obj_contact_points = (
+                    object_point_tool_signed_sdf.to(device=device)
+                    <= self.contact_eps
+                ).to(tool_flat.dtype)
+            else:
+                tool_sdf_gt_full, obj_sdf_gt_full = self._signed_mesh_sdf_labels(
+                    tool_points_E_k=tool_points_E_k,
+                    object_points_E_k=object_points_E_k,
+                    object_mesh_vertices=object_mesh_vertices,
+                    object_mesh_faces=object_mesh_faces,
+                    tool_mesh_vertices=tool_mesh_vertices,
+                    tool_mesh_faces=tool_mesh_faces,
+                    object_rotation_E=object_rotation_E,
+                    object_bbox_center_E=object_bbox_center_E,
+                    tool_rotation_E_k=tool_rotation_E_k,
+                    tool_translation_E_k=tool_translation_E_k,
+                )
+                tool_contact_points = (
+                    tool_sdf_gt_full[:, 0, :] <= self.contact_eps
+                ).to(tool_flat.dtype)
+                obj_contact_points = (
+                    obj_sdf_gt_full[:, 0, :] <= self.contact_eps
+                ).to(tool_flat.dtype)
+            tool_patch_idx = encoder_result.tool_patch_idx.index_select(0, contact_slice)
+            obj_patch_idx = encoder_result.obj_patch_idx.index_select(0, contact_slice)
+            tool_contact_labels = self._patch_contact_labels(tool_contact_points, tool_patch_idx)
+            obj_contact_labels = self._patch_contact_labels(obj_contact_points, obj_patch_idx)
+            if self.contact_decoder_type == "paper_cmlp_cbn":
+                if self.kinematic_conditioning:
+                    delta_context = self.openness_delta_embed(
+                        openness_delta.unsqueeze(-1).to(tool_contact_tok)
+                    )
+                    tool_context = torch.cat(
+                        (obj_contact_tok.mean(dim=1), delta_context), dim=-1
+                    )
+                    object_context = torch.cat(
+                        (tool_contact_tok.mean(dim=1), delta_context), dim=-1
+                    )
+                else:
+                    tool_context = obj_contact_tok.mean(dim=1)
+                    object_context = tool_contact_tok.mean(dim=1)
+                tool_contact_logits = self.tool_contact_head(
+                    tool_contact_tok,
+                    tool_context,
+                )
+                obj_contact_logits = self.obj_contact_head(
+                    obj_contact_tok,
+                    object_context,
+                )
+            else:
+                tool_contact_logits = self.tool_contact_head(
+                    tool_contact_tok
+                ).squeeze(-1)
+                obj_contact_logits = self.obj_contact_head(
+                    obj_contact_tok
+                ).squeeze(-1)
+            tool_bce, tool_bce_meta = self._balanced_contact_bce(tool_contact_logits, tool_contact_labels)
+            obj_bce, obj_bce_meta = self._balanced_contact_bce(obj_contact_logits, obj_contact_labels)
+            contact_loss = tool_bce + obj_bce
+            total_loss = total_loss + self.loss_weights["contact"] * contact_loss
+
+            with torch.no_grad():
+                logits_all = torch.cat((tool_contact_logits, obj_contact_logits), dim=1)
+                labels_all = torch.cat((tool_contact_labels, obj_contact_labels), dim=1)
+                pred_all = logits_all.sigmoid() >= 0.5
+                true_all = labels_all >= 0.5
+                true_pos = (pred_all & true_all).sum().float()
+                pred_pos = pred_all.sum().float()
+                label_pos = true_all.sum().float()
+                total = true_all.numel()
+                metrics["contact_acc"] = float((pred_all == true_all).float().mean().detach().cpu())
+                metrics["contact_precision"] = float((true_pos / pred_pos.clamp_min(1.0)).detach().cpu())
+                metrics["contact_recall"] = float((true_pos / label_pos.clamp_min(1.0)).detach().cpu())
+                metrics["patch_pos_frac_A"] = float(tool_contact_labels.mean().detach().cpu())
+                metrics["patch_pos_frac_B"] = float(obj_contact_labels.mean().detach().cpu())
+                metrics["empty_positive_patch_count"] = (
+                    tool_bce_meta["empty_positive_patch_count"] + obj_bce_meta["empty_positive_patch_count"]
+                )
+                metrics["contact_positive_patches"] = float(label_pos.detach().cpu())
+                metrics["contact_total_patches"] = float(total)
+                if self.kinematic_conditioning:
+                    metrics["openness_delta_mean"] = float(
+                        openness_delta.mean().detach().cpu()
+                    )
+                    metrics["openness_delta_abs_mean"] = float(
+                        openness_delta.abs().mean().detach().cpu()
+                    )
+            metrics["bce_A"] = float(tool_bce.detach().cpu())
+            metrics["bce_B"] = float(obj_bce.detach().cpu())
+            metrics["contact_loss"] = float(contact_loss.detach().cpu())
 
         if "sdf" in self.enabled_heads:
             zero_cond = torch.zeros(B * T, self.movement_cond_dim, device=device, dtype=tool_flat.dtype)
             fused_sdf = self.pose_cross_attn(fused, rel_flat, zero_cond)
             P = self.num_patches
             tool_tok_cond = fused_sdf[:, :P, :]
-            obj_tok_cond = fused_sdf[:, P:, :]
-            tool_sdf_gt_full, obj_sdf_gt_full = self._signed_mesh_sdf_labels(
-                tool_points_E_k=tool_points_E_k,
-                object_points_E_k=object_points_E_k,
-                object_mesh_vertices=object_mesh_vertices,
-                object_mesh_faces=object_mesh_faces,
-                tool_mesh_vertices=tool_mesh_vertices,
-                tool_mesh_faces=tool_mesh_faces,
-                object_rotation_E=object_rotation_E,
-                object_bbox_center_E=object_bbox_center_E,
-                tool_rotation_E_k=tool_rotation_E_k,
-                tool_translation_E_k=tool_translation_E_k,
-            )
+            obj_tok_cond = fused_sdf[:, P : 2 * P, :]
+            if self.contact_label_source == "precomputed_mesh_sdf":
+                if T != 1:
+                    raise ValueError(
+                        "Precomputed SDF regression requires exactly one "
+                        "contact state per sample"
+                    )
+                if (
+                    tool_point_object_signed_sdf is None
+                    or object_point_tool_signed_sdf is None
+                ):
+                    raise ValueError(
+                        "Precomputed SDF regression requires mutual signed "
+                        "distance arrays in every candidate"
+                    )
+                tool_sdf_gt_full = tool_point_object_signed_sdf.to(
+                    device=device, dtype=tool_flat.dtype
+                ).unsqueeze(1)
+                obj_sdf_gt_full = object_point_tool_signed_sdf.to(
+                    device=device, dtype=tool_flat.dtype
+                ).unsqueeze(1)
+            else:
+                tool_sdf_gt_full, obj_sdf_gt_full = self._signed_mesh_sdf_labels(
+                    tool_points_E_k=tool_points_E_k,
+                    object_points_E_k=object_points_E_k,
+                    object_mesh_vertices=object_mesh_vertices,
+                    object_mesh_faces=object_mesh_faces,
+                    tool_mesh_vertices=tool_mesh_vertices,
+                    tool_mesh_faces=tool_mesh_faces,
+                    object_rotation_E=object_rotation_E,
+                    object_bbox_center_E=object_bbox_center_E,
+                    tool_rotation_E_k=tool_rotation_E_k,
+                    tool_translation_E_k=tool_translation_E_k,
+                )
             tool_sdf_gt = tool_sdf_gt_full.reshape(B * T, N)
             obj_sdf_gt = obj_sdf_gt_full.reshape(B * T, N)
 
@@ -1081,6 +1651,12 @@ class ContactDiffusionModel(nn.Module):
         object_bbox_center_E: torch.Tensor | None = None,
         tool_rotation_E_k: torch.Tensor | None = None,
         tool_translation_E_k: torch.Tensor | None = None,
+        tool_point_inside_object: torch.Tensor | None = None,
+        object_point_inside_tool: torch.Tensor | None = None,
+        tool_point_object_signed_sdf: torch.Tensor | None = None,
+        object_point_tool_signed_sdf: torch.Tensor | None = None,
+        kinematic_tool_clouds: torch.Tensor | None = None,
+        openness_delta: torch.Tensor | None = None,
         target_tool_denoise_pose9d_k: torch.Tensor | None = None,
         target_object_post_delta9d: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict]:
@@ -1101,6 +1677,12 @@ class ContactDiffusionModel(nn.Module):
                 object_bbox_center_E=object_bbox_center_E,
                 tool_rotation_E_k=tool_rotation_E_k,
                 tool_translation_E_k=tool_translation_E_k,
+                tool_point_inside_object=tool_point_inside_object,
+                object_point_inside_tool=object_point_inside_tool,
+                tool_point_object_signed_sdf=tool_point_object_signed_sdf,
+                object_point_tool_signed_sdf=object_point_tool_signed_sdf,
+                kinematic_tool_clouds=kinematic_tool_clouds,
+                openness_delta=openness_delta,
                 target_tool_denoise_pose9d_k=target_tool_denoise_pose9d_k,
                 target_object_post_delta9d=target_object_post_delta9d,
             )

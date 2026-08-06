@@ -8,7 +8,6 @@
 # Core (always needed)
 from .actor_critic import ActorCritic
 from .actor_critic_recurrent import ActorCriticRecurrent
-from .actor_critic_tool_unicorn import ActorCriticToolUnicorn
 from .normalizer import EmpiricalNormalization
 from .student_teacher import StudentTeacher
 from .student_teacher_recurrent import StudentTeacherRecurrent
@@ -30,10 +29,14 @@ def _try_import(module_attr, from_module, names):
 
 _optional = {}
 _optional.update(_try_import(globals(), "actor_critic_tg", ["ActorCriticTG"]))
+_optional.update(_try_import(globals(), "actor_critic_tg_output_gate", ["ActorCriticTGOutputGate"]))
+_optional.update(_try_import(globals(), "actor_critic_tg_sm", ["ActorCriticTGSM"]))
+_optional.update(_try_import(globals(), "actor_critic_tg_hamnet", ["ActorCriticTGHAMNet"]))
 _optional.update(_try_import(globals(), "actor_critic_tg_unicorn", ["ActorCriticTGUnicorn"]))
 _optional.update(_try_import(globals(), "actor_critic_tg_bimanual", ["ActorCriticTGBimanual"]))
 _optional.update(_try_import(globals(), "actor_critic_point2vec", ["ActorCriticPoint2Vec"]))
 _optional.update(_try_import(globals(), "actor_critic_icp", ["ActorCriticICP"]))
+_optional.update(_try_import(globals(), "actor_critic_tool_unicorn", ["ActorCriticToolUnicorn"]))
 _optional.update(_try_import(globals(), "rnd", ["RandomNetworkDistillation"]))
 
 # Inject into module namespace for existing import consumers.
@@ -41,14 +44,21 @@ globals().update({k: v for k, v in _optional.items() if v is not None})
 
 # Convenience aliases
 ActorCriticTG = _optional.get("ActorCriticTG")
+ActorCriticTGOutputGate = _optional.get("ActorCriticTGOutputGate")
+ActorCriticTGSM = _optional.get("ActorCriticTGSM")
+ActorCriticTGHAMNet = _optional.get("ActorCriticTGHAMNet")
 ActorCriticTGUnicorn = _optional.get("ActorCriticTGUnicorn")
 ActorCriticTGBimanual = _optional.get("ActorCriticTGBimanual")
 ActorCriticPoint2Vec = _optional.get("ActorCriticPoint2Vec")
 ActorCriticICP = _optional.get("ActorCriticICP")
+ActorCriticToolUnicorn = _optional.get("ActorCriticToolUnicorn")
 RandomNetworkDistillation = _optional.get("RandomNetworkDistillation")
 
 POLICY_REGISTRY = {
     "ActorCriticTG": ActorCriticTG,
+    "ActorCriticTGOutputGate": ActorCriticTGOutputGate,
+    "ActorCriticTGSM": ActorCriticTGSM,
+    "ActorCriticTGHAMNet": ActorCriticTGHAMNet,
     "ActorCriticTGUnicorn": ActorCriticTGUnicorn,
     "ActorCriticTGBimanual": ActorCriticTGBimanual,
     "ActorCriticPoint2Vec": ActorCriticPoint2Vec,
@@ -79,6 +89,9 @@ __all__ = [
     "ActorCriticRecurrent",
     "ActorCriticToolUnicorn",
     "ActorCriticTG",
+    "ActorCriticTGOutputGate",
+    "ActorCriticTGSM",
+    "ActorCriticTGHAMNet",
     "ActorCriticTGUnicorn",
     "ActorCriticTGBimanual",
     "EmpiricalNormalization",

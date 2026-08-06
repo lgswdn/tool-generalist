@@ -101,6 +101,20 @@ def validate_full_config(
         )
     )
     errors.extend(validate_object_tool_manifests_non_empty(cfg, paths, strict_paths=strict_paths))
+    errors.extend(
+        validate_generated_gripper_manifest_root(
+            cfg,
+            paths,
+            strict_paths=strict_paths,
+        )
+    )
+    errors.extend(
+        validate_one_dof_gripper_runtime_assets(
+            cfg,
+            paths,
+            strict_paths=strict_paths,
+        )
+    )
     errors.extend(validate_model_general_num_points_match(cfg))
     errors.extend(
         validate_encoder_checkpoint_path_and_declared_dims(
@@ -129,7 +143,25 @@ def _required_plan_path_keys(cfg: ExpCfg) -> tuple[str, ...]:
         keys.append("objects.candidates_json")
         if cfg.contact_gen.tool_source == TOOL_SOURCE_OBJECTS:
             keys.append("objects.obj_dir")
-        if cfg.rl.enabled or cfg.contact_gen.tool_source == TOOL_SOURCE_SELECTED_TOOLS:
+        if cfg.rl.enabled and cfg.rl.env.robot_mode in {
+            "generated_gripper",
+            "cross_embodiment_gripper",
+        }:
+            keys.extend(
+                (
+                    "generated_grippers.root",
+                    "generated_grippers.manifest",
+                )
+            )
+        if cfg.rl.enabled and cfg.rl.env.robot_mode in {
+            "one_dof_gripper",
+            "cross_embodiment_gripper",
+        }:
+            keys.extend(("one_dof_grippers.root", "one_dof_grippers.manifest"))
+        if (
+            (cfg.rl.enabled and cfg.rl.env.robot_mode == "tool")
+            or cfg.contact_gen.tool_source == TOOL_SOURCE_SELECTED_TOOLS
+        ):
             keys.extend(
                 [
                     "tools.tools_selected_json",
@@ -160,23 +192,44 @@ def validate_object_tool_manifests_non_empty(
     strict_paths: bool = True,
 ) -> list[str]:
     errors: list[str] = []
+    contact_paths = apply_experiment_path_overrides(cfg, paths, stage="contact_gen")
+    rl_paths = apply_experiment_path_overrides(cfg, paths, stage="rl")
     require_selected_tools = (
-        cfg.rl.enabled
+        (cfg.rl.enabled and cfg.rl.env.robot_mode == "tool")
         or (contact_stage_required(cfg) and cfg.contact_gen.tool_source == TOOL_SOURCE_SELECTED_TOOLS)
     )
-    if contact_stage_required(cfg) or cfg.rl.enabled:
-        _require_json_non_empty(errors, paths, "objects.candidates_json", strict_paths)
+    if contact_stage_required(cfg):
+        _require_json_non_empty(errors, contact_paths, "objects.candidates_json", strict_paths)
+    if cfg.rl.enabled:
+        _require_json_non_empty(errors, rl_paths, "objects.candidates_json", strict_paths)
+    if cfg.rl.enabled and cfg.rl.env.robot_mode in {
+        "generated_gripper",
+        "cross_embodiment_gripper",
+    }:
+        _require_json_non_empty(errors, rl_paths, "generated_grippers.manifest", strict_paths)
+    if cfg.rl.enabled and cfg.rl.env.robot_mode in {
+        "one_dof_gripper",
+        "cross_embodiment_gripper",
+    }:
+        _require_json_non_empty(errors, rl_paths, "one_dof_grippers.manifest", strict_paths)
     if require_selected_tools:
-        _require_json_non_empty(errors, paths, "tools.tools_selected_json", strict_paths)
-        _require_json_non_empty(errors, paths, "tools.tools_adjusted_json", strict_paths)
-        _require_path(errors, paths, "tools.meshdata_adjusted_root", strict_paths)
+        _require_json_non_empty(errors, contact_paths, "tools.tools_selected_json", strict_paths)
+        _require_json_non_empty(errors, contact_paths, "tools.tools_adjusted_json", strict_paths)
+        _require_path(errors, contact_paths, "tools.meshdata_adjusted_root", strict_paths)
     if contact_stage_required(cfg) and cfg.contact_gen.tool_source == TOOL_SOURCE_OBJECTS:
-        _require_path(errors, paths, "objects.obj_dir", strict_paths)
-    if cfg.general.objects_manifest:
+        _require_path(errors, contact_paths, "objects.obj_dir", strict_paths)
+    for field_name in (
+        "contact_objects_manifest",
+        "rl_objects_manifest",
+        "objects_manifest",
+    ):
+        value = getattr(cfg.general, field_name)
+        if not value:
+            continue
         _require_existing_json_non_empty(
             errors,
-            Path(cfg.general.objects_manifest),
-            "GeneralCfg.objects_manifest",
+            _resolve_config_path(value, paths.source_yaml.parent),
+            f"GeneralCfg.{field_name}",
             strict_paths,
         )
     if cfg.contact_gen.object_tool_manifest:
@@ -200,6 +253,189 @@ def validate_object_tool_manifests_non_empty(
             "GeneralCfg.tools_manifest",
             strict_paths,
         )
+    return errors
+
+
+def validate_generated_gripper_manifest_root(
+    cfg: ExpCfg,
+    paths: ProjectPaths,
+    *,
+    strict_paths: bool = True,
+) -> list[str]:
+    """Reject manifests whose entries escape the configured gripper root.
+
+    A manifest is a mutable indirection: its file can live under the original
+    gripper directory while every entry points at a different generated set.
+    Checking both ``generated_root`` and each explicit ``root_dir`` prevents a
+    paths YAML from silently selecting the wrong gripper population.
+    """
+
+    if not (
+        cfg.rl.enabled
+        and cfg.rl.env.robot_mode
+        in {"generated_gripper", "cross_embodiment_gripper"}
+    ):
+        return []
+
+    errors: list[str] = []
+    root = _require_path(errors, paths, "generated_grippers.root", strict_paths)
+    manifest = _require_path(errors, paths, "generated_grippers.manifest", strict_paths)
+    cache_dir = _require_path(
+        errors, paths, "generated_grippers.cloud_cache_dir", strict_paths
+    )
+    if (
+        not strict_paths
+        or root is None
+        or manifest is None
+        or cache_dir is None
+    ):
+        return errors
+
+    payload = _read_json(errors, manifest, "generated_grippers.manifest")
+    if not isinstance(payload, Mapping):
+        return errors
+
+    expected_root = root.resolve()
+
+    def _under_expected_root(value: Any) -> bool:
+        if not isinstance(value, str) or not value.strip():
+            return False
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            candidate = manifest.parent / candidate
+        try:
+            candidate.resolve().relative_to(expected_root)
+        except ValueError:
+            return False
+        return True
+
+    generated_root = payload.get("generated_root")
+    if not _under_expected_root(generated_root):
+        errors.append(
+            "generated_grippers.manifest generated_root must be inside "
+            f"generated_grippers.root ({expected_root}), got {generated_root!r}"
+        )
+
+    entries = payload.get("grippers")
+    if isinstance(entries, list):
+        for index, entry in enumerate(entries):
+            entry_root = entry.get("root_dir") if isinstance(entry, Mapping) else None
+            if not _under_expected_root(entry_root):
+                errors.append(
+                    "generated_grippers.manifest entry "
+                    f"{index} root_dir must be inside generated_grippers.root "
+                    f"({expected_root}), got {entry_root!r}"
+                )
+                break
+            gripper_id = entry.get("id")
+            cache_path = (
+                cache_dir / f"{gripper_id}.pt"
+                if isinstance(gripper_id, str)
+                else None
+            )
+            if cache_path is None or not cache_path.is_file():
+                errors.append(
+                    f"Generated gripper {gripper_id!r} canonical 128-bin "
+                    f"cloud cache does not exist: {cache_path}. Run `python "
+                    "scripts/build_gripper_cloud_cache.py "
+                    f"--generated-manifest {manifest} --output-dir {cache_dir}`."
+                )
+                break
+    return errors
+
+
+def validate_one_dof_gripper_runtime_assets(
+    cfg: ExpCfg,
+    paths: ProjectPaths,
+    *,
+    strict_paths: bool = True,
+) -> list[str]:
+    """Fail before expensive stages when one-DoF RL assets are incomplete."""
+
+    if not (
+        cfg.rl.enabled
+        and cfg.rl.env.robot_mode
+        in {"one_dof_gripper", "cross_embodiment_gripper"}
+    ):
+        return []
+    rl_paths = apply_experiment_path_overrides(cfg, paths, stage="rl")
+    errors: list[str] = []
+    root = _require_path(
+        errors, rl_paths, "one_dof_grippers.root", strict_paths
+    )
+    manifest = _require_path(
+        errors, rl_paths, "one_dof_grippers.manifest", strict_paths
+    )
+    if not strict_paths or root is None or manifest is None:
+        return errors
+    payload = _read_json(errors, manifest, "one_dof_grippers.manifest")
+    entries = payload.get("grippers") if isinstance(payload, Mapping) else None
+    if not isinstance(entries, list) or not entries:
+        errors.append(
+            "one_dof_grippers.manifest must contain a non-empty grippers list"
+        )
+        return errors
+
+    expected_root = root.resolve()
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, Mapping):
+            errors.append(
+                f"one_dof_grippers.manifest entry {index} must be an object"
+            )
+            break
+        gripper_id = entry.get("id")
+        root_value = entry.get("root_dir")
+        if not isinstance(gripper_id, str) or not isinstance(root_value, str):
+            errors.append(
+                f"one_dof_grippers.manifest entry {index} lacks id/root_dir"
+            )
+            break
+        asset_root = Path(root_value).expanduser()
+        if not asset_root.is_absolute():
+            asset_root = manifest.parent / asset_root
+        asset_root = asset_root.resolve()
+        try:
+            asset_root.relative_to(expected_root)
+        except ValueError:
+            errors.append(
+                f"One-DoF gripper {gripper_id!r} escapes configured root "
+                f"{expected_root}: {asset_root}"
+            )
+            break
+        for field, label in (("urdf_path", "URDF"), ("usd_path", "USD")):
+            value = entry.get(field)
+            asset_path = (
+                asset_root / value
+                if isinstance(value, str) and not Path(value).is_absolute()
+                else Path(value).expanduser()
+                if isinstance(value, str)
+                else None
+            )
+            if asset_path is None or not asset_path.resolve().is_file():
+                hint = (
+                    f" Run `python scripts/convert_one_dof_gripper.py "
+                    f"--manifest {manifest} --headless`."
+                    if field == "usd_path"
+                    else ""
+                )
+                errors.append(
+                    f"One-DoF gripper {gripper_id!r} {label} does not exist: "
+                    f"{asset_path}.{hint}"
+                )
+                return errors
+        cache_path = (
+            manifest.parent
+            / "kinematic_cloud_cache"
+            / f"{gripper_id}.pt"
+        )
+        if not cache_path.is_file():
+            errors.append(
+                f"One-DoF gripper {gripper_id!r} canonical cloud cache does "
+                f"not exist: {cache_path}. Run `python "
+                f"scripts/build_gripper_cloud_cache.py --manifest "
+                f"{manifest}`."
+            )
+            return errors
     return errors
 
 
@@ -244,6 +480,12 @@ def validate_encoder_checkpoint_path_and_declared_dims(
     ]
     if cfg.rl.enabled:
         checkpoint_specs.append(("RLCfg.encoder_checkpoint", cfg.rl.encoder_checkpoint))
+        checkpoint_specs.append(("RLCfg.init_checkpoint", cfg.rl.init_checkpoint))
+        checkpoint_specs.append(("RLCfg.resume_checkpoint", cfg.rl.resume_checkpoint))
+        if cfg.rl.init_checkpoint and cfg.rl.resume_checkpoint:
+            errors.append(
+                "RLCfg.init_checkpoint and RLCfg.resume_checkpoint are mutually exclusive"
+            )
     for field_name, value in checkpoint_specs:
         if not value:
             continue

@@ -34,8 +34,6 @@ from isaaclab_tasks.manager_based.manipulation.cabinet.cabinet_env_cfg import FR
 import IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.mdp as mdp
 from IsaacLab_nonPrehensile.robots.franka import build_multi_tool_robot_cfg
 from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.asset_assignment import (
-    TOOL_ASSIGNMENT_SALT,
-    asset_indices_for_rank,
     sequential_spawn_indices_for_rank,
 )
 from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
@@ -85,30 +83,11 @@ ROBOT2_BASE_POS = (0.0, _BIMANUAL_BASE_HALF_SPACING_Y, 0.0)
 ROBOT2_BASE_ROT = (1.0, 0.0, 0.0, 0.0)
 
 
-def _offset_indices(indices: list[int], num_assets: int, offset: int) -> list[int]:
-    return [int((idx + offset) % num_assets) for idx in indices]
-
-
 TOOL1_ASSET_INDICES_BY_ENV = list(TOOL_ASSET_INDICES_BY_ENV)
 TOOL1_USD_PATHS_FOR_SPAWN = list(TOOL_USD_PATHS_FOR_SPAWN)
-TOOL2_ASSET_INDICES_BY_ENV = asset_indices_for_rank(
-    _NUM_ENVS_PER_RANK,
-    _GLOBAL_RANK,
-    len(TOOL_DATA),
-    randomize=_RANDOMIZE_TOOL_ASSIGNMENT,
-    seed=_ASSET_ASSIGNMENT_SEED,
-    salt=TOOL_ASSIGNMENT_SALT + 101,
-) if _RANDOMIZE_TOOL_ASSIGNMENT else _offset_indices(TOOL1_ASSET_INDICES_BY_ENV, len(TOOL_DATA), 1)
-TOOL2_SPAWN_ASSET_INDICES = (
-    TOOL2_ASSET_INDICES_BY_ENV
-    if _RANDOMIZE_TOOL_ASSIGNMENT
-    else _offset_indices(
-        sequential_spawn_indices_for_rank(_NUM_ENVS_PER_RANK, _GLOBAL_RANK, len(TOOL_DATA)),
-        len(TOOL_DATA),
-        1,
-    )
-)
-TOOL2_USD_PATHS_FOR_SPAWN = [TOOL_USD_PATHS[index] for index in TOOL2_SPAWN_ASSET_INDICES]
+TOOL2_ASSET_INDICES_BY_ENV = list(TOOL1_ASSET_INDICES_BY_ENV)
+TOOL2_SPAWN_ASSET_INDICES = list(sequential_spawn_indices_for_rank(_NUM_ENVS_PER_RANK, _GLOBAL_RANK, len(TOOL_DATA)))
+TOOL2_USD_PATHS_FOR_SPAWN = list(TOOL1_USD_PATHS_FOR_SPAWN)
 
 print(
     f"[INFO] Bimanual tool assignment rank={_GLOBAL_RANK}/{_WORLD_SIZE} "
@@ -148,6 +127,17 @@ def _make_robot_cfg(
     base_rot: tuple[float, float, float, float],
 ) -> ArticulationCfg:
     robot_cfg = build_multi_tool_robot_cfg(usd_paths, random_choice=False)
+    robot_cfg.spawn.rigid_props.max_depenetration_velocity = _RL_CONTRACT.env.max_depenetration_velocity
+    robot_cfg.spawn.articulation_props.solver_position_iteration_count = (
+        _RL_CONTRACT.env.articulation_solver_position_iteration_count
+    )
+    robot_cfg.spawn.articulation_props.solver_velocity_iteration_count = (
+        _RL_CONTRACT.env.articulation_solver_velocity_iteration_count
+    )
+    robot_cfg.spawn.collision_props = sim_utils.CollisionPropertiesCfg(
+        contact_offset=_RL_CONTRACT.env.contact_offset,
+        rest_offset=_RL_CONTRACT.env.rest_offset,
+    )
     return robot_cfg.replace(
         prim_path=prim_path,
         init_state=ArticulationCfg.InitialStateCfg(
@@ -186,7 +176,10 @@ class BimanualUnstableSceneCfg(InteractiveSceneCfg):
             spawn=sim_utils.CuboidCfg(
                 size=tuple(_RL_CONTRACT.table.size_xyz),
                 rigid_props=RigidBodyPropertiesCfg(disable_gravity=True, kinematic_enabled=True),
-                collision_props=sim_utils.CollisionPropertiesCfg(),
+                collision_props=sim_utils.CollisionPropertiesCfg(
+                    contact_offset=_RL_CONTRACT.env.contact_offset,
+                    rest_offset=_RL_CONTRACT.env.rest_offset,
+                ),
                 physics_material=sim_utils.RigidBodyMaterialCfg(
                     static_friction=_RL_CONTRACT.table.material.static_friction,
                     dynamic_friction=_RL_CONTRACT.table.material.dynamic_friction,
@@ -202,12 +195,16 @@ class BimanualUnstableSceneCfg(InteractiveSceneCfg):
             assets_cfg=OBJECT_ASSET_CFGS_FOR_SPAWN,
             random_choice=False,
             rigid_props=RigidBodyPropertiesCfg(
-                solver_position_iteration_count=16,
-                solver_velocity_iteration_count=1,
+                solver_position_iteration_count=_RL_CONTRACT.env.object_solver_position_iteration_count,
+                solver_velocity_iteration_count=_RL_CONTRACT.env.object_solver_velocity_iteration_count,
                 max_angular_velocity=1000.0,
                 max_linear_velocity=1000.0,
-                max_depenetration_velocity=5.0,
+                max_depenetration_velocity=_RL_CONTRACT.env.max_depenetration_velocity,
                 disable_gravity=False,
+            ),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                contact_offset=_RL_CONTRACT.env.contact_offset,
+                rest_offset=_RL_CONTRACT.env.rest_offset,
             ),
         ),
     )
@@ -260,6 +257,13 @@ class CommandsCfg:
         debug_vis=True,
         xy_offset_range=_BIMANUAL_GOAL_XY_OFFSET_RANGE,
         initial_position_range=_RL_CONTRACT.object_pose_sampling.initial_position_range,
+        stable_pose_probability=(
+            _RL_CONTRACT.curriculum.start_stable_pose_probability
+            if _RL_CONTRACT.curriculum.enabled
+            else _RL_CONTRACT.curriculum.end_stable_pose_probability
+        ),
+        secondary_task=_RL_CONTRACT.object_pose_sampling.secondary_task,
+        grasp_lift_height=_RL_CONTRACT.object_pose_sampling.grasp_lift_height,
     )
 
 
@@ -381,6 +385,17 @@ class EventCfg:
             "asset_cfg": SceneEntityCfg("object"),
         },
     ) if _dr_event_enabled(_RL_CONTRACT.domain_randomization.object.scale) else None
+
+    preload_object_pointclouds = EventTerm(
+        func=mdp.preload_object_pointclouds,
+        mode="prestartup",
+        params={
+            "object_cloud_source": _RL_CONTRACT.observation.object_cloud_source,
+            "preprocessed_dir": _RL_CONTRACT.observation.object_cloud_preprocessed_dir,
+            "num_points": _RL_CONTRACT.observation.num_points,
+            "asset_cfg": SceneEntityCfg("object"),
+        },
+    ) if _RL_CONTRACT.observation.include_object_cloud else None
 
     randomize_tool1_mass = EventTerm(
         func=mdp.randomize_tool_mass,
@@ -659,6 +674,7 @@ class BimanualUnstableEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.render_interval = self.decimation
         self.sim.physx.solver_position_iteration_count = _RL_CONTRACT.env.solver_position_iteration_count
         self.sim.physx.solver_velocity_iteration_count = _RL_CONTRACT.env.solver_velocity_iteration_count
+        self.sim.physx.enable_ccd = _RL_CONTRACT.env.enable_ccd
 
 
 class BimanualUnstableEnv(ManagerBasedRLEnv):
@@ -690,6 +706,16 @@ class BimanualUnstableEnv(ManagerBasedRLEnv):
             limits[:, joint_ids, 0] = mins
             limits[:, joint_ids, 1] = maxs
             robot.data.soft_joint_pos_limits[:] = limits
+
+    def _reset_idx(self, env_ids):
+        """Reset environments and refresh their shared physics observation."""
+
+        super()._reset_idx(env_ids)
+        mdp.refresh_phys_params_cache(
+            self,
+            env_ids=env_ids,
+            hand_cfg=SceneEntityCfg("robot_1"),
+        )
 
     def step(self, action):
         obs, reward, terminated, truncated, info = super().step(action)

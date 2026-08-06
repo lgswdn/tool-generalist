@@ -28,13 +28,27 @@ This repository is an Isaac Lab implementation and adaptation of [CORN](https://
 
 ## Repository Structure
 
-- `scripts/`: Training, evaluation, play, and shared CLI args
+- `run.bash`, `eval.bash`, `record.bash`, `visualize.bash`: Stable top-level
+  entrypoints for experiment execution, evaluation, recording, and visualization
+- `scripts/`: Project workflows, utilities, evaluation, and visualization tools
+  - `scripts/stereovla/`: StereoVLA server and GraspSim evaluation launchers
+  - `scripts/debug/`: DGN and GraspGen diagnostics outside the main runtime
+  - `scripts/visualization/`: DGN, gripper, and offline OBJ visualization tools
   - `train.py`: Internal RL runtime-spec writer used by `run_experiment.py`
   - `eval.py`: Evaluation entrypoint (reports success rate and per-object stats)
   - `play.py`: Playback and export to JIT/ONNX
   - `cli_args.py`: Common RSL-RL CLI arguments
+- `configs/paths/`: Default, machine-specific, and asset-family path configurations
+- `thirdparty/`: Ignored external source repositories and vendored dependencies
+  - `GOMP/`, `Soft-Module/`, `HAMNet/`: External manipulation/model repositories
+  - `StereoVLA/`, `graspsim-eval-stereovla/`: VLA serving and GraspSim evaluation
+  - `rpdiff/`: Vendored RPDiff source and robot descriptions
+- `stereo/`: Local Conda environment for StereoVLA; kept at a stable prefix and
+  excluded from Git
 - `rsl_rl/`: RSL-RL components/utilities (aligned with Isaac Lab ecosystem)
 - `source/IsaacLab_nonPrehensile/IsaacLab_nonPrehensile/`: Python package (task registration, env definition, etc.)
+- `tests/`: Canonical pytest suite and test fixtures
+- `artifacts/analysis/`: Generated analysis reports and large per-case outputs
 - `logs/`: Training/eval logs, videos, and exported models
 - `outputs/`: Optional script outputs
 

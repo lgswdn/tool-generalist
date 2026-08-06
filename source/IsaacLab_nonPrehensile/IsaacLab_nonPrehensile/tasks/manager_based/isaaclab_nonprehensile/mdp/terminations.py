@@ -18,6 +18,7 @@ from isaaclab.assets import RigidObject
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils.math import combine_frame_transforms
 from .rewards_bimanual import bimanual_link_min_distance
+from .step_cache import object_pose_success_mask
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -44,39 +45,15 @@ def object_reached_goal(
         planar: If True, only consider x,y coordinates for position distance (ignore z). Defaults to False.
 
     """
-    # extract the used quantities (to enable type-hinting)
-    robot: RigidObject = env.scene[robot_cfg.name]
     object: RigidObject = env.scene[object_cfg.name]
-    command = env.command_manager.get_command(command_name)
-    
-    # command contains 7D pose: [x, y, z, qw, qx, qy, qz] in environment coordinates
-    des_pos_env = command[:, :3]  # target position in environment coordinates
-    des_rot_env = command[:, 3:7]  # target orientation (quaternion) in environment coordinates
-    
-    # get current object position in environment coordinates
-    object_pos_w = object.data.root_pos_w[:, :3]  # world coordinates
-    object_pos_env = object_pos_w - env.scene.env_origins  # convert to environment coordinates
-    
-    # get current object orientation
-    object_quat_w = object.data.root_quat_w  # (num_envs, 4) [w, x, y, z]
-
-    # calculate position distance (only consider x,y if planar=True)
-    if planar:
-        position_distance = torch.norm(des_pos_env[:, :2] - object_pos_env[:, :2], dim=1)
-        return position_distance < threshold
-       
-    position_distance = torch.norm(des_pos_env - object_pos_env, dim=1)
-    
-    # Calculate angular distance between quaternions
-    dot_product = torch.sum(object_quat_w * des_rot_env, dim=1)  # (num_envs,)
-    dot_product = torch.clamp(torch.abs(dot_product), max=1.0)  # Clamp to avoid numerical errors
-    angular_distance = 2 * torch.acos(dot_product)  # Angular distance in radians
-    
-    # terminate if both position and orientation are within thresholds
-    position_reached = position_distance < threshold
-    rotation_reached = angular_distance < rotation_threshold
-
-    return position_reached & rotation_reached
+    return object_pose_success_mask(
+        env,
+        object,
+        command_name=command_name,
+        threshold=threshold,
+        rotation_threshold=rotation_threshold,
+        planar=planar,
+    )
 
 
 def object_reached_goal_dwell(
@@ -90,21 +67,12 @@ def object_reached_goal_dwell(
     """Terminate when the object stays inside the target-pose window for N steps."""
 
     object: RigidObject = env.scene[object_cfg.name]
-    command = env.command_manager.get_command(command_name)
-
-    des_pos_env = command[:, :3]
-    des_rot_env = command[:, 3:7]
-    object_pos_env = object.data.root_pos_w[:, :3] - env.scene.env_origins
-    object_quat_w = object.data.root_quat_w
-
-    position_distance = torch.norm(des_pos_env - object_pos_env, dim=1)
-    dot_product = torch.sum(object_quat_w * des_rot_env, dim=1)
-    dot_product = torch.clamp(torch.abs(dot_product), max=1.0)
-    angular_distance = 2.0 * torch.acos(dot_product)
-
-    success_now = (
-        (position_distance < threshold)
-        & (angular_distance < rotation_threshold)
+    success_now = object_pose_success_mask(
+        env,
+        object,
+        command_name=command_name,
+        threshold=threshold,
+        rotation_threshold=rotation_threshold,
     )
     if dwell_steps <= 1:
         return success_now

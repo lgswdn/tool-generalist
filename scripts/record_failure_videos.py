@@ -26,6 +26,11 @@ from utils.experiment.rl_runtime_spec import RUNTIME_SPEC_ENV_VAR, validate_runt
 
 
 FFMPEG_PATH = "/usr/bin/ffmpeg"
+PANDA_GRIPPER_RECORD_CAMERA_EYE = (1.5, 0.5, 0.7)
+PANDA_GRIPPER_RECORD_CAMERA_LOOKAT = (0.4, 0.0, 0.1)
+PANDA_GRIPPER_RECORD_CAMERA_ROT_ROS = (-0.2853, 0.4601, 0.7146, -0.4430)
+PANDA_GRIPPER_RECORD_RESOLUTION = (1280, 720)
+DEFAULT_TOOL_RECORD_RESOLUTION = (512, 512)
 
 
 def _distributed_rank_info(distributed: bool) -> tuple[int, int]:
@@ -67,6 +72,10 @@ def _resolve_checkpoint_arg(runtime_spec_path: str, checkpoint: str | None) -> s
         return checkpoint
 
     spec_dir = Path(runtime_spec_path).parent
+    best_path = spec_dir / "model_best.pt"
+    if best_path.is_file():
+        return str(best_path)
+
     candidates = []
     for path in spec_dir.glob("model_*.pt"):
         match = re.fullmatch(r"model_(\d+)\.pt", path.name)
@@ -81,7 +90,7 @@ def _resolve_checkpoint_arg(runtime_spec_path: str, checkpoint: str | None) -> s
             return str(path)
 
     raise FileNotFoundError(
-        f"--checkpoint was not provided and no model_*.pt/model.pt/best.pt was found in {spec_dir}"
+        f"--checkpoint was not provided and no model_best.pt/model_*.pt/model.pt/best.pt was found in {spec_dir}"
     )
 
 
@@ -95,11 +104,20 @@ def _latest_runtime_spec_for_config(config: str) -> str:
     if run_root.is_dir():
         for path in run_root.iterdir():
             spec_path = path / "rl_runtime_spec.json"
-            if path.is_dir() and spec_path.is_file():
+            manifest_path = path / "manifest.json"
+            if not path.is_dir() or not spec_path.is_file() or not manifest_path.is_file():
+                continue
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, TypeError, ValueError):
+                continue
+            if manifest.get("config_hash") == rl_refs[0].config_hash:
                 candidates.append((path.stat().st_mtime, path.name, spec_path))
     if not candidates:
         raise FileNotFoundError(
-            f"No rl_runtime_spec.json found under latest-run root for config {config}: {run_root}"
+            "No rl_runtime_spec.json matching the current RL asset/config hash "
+            f"was found for {config}: {run_root}. Train the current config first, "
+            "or pass an older artifact's manifest/runtime spec explicitly."
         )
     return str(max(candidates, key=lambda item: (item[0], item[1]))[2])
 
@@ -125,7 +143,7 @@ parser.add_argument(
     "--checkpoint",
     type=str,
     default=None,
-    help="Path to the RSL-RL checkpoint. Defaults to the latest model_*.pt beside the runtime spec.",
+    help="Path to the RSL-RL checkpoint. Defaults to model_best.pt beside the runtime spec.",
 )
 parser.add_argument("--task", type=str, default=None, help="Name of the task. Defaults to runtime_spec['task_id'].")
 parser.add_argument("--num_envs", type=int, default=64, help="Number of environments to simulate per rank.")
@@ -157,8 +175,18 @@ parser.add_argument(
         "after this many policy steps. Incomplete temporary videos from the previous env are discarded."
     ),
 )
-parser.add_argument("--video_width", type=int, default=512, help="Per-env tiled-camera video width.")
-parser.add_argument("--video_height", type=int, default=512, help="Per-env tiled-camera video height.")
+parser.add_argument(
+    "--video_width",
+    type=int,
+    default=None,
+    help="Video width. Defaults to 1280 for official Panda gripper and 512 for welded-tool recording.",
+)
+parser.add_argument(
+    "--video_height",
+    type=int,
+    default=None,
+    help="Video height. Defaults to 720 for official Panda gripper and 512 for welded-tool recording.",
+)
 parser.add_argument("--video_fps", type=int, default=10, help="Output video frames per second.")
 parser.add_argument(
     "--video_max_active_episodes",
@@ -198,10 +226,6 @@ if args_cli.object_random_seed is not None and args_cli.object_random_seed < 0:
     parser.error("--object_random_seed must be >= 0")
 if args_cli.object_rerandomize_interval_steps < 0:
     parser.error("--object_rerandomize_interval_steps must be >= 0")
-if args_cli.video_width <= 0:
-    parser.error("--video_width must be positive")
-if args_cli.video_height <= 0:
-    parser.error("--video_height must be positive")
 if args_cli.video_fps <= 0:
     parser.error("--video_fps must be positive")
 if args_cli.video_max_active_episodes <= 0:
@@ -212,9 +236,37 @@ runtime_spec_path = os.path.abspath(os.path.normpath(runtime_spec_source))
 with open(runtime_spec_path, "r", encoding="utf-8") as f:
     runtime_spec = json.load(f)
 
-runtime_robot_mode = str(runtime_spec.get("env_params", {}).get("robot_mode", "tool"))
-if runtime_robot_mode != "tool":
-    parser.error("record_failure_videos.py requires runtime_spec env_params.robot_mode='tool'")
+requested_runtime_robot_mode = str(
+    runtime_spec.get("env_params", {}).get("robot_mode", "tool")
+)
+if requested_runtime_robot_mode not in {
+    "tool",
+    "official_panda_gripper",
+    "generated_gripper",
+    "one_dof_gripper",
+    "cross_embodiment_gripper",
+}:
+    parser.error(
+        "record_failure_videos.py requires runtime_spec env_params.robot_mode "
+        "to be 'tool', 'official_panda_gripper', 'generated_gripper', "
+        "'one_dof_gripper', or 'cross_embodiment_gripper'"
+    )
+if args_cli.video_width is None:
+    args_cli.video_width = (
+        PANDA_GRIPPER_RECORD_RESOLUTION[0]
+        if requested_runtime_robot_mode == "official_panda_gripper"
+        else DEFAULT_TOOL_RECORD_RESOLUTION[0]
+    )
+if args_cli.video_height is None:
+    args_cli.video_height = (
+        PANDA_GRIPPER_RECORD_RESOLUTION[1]
+        if requested_runtime_robot_mode == "official_panda_gripper"
+        else DEFAULT_TOOL_RECORD_RESOLUTION[1]
+    )
+if args_cli.video_width <= 0:
+    parser.error("--video_width must be positive")
+if args_cli.video_height <= 0:
+    parser.error("--video_height must be positive")
 
 if args_cli.task is None:
     args_cli.task = runtime_spec.get("task_id")
@@ -229,6 +281,21 @@ checkpoint_arg = _resolve_checkpoint_arg(runtime_spec_path, args_cli.checkpoint)
 
 rank, world_size = _distributed_rank_info(args_cli.distributed)
 local_rank = int(os.environ.get("LOCAL_RANK", "0")) if args_cli.distributed else 0
+runtime_robot_mode = requested_runtime_robot_mode
+if requested_runtime_robot_mode == "cross_embodiment_gripper":
+    if not args_cli.distributed or world_size < 2 or world_size % 2 != 0:
+        parser.error(
+            "cross_embodiment_gripper recording requires --distributed with "
+            "an even world size >= 2; use record.bash, which defaults CE runs to 2 GPUs"
+        )
+    runtime_robot_mode = (
+        "generated_gripper" if rank < world_size // 2 else "one_dof_gripper"
+    )
+    print(
+        f"[record] cross_embodiment rank={rank}/{world_size} "
+        f"effective_robot_mode={runtime_robot_mode}",
+        flush=True,
+    )
 os.environ["TOOL_GENERALIST_GLOBAL_RANK"] = str(rank)
 os.environ["TOOL_GENERALIST_LOCAL_RANK"] = str(local_rank)
 os.environ["TOOL_GENERALIST_WORLD_SIZE"] = str(world_size)
@@ -249,7 +316,11 @@ eval_runtime_spec["paths_yaml"] = paths_yaml
 asset_assignment = eval_runtime_spec.get("asset_assignment_params")
 if not isinstance(asset_assignment, dict):
     parser.error("runtime_spec must contain asset_assignment_params")
-asset_assignment["randomize_tool_assignment"] = True
+asset_assignment["randomize_tool_assignment"] = runtime_robot_mode in {
+    "tool",
+    "generated_gripper",
+    "one_dof_gripper",
+}
 asset_assignment["randomize_object_assignment"] = True
 _backfill_runtime_spec_defaults(eval_runtime_spec)
 eval_runtime_spec_path = os.path.join(
@@ -264,6 +335,8 @@ with open(eval_runtime_spec_path, "w", encoding="utf-8") as f:
 os.environ[RUNTIME_SPEC_ENV_VAR] = eval_runtime_spec_path
 
 args_cli.enable_cameras = True
+if runtime_robot_mode == "official_panda_gripper":
+    args_cli.video = True
 sys.argv = [sys.argv[0]] + hydra_args
 
 app_launcher = AppLauncher(args_cli)
@@ -296,6 +369,8 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 import IsaacLab_nonPrehensile.tasks  # noqa: F401
 from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile import env_tool as env_tool_module
 from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.asset_assignment import (
+    GENERATED_GRIPPER_ASSIGNMENT_SALT,
+    ONE_DOF_GRIPPER_ASSIGNMENT_SALT,
     OBJECT_ASSIGNMENT_SALT,
     TOOL_ASSIGNMENT_SALT,
     asset_indices_for_rank,
@@ -303,7 +378,9 @@ from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.asset_ass
 from IsaacLab_nonPrehensile.tasks.manager_based.isaaclab_nonprehensile.env_tool import (
     OBJECT_ASSET_CFGS,
     TOOL_DATA,
+    get_generated_gripper_index_for_env,
     get_object_index_for_env,
+    get_one_dof_gripper_index_for_env,
     get_tool_index_for_env,
 )
 from scripts.video_diagnostics import (
@@ -314,6 +391,24 @@ from scripts.video_diagnostics import (
 
 
 def _tool_names_from_loaded_data() -> list[str]:
+    if runtime_robot_mode == "official_panda_gripper":
+        return ["official_panda_gripper"]
+    if runtime_robot_mode == "generated_gripper":
+        names = [
+            str(getattr(asset, "gripper_id", f"generated_gripper_{index:04d}"))
+            for index, asset in enumerate(env_tool_module.GENERATED_GRIPPER_DATA)
+        ]
+        if len(names) == 0:
+            raise ValueError("No generated grippers were loaded into GENERATED_GRIPPER_DATA.")
+        return names
+    if runtime_robot_mode == "one_dof_gripper":
+        names = [
+            str(getattr(asset, "gripper_id", f"one_dof_gripper_{index:04d}"))
+            for index, asset in enumerate(env_tool_module.ONE_DOF_GRIPPER_DATA)
+        ]
+        if len(names) == 0:
+            raise ValueError("No one-DoF grippers were loaded into ONE_DOF_GRIPPER_DATA.")
+        return names
     tool_names = [tool_data["name"] for tool_data in TOOL_DATA]
     if len(tool_names) == 0:
         raise ValueError("No tools were loaded into TOOL_DATA.")
@@ -341,21 +436,62 @@ def _apply_asset_assignment_seed(
     num_envs: int,
     env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg,
 ) -> tuple[list[int], list[int]]:
-    tool_indices = asset_indices_for_rank(
-        int(num_envs),
-        rank,
-        len(env_tool_module.TOOL_DATA),
-        randomize=True,
-        seed=int(seed),
-        salt=TOOL_ASSIGNMENT_SALT,
-    )
-    tool_usd_paths = [env_tool_module.TOOL_USD_PATHS[index] for index in tool_indices]
-    env_tool_module.TOOL_ASSET_INDICES_BY_ENV[:] = tool_indices
-    env_tool_module.TOOL_USD_PATHS_BY_ENV[:] = tool_usd_paths
-    env_tool_module.TOOL_SPAWN_ASSET_INDICES[:] = tool_indices
-    env_tool_module.TOOL_USD_PATHS_FOR_SPAWN[:] = tool_usd_paths
-    if hasattr(env_cfg.scene, "robot"):
-        env_cfg.scene.robot.spawn.usd_path = env_tool_module.TOOL_USD_PATHS_FOR_SPAWN
+    if runtime_robot_mode == "tool":
+        tool_indices = asset_indices_for_rank(
+            int(num_envs),
+            rank,
+            len(env_tool_module.TOOL_DATA),
+            randomize=True,
+            seed=int(seed),
+            salt=TOOL_ASSIGNMENT_SALT,
+        )
+        tool_usd_paths = [env_tool_module.TOOL_USD_PATHS[index] for index in tool_indices]
+        env_tool_module.TOOL_ASSET_INDICES_BY_ENV[:] = tool_indices
+        env_tool_module.TOOL_USD_PATHS_BY_ENV[:] = tool_usd_paths
+        env_tool_module.TOOL_SPAWN_ASSET_INDICES[:] = tool_indices
+        env_tool_module.TOOL_USD_PATHS_FOR_SPAWN[:] = tool_usd_paths
+        if hasattr(env_cfg.scene, "robot"):
+            env_cfg.scene.robot.spawn.usd_path = env_tool_module.TOOL_USD_PATHS_FOR_SPAWN
+    elif runtime_robot_mode == "generated_gripper":
+        tool_indices = asset_indices_for_rank(
+            int(num_envs),
+            rank,
+            len(env_tool_module.GENERATED_GRIPPER_DATA),
+            randomize=True,
+            seed=int(seed),
+            salt=GENERATED_GRIPPER_ASSIGNMENT_SALT,
+        )
+        gripper_usd_paths = [
+            env_tool_module.GENERATED_GRIPPER_USD_PATHS[index] for index in tool_indices
+        ]
+        env_tool_module.GENERATED_GRIPPER_ASSET_INDICES_BY_ENV[:] = tool_indices
+        env_tool_module.GENERATED_GRIPPER_USD_PATHS_BY_ENV[:] = gripper_usd_paths
+        env_tool_module.GENERATED_GRIPPER_SPAWN_ASSET_INDICES[:] = tool_indices
+        env_tool_module.GENERATED_GRIPPER_USD_PATHS_FOR_SPAWN[:] = gripper_usd_paths
+        if hasattr(env_cfg.scene, "robot"):
+            env_cfg.scene.robot.spawn.usd_path = env_tool_module.GENERATED_GRIPPER_USD_PATHS_FOR_SPAWN
+    elif runtime_robot_mode == "one_dof_gripper":
+        tool_indices = asset_indices_for_rank(
+            int(num_envs),
+            rank,
+            len(env_tool_module.ONE_DOF_GRIPPER_DATA),
+            randomize=True,
+            seed=int(seed),
+            salt=ONE_DOF_GRIPPER_ASSIGNMENT_SALT,
+        )
+        gripper_usd_paths = [
+            str(env_tool_module.ONE_DOF_GRIPPER_DATA[index].usd_path)
+            for index in tool_indices
+        ]
+        env_tool_module.ONE_DOF_GRIPPER_ASSET_INDICES_BY_ENV[:] = tool_indices
+        env_tool_module.ONE_DOF_GRIPPER_SPAWN_ASSET_INDICES[:] = tool_indices
+        env_tool_module.ONE_DOF_GRIPPER_USD_PATHS_FOR_SPAWN[:] = gripper_usd_paths
+        if hasattr(env_cfg.scene, "robot"):
+            env_cfg.scene.robot.spawn.usd_path = (
+                env_tool_module.ONE_DOF_GRIPPER_USD_PATHS_FOR_SPAWN
+            )
+    else:
+        tool_indices = [0 for _ in range(int(num_envs))]
 
     object_indices = asset_indices_for_rank(
         int(num_envs),
@@ -376,11 +512,18 @@ def _apply_asset_assignment_seed(
 
 
 def _make_record_camera_cfg() -> TiledCameraCfg:
+    if runtime_robot_mode == "official_panda_gripper":
+        camera_pos = PANDA_GRIPPER_RECORD_CAMERA_EYE
+        camera_rot = PANDA_GRIPPER_RECORD_CAMERA_ROT_ROS
+    else:
+        camera_pos = (1.25, 0.0, 0.85)
+        camera_rot = (-0.3337, 0.6234, 0.6234, -0.3337)
+
     return TiledCameraCfg(
         prim_path="{ENV_REGEX_NS}/EvalRecordCamera",
         offset=TiledCameraCfg.OffsetCfg(
-            pos=(1.25, 0.0, 0.85),
-            rot=(-0.3337, 0.6234, 0.6234, -0.3337),
+            pos=camera_pos,
+            rot=camera_rot,
             convention="ros",
         ),
         data_types=["rgb"],
@@ -393,6 +536,36 @@ def _make_record_camera_cfg() -> TiledCameraCfg:
         width=args_cli.video_width,
         height=args_cli.video_height,
     )
+
+
+def _disable_debug_pointcloud_rendering(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg) -> None:
+    for attr in (
+        "visualize_current_object_pose",
+        "visualize_object_pointcloud",
+        "visualize_tool_pointcloud",
+        "visualize_tool1_pointcloud",
+        "visualize_tool2_pointcloud",
+        "visualize_tool_head_area",
+        "visualize_head_area_center",
+        "visualize_eef_position",
+        "visualize_object_velocity_mass",
+        "visualize_tool_velocity_mass",
+    ):
+        if hasattr(env_cfg, attr):
+            setattr(env_cfg, attr, False)
+
+
+def _apply_panda_gripper_viewer_camera(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg) -> None:
+    if runtime_robot_mode != "official_panda_gripper":
+        return
+    viewer = getattr(env_cfg, "viewer", None)
+    if viewer is None:
+        return
+    viewer.eye = PANDA_GRIPPER_RECORD_CAMERA_EYE
+    viewer.lookat = PANDA_GRIPPER_RECORD_CAMERA_LOOKAT
+    viewer.resolution = (int(args_cli.video_width), int(args_cli.video_height))
+    viewer.origin_type = "env"
+    viewer.env_index = 0
 
 
 def _default_video_subdir() -> str:
@@ -432,34 +605,29 @@ def _start_ffmpeg_writer(path: str) -> subprocess.Popen:
 
 
 def _apply_recording_visual_overrides(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg) -> None:
-    """Improve contrast for recording without changing training configs."""
+    """Use a minimal deterministic scene for recording without changing physics."""
 
     scene = getattr(env_cfg, "scene", None)
     if scene is None:
         return
 
+    light = getattr(scene, "light", None)
+    light_spawn = getattr(light, "spawn", None)
+    if light_spawn is not None:
+        if hasattr(light_spawn, "color"):
+            light_spawn.color = (0.75, 0.75, 0.75)
+        if hasattr(light_spawn, "intensity"):
+            light_spawn.intensity = 1500.0
+
+    if hasattr(scene, "terrain") and getattr(scene, "terrain") is not None:
+        terrain = getattr(scene, "terrain")
+        if hasattr(terrain, "visual_material"):
+            terrain.visual_material = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.4, 0.4, 0.4))
+
     if hasattr(scene, "table") and getattr(scene, "table") is not None:
         table_spawn = getattr(scene.table, "spawn", None)
         if table_spawn is not None and hasattr(table_spawn, "visual_material"):
-            table_spawn.visual_material = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.10, 0.13, 0.15))
-
-    if hasattr(scene, "object") and getattr(scene, "object") is not None:
-        object_spawn = getattr(scene.object, "spawn", None)
-        assets_cfg = getattr(object_spawn, "assets_cfg", None)
-        if assets_cfg is not None:
-            for asset_cfg in assets_cfg:
-                if hasattr(asset_cfg, "visual_material"):
-                    asset_cfg.visual_material = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.05, 0.42, 0.95))
-
-    for robot_name, color in (
-        ("robot", (0.95, 0.80, 0.35)),
-        ("robot_1", (0.95, 0.78, 0.28)),
-        ("robot_2", (0.35, 0.90, 0.65)),
-    ):
-        robot = getattr(scene, robot_name, None)
-        spawn = getattr(robot, "spawn", None)
-        if spawn is not None and hasattr(spawn, "visual_material"):
-            spawn.visual_material = sim_utils.PreviewSurfaceCfg(diffuse_color=color)
+            table_spawn.visual_material = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.45, 0.45, 0.45))
 
 
 def _close_ffmpeg_writer(writer: subprocess.Popen) -> None:
@@ -502,6 +670,28 @@ def _outcome_quota_remaining(video_state: dict, episode_success: bool) -> bool:
 
 def _video_slots_used(video_state: dict) -> int:
     return len(video_state["active"]) + len(video_state["waiting"])
+
+
+def _output_gate_metrics_for_env(policy, env_id: int) -> dict | None:
+    gate = getattr(policy, "_last_actor_gate", None) if policy is not None else None
+    if gate is None:
+        return None
+    if int(gate.shape[0]) <= int(env_id):
+        return None
+    gate_row = gate[int(env_id)].detach().float().reshape(-1).cpu()
+    if gate_row.numel() == 0:
+        return None
+    expert_a = float(gate_row.mean().item())
+    expert_a_min = float(gate_row.min().item())
+    expert_a_max = float(gate_row.max().item())
+    expert_b = 1.0 - expert_a
+    return {
+        "output_gate_expert_a_weight": expert_a,
+        "output_gate_expert_b_weight": expert_b,
+        "output_gate_expert_a_min": expert_a_min,
+        "output_gate_expert_a_max": expert_a_max,
+        "output_gate_selected_expert": "model_a" if expert_a >= 0.5 else "model_b",
+    }
 
 
 def _make_episode_video_record(
@@ -607,8 +797,11 @@ def _activate_video_slots(
     return started_env_ids
 
 
-def _capture_video_frames(env, video_state: dict, env_ids: set[int] | None = None) -> None:
+def _capture_video_frames(env, video_state: dict, env_ids: set[int] | None = None, policy=None) -> None:
     if len(video_state["active"]) == 0:
+        return
+    if runtime_robot_mode == "official_panda_gripper":
+        _capture_viewport_video_frames(env, video_state, env_ids=env_ids, policy=policy)
         return
     env.unwrapped.sim.render()
     env.unwrapped.scene["eval_record_camera"].update(dt=0.0, force_recompute=True)
@@ -629,6 +822,47 @@ def _capture_video_frames(env, video_state: dict, env_ids: set[int] | None = Non
             env_id,
             runtime_spec.get("reward_params", {}),
         )
+        gate_metrics = _output_gate_metrics_for_env(policy, env_id)
+        if gate_metrics is not None:
+            metrics.update(gate_metrics)
+        step = video_state.get("current_step")
+        record["last_diag"] = format_recording_diagnostics(metrics, step=step)
+        frame = overlay_recording_diagnostics(frame, metrics, step=step)
+        writer.stdin.write(frame.tobytes())
+        record["frames"] = int(record["frames"]) + 1
+
+
+def _capture_viewport_video_frames(env, video_state: dict, env_ids: set[int] | None = None, policy=None) -> None:
+    base_env = env.unwrapped
+    camera_controller = getattr(base_env, "viewport_camera_controller", None)
+    if camera_controller is None:
+        raise RuntimeError(
+            "Official Panda gripper outcome recording requires the IsaacLab viewport camera controller. "
+            "Run with cameras/video enabled."
+        )
+    for record in list(video_state["active"].values()):
+        env_id = int(record["env_id"])
+        if env_ids is not None and env_id not in env_ids:
+            continue
+        writer = record.get("writer")
+        if writer is None:
+            continue
+
+        camera_controller.set_view_env_index(env_id)
+        camera_controller.update_view_to_env()
+        frame = base_env.render()
+        if frame is None:
+            raise RuntimeError("Official Panda gripper viewport recording expected env.render() to return RGB data.")
+        frame = frame[:, :, :3].copy()
+
+        metrics = recording_debug_metrics(
+            base_env,
+            env_id,
+            runtime_spec.get("reward_params", {}),
+        )
+        gate_metrics = _output_gate_metrics_for_env(policy, env_id)
+        if gate_metrics is not None:
+            metrics.update(gate_metrics)
         step = video_state.get("current_step")
         record["last_diag"] = format_recording_diagnostics(metrics, step=step)
         frame = overlay_recording_diagnostics(frame, metrics, step=step)
@@ -786,7 +1020,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if args_cli.video_dir is not None
         else os.path.join(runtime_spec_dir, _default_video_subdir())
     )
-    env_cfg.scene.eval_record_camera = _make_record_camera_cfg()
+    _apply_panda_gripper_viewer_camera(env_cfg)
+    _disable_debug_pointcloud_rendering(env_cfg)
+    if runtime_robot_mode in {"tool", "generated_gripper", "one_dof_gripper"}:
+        env_cfg.scene.eval_record_camera = _make_record_camera_cfg()
     if not args_cli.disable_recording_visual_overrides:
         _apply_recording_visual_overrides(env_cfg)
 
@@ -801,7 +1038,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     def _create_env_and_policy(cycle_index: int, cycle_seed: int):
         tool_indices, object_indices = _apply_asset_assignment_seed(cycle_seed, args_cli.num_envs, env_cfg)
-        env = gym.make(args_cli.task, cfg=env_cfg, render_mode=None)
+        render_mode = "rgb_array" if runtime_robot_mode == "official_panda_gripper" else None
+        env = gym.make(args_cli.task, cfg=env_cfg, render_mode=render_mode)
         if isinstance(env.unwrapped, DirectMARLEnv):
             env = multi_agent_to_single_agent(env)
 
@@ -815,24 +1053,44 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             flush=True,
         )
         ppo_runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-        ppo_runner.load(resume_path)
+        print(
+            f"[INFO][rank {rank}]: Inference runner initialized; loading policy weights "
+            "(optimizer state skipped).",
+            flush=True,
+        )
+        ppo_runner.load(resume_path, load_optimizer=False)
+        print(f"[INFO][rank {rank}]: Policy checkpoint loaded.", flush=True)
         inference_policy = ppo_runner.get_inference_policy(device=agent_cfg.device)
+        policy_module = ppo_runner.alg.policy
 
         if not hasattr(env.unwrapped, "episode_success_buf"):
             raise AttributeError("Environment does not have episode_success_buf.")
 
         num_envs = env.unwrapped.num_envs
-        env_to_tool_idx = torch.tensor(
-            [get_tool_index_for_env(env_id) for env_id in range(num_envs)],
-            dtype=torch.long,
-        )
+        if runtime_robot_mode == "tool":
+            env_to_tool_idx = torch.tensor(
+                [get_tool_index_for_env(env_id) for env_id in range(num_envs)],
+                dtype=torch.long,
+            )
+        elif runtime_robot_mode == "generated_gripper":
+            env_to_tool_idx = torch.tensor(
+                [get_generated_gripper_index_for_env(env_id) for env_id in range(num_envs)],
+                dtype=torch.long,
+            )
+        elif runtime_robot_mode == "one_dof_gripper":
+            env_to_tool_idx = torch.tensor(
+                [get_one_dof_gripper_index_for_env(env_id) for env_id in range(num_envs)],
+                dtype=torch.long,
+            )
+        else:
+            env_to_tool_idx = torch.zeros(num_envs, dtype=torch.long)
         env_to_object_idx = torch.tensor(
             [get_object_index_for_env(env_id) for env_id in range(num_envs)],
             dtype=torch.long,
         )
         obs, _ = env.get_observations()
         dt = env.unwrapped.step_dt if hasattr(env.unwrapped, "step_dt") else None
-        return env, inference_policy, obs, dt, env_to_tool_idx, env_to_object_idx, tool_indices, object_indices
+        return env, inference_policy, policy_module, obs, dt, env_to_tool_idx, env_to_object_idx, tool_indices, object_indices
 
     video_state = _init_video_state(video_dir)
     video_state_for_logging["failure_saved"] = int(video_state["failure_saved"])
@@ -851,6 +1109,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             (
                 env,
                 inference_policy,
+                policy_module,
                 obs,
                 dt,
                 env_to_tool_idx,
@@ -890,7 +1149,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     obs, _, dones, _ = env.step(actions)
                 cycle_steps += 1
 
-                _capture_video_frames(env, video_state)
+                _capture_video_frames(env, video_state, policy=policy_module)
 
                 ended = dones.bool()
                 if torch.any(ended):

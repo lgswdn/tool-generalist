@@ -1,0 +1,22 @@
+{
+  "schema_version": "gripper_cloud_cache_manifest_v1",
+  "num_bins": 128,
+  "num_points": 512,
+  "grippers": [
+    {
+      "id": "onrobot_rg2",
+      "path": "/mnt/home/zhengyixin/tool-generalist/configs/grippers/kinematic_cloud_cache/onrobot_rg2.pt",
+      "source_manifest": "/mnt/home/zhengyixin/tool-generalist/configs/grippers/onrobot_rg2.json"
+    },
+    {
+      "id": "robotiq_2f140",
+      "path": "/mnt/home/zhengyixin/tool-generalist/configs/grippers/kinematic_cloud_cache/robotiq_2f140.pt",
+      "source_manifest": "/mnt/home/zhengyixin/tool-generalist/configs/grippers/robotiq_2f140.json"
+    },
+    {
+      "id": "robotiq_3f",
+      "path": "/mnt/home/zhengyixin/tool-generalist/configs/grippers/kinematic_cloud_cache/robotiq_3f.pt",
+      "source_manifest": "/mnt/home/zhengyixin/tool-generalist/configs/grippers/robotiq_3f.json"
+    }
+  ]
+}

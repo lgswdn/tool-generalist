@@ -1,148 +1,196 @@
-"""Payload shaping helpers for config and artifact hashes."""
+"""Small semantic payloads for artifact hashes."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from configs.config_contact_gen import strip_contact_gen_hash_defaults
 from configs.config_exp import ExpCfg
 from utils.io import to_plain_data
+from utils.geometry.gripper_cloud_contract import CACHE_SCHEMA_VERSION
 
 
 CONTACT_ARTIFACT_GENERAL_NAME = "fork_sdf"
-_PRETRAIN_LOGGING_FIELDS = (
+
+_CONTACT_RUNTIME_FIELDS = {
+    "enabled",
+    "regenerate",
+    "skip_existing",
+    "shard_count",
+    "shard_index",
+    "artifact_subdir",
+    "visualization",
+}
+_PRETRAIN_RUNTIME_FIELDS = {
+    "enabled",
+    "retrain",
+    "device",
     "logger",
     "wandb_project",
     "wandb_run_name",
     "wandb_entity",
     "wandb_mode",
-)
+}
+_RL_RUNTIME_FIELDS = {
+    "encoder_checkpoint",
+    "init_checkpoint",
+    "resume_checkpoint",
+    "launch",
+}
 
 
-def location_stable_general_payload(cfg: ExpCfg) -> dict:
-    payload = to_plain_data(cfg.general)
-    payload["artifact_root"] = "artifacts"
+def experiment_payload(cfg: ExpCfg) -> dict[str, Any]:
+    return {
+        "paths_yaml": cfg.paths_yaml,
+        "general": general_payload(cfg),
+        "contact_gen": contact_payload(cfg.contact_gen),
+        "pretrain": pretrain_payload(cfg.pretrain),
+        "model": model_payload(cfg),
+        "rl": rl_payload(cfg.rl),
+    }
+
+
+def contact_general_payload(cfg: ExpCfg) -> dict[str, Any]:
+    general = to_plain_data(cfg.general)
+    payload = {
+        "seed": general.get("seed"),
+        "paths_yaml": cfg.paths_yaml,
+        "tools_selected_json": general.get("tools_selected_json"),
+        "tools_manifest": general.get("tools_manifest"),
+        "objects_manifest": (
+            general.get("contact_objects_manifest")
+            or general.get("objects_manifest")
+            or general.get("rl_objects_manifest")
+        ),
+        "tool_mount": general.get("tool_mount"),
+    }
+    _add_gripper_cloud_contract(payload, general, cfg)
     return payload
 
 
-def contact_stable_general_payload(cfg: ExpCfg) -> dict:
-    payload = location_stable_general_payload(cfg)
-    payload["name"] = CONTACT_ARTIFACT_GENERAL_NAME
+def general_payload(cfg: ExpCfg) -> dict[str, Any]:
+    general = to_plain_data(cfg.general)
+    payload = {
+        "seed": general.get("seed"),
+        "num_points": general.get("num_points"),
+        "paths_yaml": cfg.paths_yaml,
+        "tools_selected_json": general.get("tools_selected_json"),
+        "tools_manifest": general.get("tools_manifest"),
+        "rl_objects_manifest": (
+            general.get("rl_objects_manifest")
+            or general.get("objects_manifest")
+            or general.get("contact_objects_manifest")
+        ),
+        "contact_objects_manifest": (
+            general.get("contact_objects_manifest")
+            or general.get("objects_manifest")
+            or general.get("rl_objects_manifest")
+        ),
+        "randomize_tool_assignment": general.get("randomize_tool_assignment"),
+        "randomize_object_assignment": general.get("randomize_object_assignment"),
+        "dtype": general.get("dtype"),
+        "tool_mount": general.get("tool_mount"),
+    }
+    _add_gripper_cloud_contract(payload, general, cfg)
     return payload
 
 
-def location_stable_exp_payload(cfg: ExpCfg) -> dict:
-    payload = to_plain_data(cfg)
-    payload.pop("pretrain_reuse", None)
-    if isinstance(payload.get("general"), dict):
-        payload["general"]["artifact_root"] = "artifacts"
-    if isinstance(payload.get("pretrain"), dict):
-        payload["pretrain"] = strip_pretrain_logging_fields(payload["pretrain"])
-    if isinstance(payload.get("contact_gen"), dict):
-        payload["contact_gen"]["enabled"] = True
-        payload["contact_gen"] = strip_contact_gen_hash_defaults(payload["contact_gen"])
+def pretrain_namespace(cfg: ExpCfg) -> str:
+    key = (str(cfg.pretrain.name), str(cfg.model.name))
+    generated_gripper_namespaces = {
+        ("diff_post_generated_gripper", "generated_gripper_diff_post"): "generated_gripper_diff_post_pretrain",
+        ("post_generated_gripper", "generated_gripper_post"): "generated_gripper_post_pretrain",
+        ("unicorn_contact_generated_gripper", "unicorn_contact_generated_gripper"): "unicorn_pretrain_generated_gripper",
+        ("unicorn_contact_ours_generated_gripper", "unicorn_contact_ours_generated_gripper"): "unicorn_pretrain_ours_generated_gripper",
+        (
+            "oracle_pointmesh_pointnet_contact_generated_gripper",
+            "oracle_pointmesh_pointnet",
+        ): "oracle_pointmesh_pointnet_pretrain_generated_gripper",
+    }
+    return generated_gripper_namespaces.get(key, str(cfg.general.name))
+
+
+def pretrain_general_payload(cfg: ExpCfg) -> dict[str, Any]:
+    general = to_plain_data(cfg.general)
+    payload = {
+        "seed": general.get("seed"),
+        "num_points": general.get("num_points"),
+        "paths_yaml": cfg.paths_yaml,
+        "tools_selected_json": general.get("tools_selected_json"),
+        "tools_manifest": general.get("tools_manifest"),
+        "contact_objects_manifest": (
+            general.get("contact_objects_manifest")
+            or general.get("objects_manifest")
+            or general.get("rl_objects_manifest")
+        ),
+        "randomize_tool_assignment": general.get("randomize_tool_assignment"),
+        "randomize_object_assignment": general.get("randomize_object_assignment"),
+        "dtype": general.get("dtype"),
+        "tool_mount": general.get("tool_mount"),
+    }
+    _add_gripper_cloud_contract(payload, general, cfg)
     return payload
 
 
-def pretrain_stable_payload(cfg: ExpCfg) -> dict:
-    return strip_pretrain_logging_fields(to_plain_data(cfg.pretrain))
+def _add_gripper_cloud_contract(
+    payload: dict[str, Any],
+    general: dict[str, Any],
+    cfg: ExpCfg,
+) -> None:
+    paths = " ".join(
+        str(general.get(key) or "")
+        for key in ("tools_selected_json", "tools_manifest")
+    )
+    if (
+        cfg.rl.env.robot_mode
+        in {
+            "generated_gripper",
+            "one_dof_gripper",
+            "cross_embodiment_gripper",
+        }
+        or "generated_gripper" in paths
+    ):
+        payload["gripper_cloud_schema"] = CACHE_SCHEMA_VERSION
 
 
-def contact_hash_payload(contact_cfg: Any) -> dict:
-    payload = to_plain_data(contact_cfg)
-    payload["enabled"] = True
-    return strip_contact_gen_hash_defaults(payload)
+def pretrain_artifact_payload(cfg: ExpCfg) -> dict[str, Any]:
+    return {
+        "general": pretrain_general_payload(cfg),
+        "contact_gen": contact_payload(cfg.contact_gen),
+        "pretrain": pretrain_payload(cfg.pretrain),
+        "model": model_payload(cfg),
+    }
 
 
-def pretrain_model_hash_payload(cfg: ExpCfg) -> dict:
-    model = to_plain_data(cfg.model)
-    strip_inactive_encoder_backend_defaults(model)
-    policy_fusion = dict(model.get("policy_fusion") or {})
-    if policy_fusion:
-        policy_fusion["query_dim"] = 128
-        model["policy_fusion"] = policy_fusion
-    return model
-
-
-def planner_exp_hash_payload(cfg: ExpCfg) -> dict[str, Any]:
-    payload = to_plain_data(cfg)
-    payload.pop("pretrain_reuse", None)
-    if isinstance(payload.get("contact_gen"), dict):
-        payload["contact_gen"] = strip_contact_gen_hash_defaults(payload["contact_gen"])
-    return payload
-
-
-def semantic_exp_payload(cfg: ExpCfg) -> dict:
-    payload = to_plain_data(cfg)
-    payload.pop("pretrain_reuse", None)
-    payload.pop("num_gpus", None)
-    normalize_artifact_root(payload)
-    if "contact_gen" in payload:
-        payload["contact_gen"] = strip_contact_runtime_fields(payload["contact_gen"])
-    if "pretrain" in payload:
-        payload["pretrain"] = strip_pretrain_runtime_fields(payload["pretrain"])
-    return payload
-
-
-def normalize_artifact_root(payload: dict) -> None:
-    general = payload.get("general")
-    if isinstance(general, dict):
-        general["artifact_root"] = "artifacts"
-
-
-def semantic_contact_general_payload(cfg: ExpCfg) -> dict:
-    return contact_stable_general_payload(cfg)
-
-
-def semantic_contact_gen_payload(contact_cfg: Any) -> dict:
-    return strip_contact_runtime_fields(to_plain_data(contact_cfg))
-
-
-def semantic_pretrain_payload(pretrain_cfg: Any) -> dict:
-    return strip_pretrain_runtime_fields(to_plain_data(pretrain_cfg))
-
-
-def semantic_pretrain_model_payload(cfg: ExpCfg) -> dict:
-    return pretrain_model_hash_payload(cfg)
-
-
-def strip_contact_runtime_fields(payload: dict) -> dict:
-    cleaned = dict(payload)
-    cleaned["enabled"] = True
-    physics = dict(cleaned.get("physics") or {})
+def contact_payload(contact_cfg: Any) -> dict[str, Any]:
+    payload = _drop_keys(to_plain_data(contact_cfg), _CONTACT_RUNTIME_FIELDS)
+    payload.pop("name", None)
+    if not payload.get("rejection_apply_tangent_gaussian", False):
+        payload.pop("rejection_apply_tangent_gaussian", None)
+    # Preserve hashes for legacy one-directional contact artifacts. The field
+    # is retained when bidirectional rejection is explicitly requested.
+    if payload.get("penetration_check_mode") == "tool_into_object":
+        payload.pop("penetration_check_mode", None)
+    physics = dict(payload.get("physics") or {})
     physics.pop("num_workers", None)
-    cleaned["physics"] = physics
-    return strip_contact_gen_hash_defaults(cleaned)
+    payload["physics"] = physics
+    return payload
 
 
-def strip_pretrain_runtime_fields(payload: dict) -> dict:
-    cleaned = dict(payload)
-    batch = dict(cleaned.get("batch") or {})
+def pretrain_payload(pretrain_cfg: Any) -> dict[str, Any]:
+    payload = _drop_keys(to_plain_data(pretrain_cfg), _PRETRAIN_RUNTIME_FIELDS)
+    payload.pop("name", None)
+    batch = dict(payload.get("batch") or {})
     batch.pop("num_workers", None)
-    cleaned["batch"] = batch
-    if isinstance(cleaned.get("loss"), dict):
-        cleaned["loss"] = dict(cleaned["loss"])
-    for key in _PRETRAIN_LOGGING_FIELDS:
-        cleaned.pop(key, None)
-    strip_inactive_unicorn_pretrain_defaults(cleaned)
-    strip_default_sdf_relative_loss(cleaned)
-    strip_default_condition_normalization(cleaned)
-    return cleaned
+    payload["batch"] = batch
+    checkpoint_policy = dict(payload.get("checkpoint_policy") or {})
+    checkpoint_policy.pop("resume_checkpoint", None)
+    payload["checkpoint_policy"] = checkpoint_policy
+    return payload
 
 
-def strip_pretrain_logging_fields(payload: dict) -> dict:
-    cleaned = dict(payload)
-    if isinstance(cleaned.get("loss"), dict):
-        cleaned["loss"] = dict(cleaned["loss"])
-    for key in _PRETRAIN_LOGGING_FIELDS:
-        cleaned.pop(key, None)
-    strip_inactive_unicorn_pretrain_defaults(cleaned)
-    strip_default_sdf_relative_loss(cleaned)
-    strip_default_condition_normalization(cleaned)
-    return cleaned
-
-
-def strip_inactive_encoder_backend_defaults(model: dict) -> None:
+def model_payload(cfg: ExpCfg) -> dict[str, Any]:
+    model = to_plain_data(cfg.model)
+    model.pop("name", None)
     backend = str(model.get("encoder_backend", "tce")).strip().lower()
     if backend in {"tg"}:
         backend = "tce"
@@ -150,41 +198,57 @@ def strip_inactive_encoder_backend_defaults(model: dict) -> None:
         backend = "point2vec"
     if backend in {"corn"}:
         backend = "icp"
-    if backend != "icp":
-        model.pop("icp", None)
-    if backend != "unicorn":
-        model.pop("unicorn", None)
+    for key, key_backend in (
+        ("tce", "tce"),
+        ("p2v", "point2vec"),
+        ("icp", "icp"),
+        ("unicorn", "unicorn"),
+        ("patch_distance_pointnet", "patch_distance_pointnet"),
+        ("oracle_pointmesh_pointnet", "oracle_pointmesh_pointnet"),
+        ("oracle_pointcloud_pointnet", "oracle_pointcloud_pointnet"),
+        ("oracle_pointcloud_patch_oracle", "oracle_pointcloud_patch_oracle"),
+    ):
+        if backend != key_backend:
+            model.pop(key, None)
+        elif isinstance(model.get(key), dict):
+            model[key].pop("name", None)
+            if key == "tce":
+                kinematic = dict(
+                    model[key].get("kinematic_conditioning") or {}
+                )
+                if not kinematic.get("enabled", False):
+                    model[key].pop("kinematic_conditioning", None)
+    pretrained = dict(model.get("pretrained_encoder") or {})
+    pretrained.pop("name", None)
+    pretrained.pop("checkpoint_path", None)
+    model["pretrained_encoder"] = pretrained
+    return model
 
 
-def strip_inactive_unicorn_pretrain_defaults(pretrain: dict) -> None:
-    if pretrain.get("mode") == "unicorn_contact":
-        return
-    pretrain.pop("mode", None)
-    pretrain.pop("device", None)
-    pretrain.pop("unicorn", None)
-    optimizer = pretrain.get("optimizer")
-    if isinstance(optimizer, dict):
-        optimizer.pop("sam_rho", None)
-    tasks = pretrain.get("tasks")
-    if isinstance(tasks, dict):
-        tasks.pop("contact", None)
+def rl_payload(rl_cfg: Any) -> dict[str, Any]:
+    payload = _drop_keys(to_plain_data(rl_cfg), _RL_RUNTIME_FIELDS)
+    payload.pop("name", None)
+    if payload.get("actor_critic_class") != "ActorCriticTGHAMNet":
+        payload.pop("hamnet_num_modules", None)
+        payload.pop("hamnet_hidden_dims", None)
+        payload.pop("hamnet_router_hidden_dims", None)
+    env = dict(payload.get("env") or {})
+    env.pop("num_envs", None)
+    env.pop("visualize_tool_pointcloud", None)
+    if env.get("generated_parallel_finger_velocity_limit_m_s") == 0.05:
+        env.pop("generated_parallel_finger_velocity_limit_m_s")
+    payload["env"] = env
+    ppo = dict(payload.get("ppo") or {})
+    ppo.pop("save_interval", None)
+    payload["ppo"] = ppo
+    observation = dict(payload.get("observation") or {})
+    if not observation.get("include_kinematic_gripper_clouds", False):
+        observation.pop("include_kinematic_gripper_clouds", None)
+    if observation.get("point_cloud_noise_enabled", True):
+        observation.pop("point_cloud_noise_enabled", None)
+    payload["observation"] = observation
+    return payload
 
 
-def strip_default_sdf_relative_loss(pretrain: dict) -> None:
-    loss = pretrain.get("loss")
-    if not isinstance(loss, dict):
-        return
-    if bool(loss.get("sdf_relative_loss", False)):
-        return
-    if float(loss.get("sdf_relative_eps", 0.005)) != 0.005:
-        return
-    loss.pop("sdf_relative_loss", None)
-    loss.pop("sdf_relative_eps", None)
-
-
-def strip_default_condition_normalization(pretrain: dict) -> None:
-    if pretrain.get("condition_normalization") is not None:
-        return
-    pretrain.pop("condition_normalization", None)
-    pretrain.pop("condition_norm_sample_files", None)
-    pretrain.pop("condition_norm_eps", None)
+def _drop_keys(payload: dict[str, Any], keys: set[str]) -> dict[str, Any]:
+    return {key: value for key, value in payload.items() if key not in keys}

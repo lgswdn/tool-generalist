@@ -60,12 +60,78 @@ class TGActorCriticCfg:
 
     num_points: int = int(_policy("num_points"))
     point_dim: int = int(_policy("point_dim"))
+    encoder_backend: str = str(_policy("encoder_backend", "tce"))
+    num_patches: int = int(_policy("num_patches", 16))
     patch_size: int = int(_policy("patch_size", 32))
     encoder_channel: int = int(_policy("encoder_channel", 128))
     vit_depth: int = int(_policy("vit_depth", 12))
     vit_heads: int = int(_policy("vit_heads", 4))
+    vit_attention_mode: str = str(_policy("vit_attention_mode", "joint_self"))
+    kinematic_conditioning: bool = bool(_policy("kinematic_conditioning", False))
+    kinematic_attention_layers: int = int(
+        _policy("kinematic_attention_layers", 1)
+    )
+    oracle_contact_eps: float = float(_policy("oracle_contact_eps", 0.002))
+    oracle_center_scale_m: float = float(_policy("oracle_center_scale_m", 0.30))
+    oracle_distance_scale_m: float = float(_policy("oracle_distance_scale_m", 0.10))
+    oracle_patch_relative_scale_m: float = float(
+        _policy("oracle_patch_relative_scale_m", 0.05)
+    )
+    oracle_log_distance_resolution_m: float = float(
+        _policy("oracle_log_distance_resolution_m", 0.005)
+    )
+    oracle_log_distance_cap_m: float = float(
+        _policy("oracle_log_distance_cap_m", 0.05)
+    )
+    oracle_normalization_clip: float = float(
+        _policy("oracle_normalization_clip", 5.0)
+    )
+    oracle_pointmesh_coordinate_scale_m: float = float(
+        _policy("oracle_pointmesh_coordinate_scale_m", 0.30)
+    )
+    oracle_pointmesh_distance_scale_m: float = float(
+        _policy("oracle_pointmesh_distance_scale_m", 0.10)
+    )
+    oracle_pointmesh_normalization_clip: float = float(
+        _policy("oracle_pointmesh_normalization_clip", 5.0)
+    )
+    oracle_pointcloud_nearest_frame_batch_size: int = int(
+        _policy("oracle_pointcloud_nearest_frame_batch_size", 64)
+    )
+    oracle_pointcloud_feature_mode: str = str(
+        _policy("oracle_pointcloud_feature_mode", "fast11")
+    )
+    oracle_pointcloud_load_fitted_weights: bool = bool(
+        _policy("oracle_pointcloud_load_fitted_weights", True)
+    )
+    oracle_pointcloud_use_rank10_bottleneck: bool = bool(
+        _policy("oracle_pointcloud_use_rank10_bottleneck", True)
+    )
+    oracle_pointcloud_token_mode: str = str(
+        _policy("oracle_pointcloud_token_mode", "patches")
+    )
+    oracle_pointcloud_input_normalization: str = str(
+        _policy("oracle_pointcloud_input_normalization", "identity")
+    )
+    oracle_pointcloud_checkpoint_adapter: str = str(
+        _policy(
+            "oracle_pointcloud_checkpoint_adapter",
+            "oracle_pointcloud_pointnet_strict",
+        )
+    )
+    unicorn_token_source: str = str(_policy("unicorn_token_source", "encoder"))
+    encoder_token_pca_rank: int = int(
+        _policy("encoder_token_pca_rank", encoder_channel)
+    )
+    encoder_token_pca_path: str | None = _policy("encoder_token_pca_path")
+    encoder_token_bottleneck_rank: int = int(
+        _policy("encoder_token_bottleneck_rank", encoder_channel)
+    )
+    encoder_token_bottleneck_pca_path: str | None = _policy(
+        "encoder_token_bottleneck_pca_path"
+    )
 
-    encoder_weights_path: str = str(_policy("encoder_weights_path"))
+    encoder_weights_path: str | None = _policy("encoder_weights_path")
     freeze_encoder: bool = bool(_policy("freeze_encoder"))
     separate_actor_critic_fusion: bool = bool(_policy("separate_actor_critic_fusion", False))
 
@@ -91,6 +157,7 @@ class TGActorCriticCfg:
     previous_action_dim: int = int(_policy("previous_action_dim"))
     relative_goal_dim: int = int(_policy("relative_goal_dim"))
     object_velocity_dim: int = int(_policy("object_velocity_dim", 0))
+    task_embedding_dim: int = int(_policy("task_embedding_dim", 0))
     physics_dim: int = int(_policy("physics_dim"))
     model_input_centering: str = str(_policy("model_input_centering", "bbox_center"))
 
@@ -101,6 +168,51 @@ class TGActorCriticCfg:
     activation: str = str(_policy("activation", "elu"))
     init_noise_std: float = float(_policy("init_noise_std", 1.0))
     noise_std_type: str = str(_policy("noise_std_type", "scalar"))
+
+
+@configclass
+class TGSMActorCriticCfg(TGActorCriticCfg):
+    """Soft-Module TCE policy config sourced from rl_runtime_spec.json."""
+
+    class_name: str = "ActorCriticTGSM"
+
+    task_embedding_dim: int = int(_policy("task_embedding_dim", 2))
+    sm_num_layers: int = int(_policy("sm_num_layers", 2))
+    sm_num_modules: int = int(_policy("sm_num_modules", 4))
+    sm_module_hidden: int = int(_policy("sm_module_hidden", 128))
+    sm_gating_hidden: int = int(_policy("sm_gating_hidden", 128))
+    sm_num_gating_layers: int = int(_policy("sm_num_gating_layers", 1))
+    sm_cond_ob: bool = bool(_policy("sm_cond_ob", True))
+    sm_add_bn: bool = bool(_policy("sm_add_bn", False))
+
+
+@configclass
+class TGHAMNetActorCriticCfg(TGActorCriticCfg):
+    """HAMNet modular-hypernetwork policy using the existing TCE encoder."""
+
+    class_name: str = "ActorCriticTGHAMNet"
+
+    hamnet_num_modules: int = int(_policy("hamnet_num_modules", 4))
+    hamnet_hidden_dims: list[int] = list(
+        _policy("hamnet_hidden_dims", [256, 128, 128, 64])
+    )
+    hamnet_router_hidden_dims: list[int] = list(
+        _policy("hamnet_router_hidden_dims", [256, 256])
+    )
+
+
+@configclass
+class TGOutputGateActorCriticCfg(TGActorCriticCfg):
+    """Two-expert output-gated TCE policy config sourced from rl_runtime_spec.json."""
+
+    class_name: str = "ActorCriticTGOutputGate"
+
+    expert_a_checkpoint: str = str(_policy("expert_a_checkpoint"))
+    expert_b_checkpoint: str = str(_policy("expert_b_checkpoint"))
+    output_gate_freeze_experts: bool = bool(_policy("output_gate_freeze_experts", True))
+    output_gate_hidden_dims: list[int] = list(_policy("output_gate_hidden_dims", [64]))
+    output_gate_initial_expert_a_weight: float = float(_policy("output_gate_initial_expert_a_weight", 0.8))
+    output_gate_per_action: bool = bool(_policy("output_gate_per_action", False))
 
 
 @configclass
@@ -115,7 +227,6 @@ class TGUnicornActorCriticCfg(TGActorCriticCfg):
     """Single-arm UniCORN policy config sourced from rl_runtime_spec.json."""
 
     class_name: str = "ActorCriticTGUnicorn"
-    num_patches: int = int(_policy("num_patches", 16))
 
 
 @configclass
@@ -195,6 +306,12 @@ class ICPActorCriticCfg:
 def _policy_cfg():
     if _POLICY_CLASS_NAME == "ActorCriticTG":
         return TGActorCriticCfg()
+    if _POLICY_CLASS_NAME == "ActorCriticTGOutputGate":
+        return TGOutputGateActorCriticCfg()
+    if _POLICY_CLASS_NAME == "ActorCriticTGSM":
+        return TGSMActorCriticCfg()
+    if _POLICY_CLASS_NAME == "ActorCriticTGHAMNet":
+        return TGHAMNetActorCriticCfg()
     if _POLICY_CLASS_NAME == "ActorCriticTGUnicorn":
         return TGUnicornActorCriticCfg()
     if _POLICY_CLASS_NAME == "ActorCriticTGBimanual":
@@ -226,6 +343,7 @@ class TGPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         or experiment_name
     )
     empirical_normalization = False
+    wandb_upload_files = bool(_launch_params.get("wandb_upload_files", False))
     policy = _policy_cfg()
 
     algorithm = RslRlPpoAlgorithmCfg(
